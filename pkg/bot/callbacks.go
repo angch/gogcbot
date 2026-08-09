@@ -141,7 +141,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		histMsg := tgbotapi.NewMessage(cb.Message.Chat.ID, sb.String())
 		histMsg.ReplyToMessageID = cb.Message.MessageID
 		histMsg.ParseMode = tgbotapi.ModeMarkdown
-		b.api.Send(histMsg)
+		b.Send(histMsg)
 
 	case "dismiss":
 		_ = b.db.ResolveFlaggedPost(flagID, "dismissed", modUser.ID)
@@ -153,7 +153,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 func (b *Bot) answerCallback(callbackID string, text string, showAlert bool) {
 	cbConfig := tgbotapi.NewCallback(callbackID, text)
 	cbConfig.ShowAlert = showAlert
-	b.api.Request(cbConfig)
+	b.Request(cbConfig)
 }
 
 func (b *Bot) updateModCardText(modMsg *tgbotapi.Message, flag *db.FlaggedPost, user *db.User, statusLabel string, modIdentifier string, detail string) {
@@ -172,5 +172,5 @@ func (b *Bot) updateModCardText(modMsg *tgbotapi.Message, flag *db.FlaggedPost, 
 	editMsg := tgbotapi.NewEditMessageText(modMsg.Chat.ID, modMsg.MessageID, updatedText)
 	// Remove keyboard once resolved
 	editMsg.ReplyMarkup = nil
-	b.api.Send(editMsg)
+	b.Send(editMsg)
 }

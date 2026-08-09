@@ -416,7 +416,7 @@ func (b *Bot) IsUserAdminInChat(chatID int64, userID int64) bool {
 	if chatID == 0 || userID == 0 {
 		return false
 	}
-	cm, err := b.api.GetChatMember(tgbotapi.GetChatMemberConfig{
+	cm, err := b.GetChatMember(tgbotapi.GetChatMemberConfig{
 		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
 			ChatID: chatID,
 			UserID: userID,
@@ -432,9 +432,9 @@ func (b *Bot) replyText(msg *tgbotapi.Message, text string) {
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
 	reply.ReplyToMessageID = msg.MessageID
 	reply.ParseMode = tgbotapi.ModeMarkdown
-	if _, err := b.api.Send(reply); err != nil {
+	if _, err := b.Send(reply); err != nil {
 		reply.ParseMode = ""
-		b.api.Send(reply)
+		b.Send(reply)
 	}
 }
 

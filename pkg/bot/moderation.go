@@ -20,7 +20,7 @@ type BotPermissions struct {
 }
 
 func (b *Bot) CheckBotPermissions(chatID int64) (*BotPermissions, error) {
-	cm, err := b.api.GetChatMember(tgbotapi.GetChatMemberConfig{
+	cm, err := b.GetChatMember(tgbotapi.GetChatMemberConfig{
 		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
 			ChatID: chatID,
 			UserID: b.botUser.ID,
@@ -99,11 +99,11 @@ func (b *Bot) SendModAlert(flag *db.FlaggedPost, msg *db.Message, user *db.User,
 	msgConfig.ParseMode = tgbotapi.ModeMarkdown
 	msgConfig.ReplyMarkup = keyboard
 
-	sentMsg, err := b.api.Send(msgConfig)
+	sentMsg, err := b.Send(msgConfig)
 	if err != nil {
 		// Fallback without markdown formatting if markdown parsing fails
 		msgConfig.ParseMode = ""
-		sentMsg, err = b.api.Send(msgConfig)
+		sentMsg, err = b.Send(msgConfig)
 		if err != nil {
 			return fmt.Errorf("failed to send mod alert: %w", err)
 		}
@@ -115,7 +115,7 @@ func (b *Bot) SendModAlert(flag *db.FlaggedPost, msg *db.Message, user *db.User,
 
 func (b *Bot) DeleteGroupMessage(chatID int64, messageID int) error {
 	deleteMsgConfig := tgbotapi.NewDeleteMessage(chatID, messageID)
-	_, err := b.api.Request(deleteMsgConfig)
+	_, err := b.Request(deleteMsgConfig)
 	return err
 }
 
@@ -137,7 +137,7 @@ func (b *Bot) MuteUserInGroup(chatID int64, userID int64, duration time.Duration
 		},
 	}
 
-	_, err := b.api.Request(restrictConfig)
+	_, err := b.Request(restrictConfig)
 	return err
 }
 
@@ -150,7 +150,7 @@ func (b *Bot) BanUserInGroup(chatID int64, userID int64) error {
 		RevokeMessages: true,
 	}
 
-	_, err := b.api.Request(banConfig)
+	_, err := b.Request(banConfig)
 	return err
 }
 
@@ -176,7 +176,7 @@ func (b *Bot) UnbanUserInGroup(chatID int64, userID int64) error {
 		OnlyIfBanned: true,
 	}
 
-	_, err := b.api.Request(unbanConfig)
+	_, err := b.Request(unbanConfig)
 	if err == nil {
 		_ = b.db.SetUserBanned(userID, false)
 	}

@@ -36,6 +36,11 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 		return nil, fmt.Errorf("failed to create telegram bot API: %w", err)
 	}
 
+	// Enable debug mode for tgbotapi to log raw HTTP Telegram API calls & responses
+	if cfg.LogLevel == "debug" || cfg.LogLevel == "" {
+		api.Debug = true
+	}
+
 	log.Printf("[Bot] Authorized on account %s (ID: %d)", api.Self.UserName, api.Self.ID)
 
 	// If super admin ID is not set in config, attempt fallback to bot user ID or log warning
@@ -56,6 +61,42 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 	}
 
 	return b, nil
+}
+
+// Send wraps b.api.Send to echo all outgoing Telegram API message calls to standard logs for debugging.
+func (b *Bot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+	log.Printf("[Telegram API Call] Send -> Payload: %#v", c)
+	msg, err := b.api.Send(c)
+	if err != nil {
+		log.Printf("[Telegram API Error] Send failed: %v", err)
+	} else {
+		log.Printf("[Telegram API Response] Send success -> MessageID: %d in ChatID: %d", msg.MessageID, msg.Chat.ID)
+	}
+	return msg, err
+}
+
+// Request wraps b.api.Request to echo all outgoing Telegram API request calls to standard logs for debugging.
+func (b *Bot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+	log.Printf("[Telegram API Call] Request -> Payload: %#v", c)
+	resp, err := b.api.Request(c)
+	if err != nil {
+		log.Printf("[Telegram API Error] Request failed: %v", err)
+	} else if resp != nil {
+		log.Printf("[Telegram API Response] Request success -> Ok: %t, Description: %s", resp.Ok, resp.Description)
+	}
+	return resp, err
+}
+
+// GetChatMember wraps b.api.GetChatMember to echo chat member query calls to standard logs for debugging.
+func (b *Bot) GetChatMember(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+	log.Printf("[Telegram API Call] GetChatMember -> ChatID: %d | UserID: %d", config.ChatID, config.UserID)
+	cm, err := b.api.GetChatMember(config)
+	if err != nil {
+		log.Printf("[Telegram API Error] GetChatMember failed: %v", err)
+	} else {
+		log.Printf("[Telegram API Response] GetChatMember success -> UserID: %d, Status: %s", cm.User.ID, cm.Status)
+	}
+	return cm, err
 }
 
 func (b *Bot) SetCfgPath(path string) {
