@@ -1,0 +1,18 @@
+# Binaries
+gogcbot
+gogcbot.exe
+*.exe
+
+# Databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local Config
+config.yaml
+test_config.yaml
+
+# Temporary & Editor files
+*~
+dev.sh
