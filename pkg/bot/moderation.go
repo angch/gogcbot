@@ -151,20 +151,42 @@ func (b *Bot) BanUserInGroup(chatID int64, userID int64) error {
 	}
 
 	_, err := b.Request(banConfig)
-	return err
+	if err != nil {
+		return fmt.Errorf("telegram ban error: %w", err)
+	}
+	return nil
 }
 
-func (b *Bot) BanUserAcrossAllGroups(userID int64) error {
+func (b *Bot) BanUserAcrossAllGroups(userID int64, currentChatID ...int64) error {
+	var errs []string
+
+	chatIDs := make(map[int64]bool)
+	for _, cid := range currentChatID {
+		if cid != 0 {
+			chatIDs[cid] = true
+		}
+	}
+
 	groups, err := b.db.GetMonitoredGroups()
-	if err != nil {
-		return err
+	if err == nil {
+		for _, g := range groups {
+			chatIDs[g.ChatID] = true
+		}
 	}
 
-	for _, g := range groups {
-		_ = b.BanUserInGroup(g.ChatID, userID)
+	for cid := range chatIDs {
+		if err := b.BanUserInGroup(cid, userID); err != nil {
+			log.Printf("[Bot] Failed to ban user %d in chat %d: %v", userID, cid, err)
+			errs = append(errs, fmt.Sprintf("chat %d (%v)", cid, err))
+		}
 	}
 
-	return b.db.SetUserBanned(userID, true)
+	_ = b.db.SetUserBanned(userID, true)
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to kick in some chats: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 func (b *Bot) UnbanUserInGroup(chatID int64, userID int64) error {

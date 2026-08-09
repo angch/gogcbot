@@ -351,12 +351,13 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 			b.replyText(msg, "Usage: `/ban <user_id|@username>`")
 			return
 		}
-		err := b.BanUserAcrossAllGroups(targetUser.UserID)
-		if err != nil {
-			b.replyText(msg, fmt.Sprintf("⚠️ Ban error: %v", err))
-		}
+		err := b.BanUserAcrossAllGroups(targetUser.UserID, msg.Chat.ID)
 		newRep, _ := b.db.AdjustReputation(targetUser.UserID, -b.cfg.Reputation.BanPenalty, "Banned by command", user.UserID)
-		b.replyText(msg, fmt.Sprintf("🚫 Banned @%s across monitored groups. Rep: `%d` (-%d)", targetUser.Username, newRep, b.cfg.Reputation.BanPenalty))
+		if err != nil {
+			b.replyText(msg, fmt.Sprintf("⚠️ User @%s (ID: `%d`) is set as Banned in DB, but Telegram kick failed: %v.\n\n👉 **Ensure the bot is a Telegram Administrator with 'Restrict Members' (can_restrict_members) permission.**", targetUser.Username, targetUser.UserID, err))
+			return
+		}
+		b.replyText(msg, fmt.Sprintf("🚫 Banned & kicked @%s across monitored groups. Rep: `%d` (-%d)", targetUser.Username, newRep, b.cfg.Reputation.BanPenalty))
 
 	case "unban":
 		if !isAuthorized {
