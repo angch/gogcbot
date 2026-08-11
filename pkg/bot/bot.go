@@ -10,30 +10,32 @@ import (
 	"github.com/angch/gogcbot/pkg/cleaner"
 	"github.com/angch/gogcbot/pkg/config"
 	"github.com/angch/gogcbot/pkg/db"
+	"github.com/angch/gogcbot/pkg/detector"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 // Bot wraps the Telegram Bot API client, database connection, retention cleaner, and configuration state.
 type Bot struct {
-	cfg       *config.Config
-	cfgPath   string
-	db        *db.DB
-	api       *tgbotapi.BotAPI
-	cleaner   *cleaner.RetentionCleaner
-	botUser   tgbotapi.User
-	mu        sync.RWMutex
-	stopChan  chan struct{}
+	cfg      *config.Config
+	cfgPath  string
+	db       *db.DB
+	api      *tgbotapi.BotAPI
+	cleaner  *cleaner.RetentionCleaner
+	detector *detector.Detector
+	botUser  tgbotapi.User
+	mu       sync.RWMutex
+	stopChan chan struct{}
 }
 
 // NewBot initializes a new Bot instance using the provided configuration and database client.
 func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 	if cfg.TelegramToken == "" {
-		return nil, fmt.Errorf("telegram token is required in config or GOGCBOT_TELEGRAM_TOKEN env var")
+		return nil, fmt.Errorf("telegram_token is required\n-> Action: Set 'telegram_token' in configuration file or export GOGCBOT_TELEGRAM_TOKEN=\"<token>\"")
 	}
 
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create telegram bot API: %w", err)
+		return nil, fmt.Errorf("failed to authenticate Telegram Bot API: %w\n-> Action: Check your Telegram Bot Token with @BotFather and ensure active internet connectivity", err)
 	}
 
 	// Enable debug mode for tgbotapi to log raw HTTP Telegram API calls & responses
@@ -50,12 +52,20 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 
 	rc := cleaner.NewRetentionCleaner(database, cfg.CleanupIntervalHr)
 
+	det := detector.NewDetector()
+	if cfg.Detector.Enabled {
+		if cfg.Detector.NewUserChinese.Enabled {
+			det.RegisterTrigger(detector.NewNewUserChineseTrigger(cfg.Detector.NewUserChinese))
+		}
+	}
+
 	b := &Bot{
 		cfg:      cfg,
 		cfgPath:  "config.yaml",
 		db:       database,
 		api:      api,
 		cleaner:  rc,
+		detector: det,
 		botUser:  api.Self,
 		stopChan: make(chan struct{}),
 	}
@@ -158,4 +168,8 @@ func (b *Bot) DB() *db.DB {
 
 func (b *Bot) BotUser() tgbotapi.User {
 	return b.botUser
+}
+
+func (b *Bot) Detector() *detector.Detector {
+	return b.detector
 }

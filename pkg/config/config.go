@@ -7,40 +7,57 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/angch/gogcbot/pkg/detector"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
 
 // Config represents the top-level application configuration structure.
 type Config struct {
-	TelegramToken      string             `mapstructure:"telegram_token" yaml:"telegram_token"`
-	SuperAdminID       int64              `mapstructure:"super_admin_id" yaml:"super_admin_id"`
-	ModerationGroupID  int64              `mapstructure:"moderation_group_id" yaml:"moderation_group_id"`
-	DBPath             string             `mapstructure:"db_path" yaml:"db_path"`
-	LogLevel           string             `mapstructure:"log_level" yaml:"log_level"`
-	AutoFlag           AutoFlagConfig     `mapstructure:"auto_flag" yaml:"auto_flag"`
-	Reputation         ReputationConfig   `mapstructure:"reputation" yaml:"reputation"`
-	CleanupIntervalHr  int                `mapstructure:"cleanup_interval_hours" yaml:"cleanup_interval_hours"`
+	TelegramToken     string           `mapstructure:"telegram_token" yaml:"telegram_token"`
+	SuperAdminID      int64            `mapstructure:"super_admin_id" yaml:"super_admin_id"`
+	ModerationGroupID int64            `mapstructure:"moderation_group_id" yaml:"moderation_group_id"`
+	DBPath            string           `mapstructure:"db_path" yaml:"db_path"`
+	LogLevel          string           `mapstructure:"log_level" yaml:"log_level"`
+	AutoFlag          AutoFlagConfig   `mapstructure:"auto_flag" yaml:"auto_flag"`
+	Reputation        ReputationConfig `mapstructure:"reputation" yaml:"reputation"`
+	Detector          DetectorConfig   `mapstructure:"detector" yaml:"detector"`
+	Shieldy           ShieldyConfig    `mapstructure:"shieldy" yaml:"shieldy"`
+	CleanupIntervalHr int              `mapstructure:"cleanup_interval_hours" yaml:"cleanup_interval_hours"`
+}
+
+// ShieldyConfig defines settings for Shieldy captcha bot verification.
+type ShieldyConfig struct {
+	Enabled             bool `mapstructure:"enabled" yaml:"enabled"`
+	RepBonus            int  `mapstructure:"rep_bonus" yaml:"rep_bonus"`
+	MaxMessages         int  `mapstructure:"max_messages" yaml:"max_messages"`
+	RecheckDelayMinutes int  `mapstructure:"recheck_delay_minutes" yaml:"recheck_delay_minutes"`
+}
+
+// DetectorConfig defines settings for modular detection triggers.
+type DetectorConfig struct {
+	Enabled        bool                                 `mapstructure:"enabled" yaml:"enabled"`
+	NewUserChinese detector.NewUserChineseTriggerConfig `mapstructure:"new_user_chinese" yaml:"new_user_chinese"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
 type AutoFlagConfig struct {
-	Enabled             bool     `mapstructure:"enabled" yaml:"enabled"`
-	LowRepThreshold     int      `mapstructure:"low_rep_threshold" yaml:"low_rep_threshold"`
-	FlagOnLinks         bool     `mapstructure:"flag_on_links" yaml:"flag_on_links"`
-	NewUserMinPosts     int      `mapstructure:"new_user_min_posts" yaml:"new_user_min_posts"`
-	BlockedKeywords     []string `mapstructure:"blocked_keywords" yaml:"blocked_keywords"`
+	Enabled         bool     `mapstructure:"enabled" yaml:"enabled"`
+	LowRepThreshold int      `mapstructure:"low_rep_threshold" yaml:"low_rep_threshold"`
+	FlagOnLinks     bool     `mapstructure:"flag_on_links" yaml:"flag_on_links"`
+	NewUserMinPosts int      `mapstructure:"new_user_min_posts" yaml:"new_user_min_posts"`
+	BlockedKeywords []string `mapstructure:"blocked_keywords" yaml:"blocked_keywords"`
 }
 
 // ReputationConfig defines point deltas and penalties for reputation adjustments.
 type ReputationConfig struct {
-	DefaultInitial   int `mapstructure:"default_initial" yaml:"default_initial"`
-	FlagThreshold    int `mapstructure:"flag_threshold" yaml:"flag_threshold"`
-	ApproveBonus     int `mapstructure:"approve_bonus" yaml:"approve_bonus"`
-	DeletePenalty    int `mapstructure:"delete_penalty" yaml:"delete_penalty"`
-	WarnPenalty      int `mapstructure:"warn_penalty" yaml:"warn_penalty"`
-	MutePenalty      int `mapstructure:"mute_penalty" yaml:"mute_penalty"`
-	BanPenalty       int `mapstructure:"ban_penalty" yaml:"ban_penalty"`
+	DefaultInitial int `mapstructure:"default_initial" yaml:"default_initial"`
+	FlagThreshold  int `mapstructure:"flag_threshold" yaml:"flag_threshold"`
+	ApproveBonus   int `mapstructure:"approve_bonus" yaml:"approve_bonus"`
+	DeletePenalty  int `mapstructure:"delete_penalty" yaml:"delete_penalty"`
+	WarnPenalty    int `mapstructure:"warn_penalty" yaml:"warn_penalty"`
+	MutePenalty    int `mapstructure:"mute_penalty" yaml:"mute_penalty"`
+	BanPenalty     int `mapstructure:"ban_penalty" yaml:"ban_penalty"`
 }
 
 // DefaultConfig returns the standard fallback configuration values.
@@ -74,6 +91,21 @@ func DefaultConfig() Config {
 			MutePenalty:    30,
 			BanPenalty:     50,
 		},
+		Detector: DetectorConfig{
+			Enabled: true,
+			NewUserChinese: detector.NewUserChineseTriggerConfig{
+				Enabled:       true,
+				MinHighUserID: 1000000000,
+				MaxReputation: 0,
+				RepPenalty:    20,
+			},
+		},
+		Shieldy: ShieldyConfig{
+			Enabled:             true,
+			RepBonus:            5,
+			MaxMessages:         5,
+			RecheckDelayMinutes: 6,
+		},
 		CleanupIntervalHr: 1,
 	}
 }
@@ -106,6 +138,17 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("reputation.warn_penalty", 20)
 	v.SetDefault("reputation.mute_penalty", 30)
 	v.SetDefault("reputation.ban_penalty", 50)
+
+	v.SetDefault("detector.enabled", true)
+	v.SetDefault("detector.new_user_chinese.enabled", true)
+	v.SetDefault("detector.new_user_chinese.min_high_user_id", int64(1000000000))
+	v.SetDefault("detector.new_user_chinese.max_reputation", 0)
+	v.SetDefault("detector.new_user_chinese.rep_penalty", 20)
+
+	v.SetDefault("shieldy.enabled", true)
+	v.SetDefault("shieldy.rep_bonus", 5)
+	v.SetDefault("shieldy.max_messages", 5)
+	v.SetDefault("shieldy.recheck_delay_minutes", 6)
 }
 
 // LoadConfig reads configuration from file or environment variables via Viper.

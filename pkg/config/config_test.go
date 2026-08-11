@@ -70,12 +70,12 @@ func TestLoadConfig_EnvVarKeyMissingFromConfigFile(t *testing.T) {
 
 func TestLoadConfig_AllEnvVars(t *testing.T) {
 	envs := map[string]string{
-		"GOGCBOT_TELEGRAM_TOKEN":          "tok_env_123",
-		"GOGCBOT_SUPER_ADMIN_ID":          "987654321",
-		"GOGCBOT_MODERATION_GROUP_ID":     "-1001234567890",
-		"GOGCBOT_DB_PATH":                 "test_env.db",
-		"GOGCBOT_LOG_LEVEL":               "debug",
-		"GOGCBOT_CLEANUP_INTERVAL_HOURS":  "5",
+		"GOGCBOT_TELEGRAM_TOKEN":              "tok_env_123",
+		"GOGCBOT_SUPER_ADMIN_ID":              "987654321",
+		"GOGCBOT_MODERATION_GROUP_ID":         "-1001234567890",
+		"GOGCBOT_DB_PATH":                     "test_env.db",
+		"GOGCBOT_LOG_LEVEL":                   "debug",
+		"GOGCBOT_CLEANUP_INTERVAL_HOURS":      "5",
 		"GOGCBOT_AUTO_FLAG_LOW_REP_THRESHOLD": "30",
 		"GOGCBOT_REPUTATION_DEFAULT_INITIAL":  "150",
 	}
@@ -145,5 +145,23 @@ func TestDefaultConfig_DefaultInitialZero(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Reputation.DefaultInitial != 0 {
 		t.Errorf("Expected DefaultInitial 0, got %d", cfg.Reputation.DefaultInitial)
+	}
+	if !cfg.Detector.Enabled {
+		t.Errorf("Expected Detector.Enabled to be true by default")
+	}
+	if !cfg.Detector.NewUserChinese.Enabled {
+		t.Errorf("Expected Detector.NewUserChinese.Enabled to be true by default")
+	}
+	if cfg.Detector.NewUserChinese.MinHighUserID != 1000000000 {
+		t.Errorf("Expected MinHighUserID 1000000000, got %d", cfg.Detector.NewUserChinese.MinHighUserID)
+	}
+	if !cfg.Shieldy.Enabled {
+		t.Errorf("Expected Shieldy.Enabled to be true by default")
+	}
+	if cfg.Shieldy.RepBonus != 5 {
+		t.Errorf("Expected Shieldy.RepBonus to be 5 by default, got %d", cfg.Shieldy.RepBonus)
+	}
+	if cfg.Shieldy.MaxMessages != 5 {
+		t.Errorf("Expected Shieldy.MaxMessages to be 5 by default, got %d", cfg.Shieldy.MaxMessages)
 	}
 }

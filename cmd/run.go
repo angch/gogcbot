@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/angch/gogcbot/pkg/bot"
@@ -33,24 +34,33 @@ var runCmd = &cobra.Command{
 		log.Println("[Main] Loading configuration...")
 		cfg, err := config.LoadConfig(cfgFile)
 		if err != nil {
-			return fmt.Errorf("failed to load configuration: %w", err)
+			return fmt.Errorf("failed to load configuration from '%s': %w\n-> Action: Ensure the file exists and contains valid YAML, or run 'gogcbot init-config' to generate a default config file.", cfgFile, err)
 		}
 
 		if cfg.TelegramToken == "" {
-			return fmt.Errorf("telegram_token missing in config or GOGCBOT_TELEGRAM_TOKEN env var")
+			return fmt.Errorf("telegram_token is missing in configuration file '%s' (or GOGCBOT_TELEGRAM_TOKEN env variable).\n-> Action: Open '%s' and add your Telegram bot token from @BotFather, or set export GOGCBOT_TELEGRAM_TOKEN=\"<your_token>\".", cfgFile, cfgFile)
 		}
 
 		log.Printf("[Main] Opening pure Go SQLite database at %s...", cfg.DBPath)
-		database, err := db.OpenDB(cfg.DBPath)
+		dbPath := cfg.DBPath
+		if !filepath.IsAbs(dbPath) {
+			dbPath = filepath.Join(filepath.Dir(cfgFile), dbPath)
+		}
+		database, err := db.OpenDB(dbPath)
 		if err != nil {
-			return fmt.Errorf("failed to open database: %w", err)
+			return fmt.Errorf("failed to open SQLite database at '%s': %w\n-> Action: Check file permissions and ensure the parent directory is writable.", dbPath, err)
 		}
 		defer database.Close()
+
+		log.Println("[Main] Performing database auto-migrations...")
+		if err := database.AutoMigrate(); err != nil {
+			return fmt.Errorf("failed auto-migrating database schema: %w", err)
+		}
 
 		log.Println("[Main] Initializing Telegram Bot engine...")
 		b, err := bot.NewBot(cfg, database)
 		if err != nil {
-			return fmt.Errorf("failed to initialize bot: %w", err)
+			return fmt.Errorf("failed to initialize Telegram bot engine: %w\n-> Action: Verify your Telegram Bot Token with @BotFather and ensure internet connectivity.", err)
 		}
 		b.SetCfgPath(cfgFile)
 

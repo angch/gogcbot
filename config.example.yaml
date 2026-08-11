@@ -27,3 +27,18 @@ reputation:
   warn_penalty: 20
   mute_penalty: 30
   ban_penalty: 50
+
+detector:
+  enabled: true
+  new_user_chinese:
+    enabled: true
+    min_high_user_id: 1000000000
+    max_reputation: 0
+    rep_penalty: 20
+
+shieldy:
+  enabled: true
+  rep_bonus: 5
+  max_messages: 5
+  recheck_delay_minutes: 6
+

@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/angch/gogcbot/pkg/db"
+	"github.com/angch/gogcbot/pkg/detector"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
@@ -18,6 +20,40 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 	if update.Message != nil {
 		b.handleMessage(update.Message)
 		return
+	}
+
+	if update.ChatMember != nil {
+		b.handleChatMemberUpdate(update.ChatMember)
+		return
+	}
+}
+
+func (b *Bot) handleChatMemberUpdate(cmu *tgbotapi.ChatMemberUpdated) {
+	if cmu == nil {
+		return
+	}
+	userID := cmu.NewChatMember.User.ID
+	chatID := cmu.Chat.ID
+
+	// Check if this user is marked as banned in our DB
+	user, err := b.db.GetUserByID(userID)
+	if err != nil || user == nil || !user.IsBanned {
+		return
+	}
+
+	// Detect if ban was modified or converted into a timed ban by Shieldy or Telegram:
+	// A permanent ban in Telegram has status "kicked" AND UntilDate == 0.
+	newCM := cmu.NewChatMember
+	banChanged := newCM.Status != "kicked" || newCM.UntilDate != 0
+	if banChanged {
+		log.Printf("[ChatMemberUpdate Alert] User %d in chat %d ban status was changed by Shieldy/Telegram (Old: %s, New: %s, UntilDate: %d). Scheduling re-ban...",
+			userID, chatID, cmu.OldChatMember.Status, newCM.Status, newCM.UntilDate)
+
+		delay := time.Duration(b.cfg.Shieldy.RecheckDelayMinutes) * time.Minute
+		if delay <= 0 {
+			delay = 6 * time.Minute
+		}
+		b.ScheduleBanRecheck(chatID, userID, delay)
 	}
 }
 
@@ -38,7 +74,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	// Get or create user profile
-	user, err := b.db.GetOrCreateUser(
+	user, isNewUser, err := b.db.GetOrCreateUser(
 		msg.From.ID,
 		msg.From.UserName,
 		msg.From.FirstName,
@@ -50,20 +86,48 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Ensure SuperAdmin and Group Admins have initial 100 reputation score
+	// Ensure SuperAdmin, Group Admins, and Bot Admins have initial 100 reputation score
 	isSuperAdmin := b.cfg.SuperAdminID != 0 && user.UserID == b.cfg.SuperAdminID
 	isGroupAdmin := (chat.IsGroup() || chat.IsSuperGroup()) && b.IsUserAdminInChat(chat.ID, user.UserID)
-	if (isSuperAdmin || isGroupAdmin) && user.Reputation < 100 {
+	isBotAdmin := user.IsAdmin
+	if (isSuperAdmin || isGroupAdmin || isBotAdmin) && user.Reputation < 100 {
 		if err := b.db.SetReputation(user.UserID, 100, "Admin/SuperAdmin initial reputation setup", user.UserID); err == nil {
 			user.Reputation = 100
 		}
 	}
 
-	// Check if user is globally flagged as banned
-	if user.IsBanned && (chat.IsGroup() || chat.IsSuperGroup()) {
-		_ = b.DeleteGroupMessage(chat.ID, msg.MessageID)
-		_ = b.BanUserInGroup(chat.ID, user.UserID)
-		return
+	// Users with maximum reputation (>= 100) are whitelisted whether banned or not
+	if user.Reputation >= 100 {
+		if user.IsBanned {
+			log.Printf("[Bot Whitelist] User %d (@%s) has maximum reputation (%d). Clearing DB ban flag.", user.UserID, user.Username, user.Reputation)
+			_ = b.db.SetUserBanned(user.UserID, false)
+			user.IsBanned = false
+		}
+	} else if user.IsBanned && (chat.IsGroup() || chat.IsSuperGroup()) {
+		// Self-healing check: verify if Telegram user status is active (unbanned by an admin in Telegram UI)
+		cm, err := b.GetChatMember(tgbotapi.GetChatMemberConfig{
+			ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+				ChatID: chat.ID,
+				UserID: user.UserID,
+			},
+		})
+		if err == nil && (cm.Status == "member" || cm.Status == "administrator" || cm.Status == "creator" || cm.Status == "left") {
+			log.Printf("[Bot] User %d (@%s) was unbanned in Telegram UI (status: %s). Self-healing: clearing DB ban flag.", user.UserID, user.Username, cm.Status)
+			_ = b.db.SetUserBanned(user.UserID, false)
+			user.IsBanned = false
+			if user.Reputation <= b.cfg.Reputation.FlagThreshold {
+				targetRep := b.cfg.Reputation.FlagThreshold + 10
+				if targetRep < 50 {
+					targetRep = 50
+				}
+				_ = b.db.SetReputation(user.UserID, targetRep, "Unbanned in Telegram UI & reputation restored", user.UserID)
+				user.Reputation = targetRep
+			}
+		} else {
+			_ = b.DeleteGroupMessage(chat.ID, msg.MessageID)
+			_ = b.BanUserInGroup(chat.ID, user.UserID)
+			return
+		}
 	}
 
 	// Detect links & media
@@ -74,6 +138,18 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	if text == "" && msg.Caption != "" {
 		text = msg.Caption
 	}
+
+	groupName := chat.Title
+	if groupName == "" {
+		if chat.IsPrivate() {
+			groupName = "Private Chat"
+		} else {
+			groupName = fmt.Sprintf("Chat %d", chat.ID)
+		}
+	}
+
+	log.Printf("[Received Message] Sender ID: %d (@%s) | Group: '%s' (ID: %d) | Content: %q",
+		msg.From.ID, msg.From.UserName, groupName, chat.ID, text)
 
 	// Record message in DB for 7-day log & 50-posts history
 	dbMsg := &db.Message{
@@ -95,15 +171,98 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Moderation check only for monitored groups (not private chats or the moderation group itself)
-	if (chat.IsGroup() || chat.IsSuperGroup()) && chat.ID != b.cfg.ModerationGroupID {
-		b.checkAutoFlagRules(msg, dbMsg, user, chat.Title)
+	// Moderation check only for monitored groups (not private chats or moderation group)
+	// Skip moderation for whitelisted users with maximum reputation (>= 100)
+	if (chat.IsGroup() || chat.IsSuperGroup()) && chat.ID != b.cfg.ModerationGroupID && user.Reputation < 100 {
+		userMsgCount, _ := b.db.GetUserMessageCount(user.UserID)
+
+		hasVerified := false
+		if b.cfg.Shieldy.Enabled {
+			alreadyVerified, _ := b.db.HasReceivedRepBonus(user.UserID, "Shieldy verification")
+			if alreadyVerified {
+				hasVerified = true
+			} else if detector.IsShieldyVerificationText(text) && userMsgCount <= b.cfg.Shieldy.MaxMessages {
+				repBonus := b.cfg.Shieldy.RepBonus
+				if repBonus <= 0 {
+					repBonus = 5
+				}
+				newRep, err := b.db.AdjustReputation(user.UserID, repBonus, "Shieldy verification: I am not a bot", user.UserID)
+				if err != nil {
+					log.Printf("[Bot Rep] Error adjusting reputation for Shieldy verification for user %d: %v", user.UserID, err)
+				} else {
+					log.Printf("[Shieldy Verification] User %d (@%s) verified with 'I am not a bot'. Added +%d reputation (New Rep: %d)",
+						user.UserID, user.Username, repBonus, newRep)
+					user.Reputation = newRep
+					hasVerified = true
+				}
+			}
+		}
+
+		tCtx := &detector.TriggerContext{
+			Message:           dbMsg,
+			RawMessage:        msg,
+			Text:              text,
+			User:              user,
+			IsNewUser:         isNewUser,
+			UserMessageCount:  userMsgCount,
+			ChatID:            chat.ID,
+			GroupTitle:        chat.Title,
+			HasVerifiedNotBot: hasVerified,
+		}
+
+		if b.detector != nil {
+			results, err := b.detector.Evaluate(tCtx)
+			if err != nil {
+				log.Printf("[Bot] Error evaluating detection triggers: %v", err)
+			} else if len(results) > 0 {
+				actionTaken := false
+				for _, res := range results {
+					log.Printf("[Bot Trigger] Rule '%s' fired for user %d in chat %d: %s", res.TriggerID, user.UserID, chat.ID, res.Reason)
+					b.ExecuteActions(chat.ID, user, msg.MessageID, res.Actions)
+					for _, act := range res.Actions {
+						if act.Type == detector.ActionDeleteMessage || act.Type == detector.ActionBanUser {
+							actionTaken = true
+						}
+					}
+				}
+				if actionTaken {
+					return
+				}
+			}
+		}
+
+		flagged := b.checkAutoFlagRules(msg, dbMsg, user, chat.Title)
+		if !flagged {
+			b.bumpUnflaggedReputation(user)
+		}
 	}
 }
 
-func (b *Bot) checkAutoFlagRules(msg *tgbotapi.Message, dbMsg *db.Message, user *db.User, groupTitle string) {
-	if !b.cfg.AutoFlag.Enabled {
+func (b *Bot) bumpUnflaggedReputation(user *db.User) {
+	if user.Reputation >= 100 {
 		return
+	}
+
+	alreadyBumped, err := b.db.HasReceivedDailyRepBump(user.UserID, "Daily unflagged message")
+	if err != nil {
+		log.Printf("[Bot Rep] Error checking daily rep bump for user %d: %v", user.UserID, err)
+		return
+	}
+
+	if !alreadyBumped {
+		newRep, err := b.db.AdjustReputationWithCap(user.UserID, 1, 100, "Daily unflagged message activity", user.UserID)
+		if err != nil {
+			log.Printf("[Bot Rep] Error bumping reputation for user %d: %v", user.UserID, err)
+		} else {
+			log.Printf("[Bot Rep] User %d reputation bumped +1 for unflagged message activity (New Rep: %d)", user.UserID, newRep)
+			user.Reputation = newRep
+		}
+	}
+}
+
+func (b *Bot) checkAutoFlagRules(msg *tgbotapi.Message, dbMsg *db.Message, user *db.User, groupTitle string) bool {
+	if !b.cfg.AutoFlag.Enabled {
+		return false
 	}
 
 	var reasons []string
@@ -140,13 +299,15 @@ func (b *Bot) checkAutoFlagRules(msg *tgbotapi.Message, dbMsg *db.Message, user 
 		flag, err := b.db.CreateFlaggedPost(msg.Chat.ID, msg.MessageID, user.UserID, reasonStr)
 		if err != nil {
 			log.Printf("[AutoFlag] Error saving flagged post: %v", err)
-			return
+			return true
 		}
 
 		if err := b.SendModAlert(flag, dbMsg, user, groupTitle); err != nil {
 			log.Printf("[AutoFlag] Error sending mod alert: %v", err)
 		}
+		return true
 	}
+	return false
 }
 
 func containsLinks(msg *tgbotapi.Message) bool {

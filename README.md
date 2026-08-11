@@ -28,6 +28,11 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
      - 🚫 **Ban User**: -50 points + ban across all monitored groups
      - ➕ / ➖ **Manual Rep Adjustments**: +/- 10 points or custom deltas
 
+3. **Shieldy Bot Verification & Ban Protection**:
+   - Seamlessly integrates with Shieldy captcha bot: when a new user's initial messages match `"I am not a bot"`, they receive **+5 reputation** points.
+   - Automatically exempts verified users and `"I am not a bot"` messages from triggering the High-ID Chinese spam detection trigger.
+   - Automatically schedules a **6-minute delayed re-check** upon issuing bans to detect if Shieldy or Telegram altered a permanent ban into a temporary timed ban, re-issuing permanent bans if necessary.
+
 4. **Auto-Flagging & Moderation Engine**:
    - Automatically detects suspicious messages:
      - Low reputation user (< 50) posting links.
@@ -134,6 +139,12 @@ reputation:
   warn_penalty: 20
   mute_penalty: 30
   ban_penalty: 50
+
+shieldy:
+  enabled: true                       # Enable Shieldy captcha bot verification
+  rep_bonus: 5                        # Rep bonus for typing "I am not a bot"
+  max_messages: 5                     # Post count limit for initial user messages
+  recheck_delay_minutes: 6            # Delay for verifying & re-issuing permanent bans
 ```
 
 ---

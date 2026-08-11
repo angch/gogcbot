@@ -19,7 +19,7 @@ var initConfigCmd = &cobra.Command{
 		}
 
 		if err := config.SaveDefaultConfig(target); err != nil {
-			return fmt.Errorf("failed to create config file: %w", err)
+			return fmt.Errorf("failed to create default config file at '%s': %w\n-> Action: Check write permissions for path '%s'.", target, err, target)
 		}
 
 		fmt.Printf("✅ Default configuration file created successfully at: %s\n", target)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 
 	"github.com/angch/gogcbot/pkg/bot"
@@ -35,11 +36,20 @@ func (p *BotProgram) run() {
 		log.Fatalf("[Service] Failed to load config (%s): %v", p.CfgFile, err)
 	}
 
-	database, err := db.OpenDB(cfg.DBPath)
+	dbPath := cfg.DBPath
+	if !filepath.IsAbs(dbPath) {
+		dbPath = filepath.Join(filepath.Dir(p.CfgFile), dbPath)
+	}
+
+	database, err := db.OpenDB(dbPath)
 	if err != nil {
-		log.Fatalf("[Service] Failed to open database (%s): %v", cfg.DBPath, err)
+		log.Fatalf("[Service] Failed to open database (%s): %v", dbPath, err)
 	}
 	p.db = database
+
+	if err := database.AutoMigrate(); err != nil {
+		log.Fatalf("[Service] Database auto-migration failed (%s): %v", dbPath, err)
+	}
 
 	b, err := bot.NewBot(cfg, database)
 	if err != nil {
@@ -73,12 +83,25 @@ func GetService(cfgFile string) (service.Service, error) {
 		absCfg = cfgFile
 	}
 
+	execPath, err := os.Executable()
+	if err != nil {
+		execPath = ""
+	} else {
+		if absExec, err := filepath.Abs(execPath); err == nil {
+			execPath = absExec
+		}
+	}
+
 	prg := NewBotProgram(absCfg)
 	svcConfig := &service.Config{
 		Name:        "GoGCBot",
 		DisplayName: "GoGCBot Telegram Moderation Service",
 		Description: "Telegram Group Moderation & User Reputation Bot Daemon Service",
+		Executable:  execPath,
 		Arguments:   []string{"run", "--config", absCfg},
+		Option: service.KeyValue{
+			"WorkingDirectory": filepath.Dir(absCfg),
+		},
 	}
 
 	svc, err := service.New(prg, svcConfig)

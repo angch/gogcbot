@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/angch/gogcbot/pkg/cleaner"
 	"github.com/angch/gogcbot/pkg/config"
@@ -15,19 +16,24 @@ var cleanupCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.LoadConfig(cfgFile)
 		if err != nil {
-			return fmt.Errorf("failed to load configuration: %w", err)
+			return fmt.Errorf("failed to load configuration from '%s': %w\n-> Action: Ensure '%s' exists, or run 'gogcbot init-config' to create a default configuration.", cfgFile, err, cfgFile)
 		}
 
-		database, err := db.OpenDB(cfg.DBPath)
+		dbPath := cfg.DBPath
+		if !filepath.IsAbs(dbPath) {
+			dbPath = filepath.Join(filepath.Dir(cfgFile), dbPath)
+		}
+
+		database, err := db.OpenDB(dbPath)
 		if err != nil {
-			return fmt.Errorf("failed to open database: %w", err)
+			return fmt.Errorf("failed to open database at '%s': %w\n-> Action: Verify that '%s' exists and you have write permissions.", dbPath, err, dbPath)
 		}
 		defer database.Close()
 
 		rc := cleaner.NewRetentionCleaner(database, cfg.CleanupIntervalHr)
 		oldP, userP, err := rc.RunOnce()
 		if err != nil {
-			return fmt.Errorf("cleanup error: %w", err)
+			return fmt.Errorf("retention cleanup execution failed: %w\n-> Action: Check if database is locked or corrupted.", err)
 		}
 
 		fmt.Println("🧹 === Database Retention Cleanup Complete ===")

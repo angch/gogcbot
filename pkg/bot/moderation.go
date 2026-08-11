@@ -7,16 +7,17 @@ import (
 	"time"
 
 	"github.com/angch/gogcbot/pkg/db"
+	"github.com/angch/gogcbot/pkg/detector"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 type BotPermissions struct {
-	IsAdmin              bool
-	CanDeleteMessages    bool
-	CanRestrictMembers   bool
-	CanPinMessages       bool
-	CanInviteUsers       bool
-	CanPromoteMembers    bool
+	IsAdmin            bool
+	CanDeleteMessages  bool
+	CanRestrictMembers bool
+	CanPinMessages     bool
+	CanInviteUsers     bool
+	CanPromoteMembers  bool
 }
 
 func (b *Bot) CheckBotPermissions(chatID int64) (*BotPermissions, error) {
@@ -178,6 +179,12 @@ func (b *Bot) BanUserAcrossAllGroups(userID int64, currentChatID ...int64) error
 		if err := b.BanUserInGroup(cid, userID); err != nil {
 			log.Printf("[Bot] Failed to ban user %d in chat %d: %v", userID, cid, err)
 			errs = append(errs, fmt.Sprintf("chat %d (%v)", cid, err))
+		} else {
+			delay := time.Duration(b.cfg.Shieldy.RecheckDelayMinutes) * time.Minute
+			if delay <= 0 {
+				delay = 6 * time.Minute
+			}
+			b.ScheduleBanRecheck(cid, userID, delay)
 		}
 	}
 
@@ -187,6 +194,48 @@ func (b *Bot) BanUserAcrossAllGroups(userID int64, currentChatID ...int64) error
 		return fmt.Errorf("failed to kick in some chats: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// ScheduleBanRecheck schedules a delayed check (e.g. 6 minutes) to verify if Shieldy or Telegram
+// modified a permanent ban into a timed ban. If so, it re-issues the permanent ban.
+func (b *Bot) ScheduleBanRecheck(chatID int64, userID int64, delay time.Duration) {
+	go func() {
+		time.Sleep(delay)
+
+		user, err := b.db.GetUserByID(userID)
+		if err != nil || user == nil || !user.IsBanned {
+			log.Printf("[Ban Recheck] User %d is no longer marked as banned in DB, skipping recheck", userID)
+			return
+		}
+
+		cm, err := b.GetChatMember(tgbotapi.GetChatMemberConfig{
+			ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+				ChatID: chatID,
+				UserID: userID,
+			},
+		})
+		if err != nil {
+			log.Printf("[Ban Recheck Error] Failed to get chat member status for user %d in chat %d: %v", userID, chatID, err)
+			return
+		}
+
+		// Detect if ban was changed:
+		// Permanent ban in Telegram has Status == "kicked" AND UntilDate == 0.
+		// If Status != "kicked" OR UntilDate != 0, Shieldy or Telegram changed the ban to a timed ban or restriction.
+		banChanged := cm.Status != "kicked" || cm.UntilDate != 0
+		if banChanged {
+			log.Printf("[Ban Recheck Alert] Ban for user %d in chat %d was changed by Shieldy/Telegram (Status: %s, UntilDate: %d). Reissuing permanent ban...",
+				userID, chatID, cm.Status, cm.UntilDate)
+
+			if err := b.BanUserInGroup(chatID, userID); err != nil {
+				log.Printf("[Ban Recheck Error] Failed to reissue ban for user %d in chat %d: %v", userID, chatID, err)
+			} else {
+				log.Printf("[Ban Recheck Success] Reissued permanent ban for user %d in chat %d", userID, chatID)
+			}
+		} else {
+			log.Printf("[Ban Recheck] User %d in chat %d remains permanently banned (Status: %s)", userID, chatID, cm.Status)
+		}
+	}()
 }
 
 func (b *Bot) UnbanUserInGroup(chatID int64, userID int64) error {
@@ -199,13 +248,55 @@ func (b *Bot) UnbanUserInGroup(chatID int64, userID int64) error {
 	}
 
 	_, err := b.Request(unbanConfig)
-	if err == nil {
-		_ = b.db.SetUserBanned(userID, false)
-	}
+	// Unconditionally clear banned flag in DB even if Telegram reports user is already unbanned
+	_ = b.db.SetUserBanned(userID, false)
 	return err
 }
 
+func (b *Bot) UnbanUserAcrossAllGroups(userID int64, currentChatID ...int64) error {
+	chatIDs := make(map[int64]bool)
+	for _, cid := range currentChatID {
+		if cid != 0 {
+			chatIDs[cid] = true
+		}
+	}
+
+	groups, err := b.db.GetMonitoredGroups()
+	if err == nil {
+		for _, g := range groups {
+			chatIDs[g.ChatID] = true
+		}
+	}
+
+	for cid := range chatIDs {
+		_ = b.UnbanUserInGroup(cid, userID)
+	}
+
+	_ = b.db.SetUserBanned(userID, false)
+
+	// Restore user reputation to at least FlagThreshold + 10 (or 50) if currently low/negative
+	user, err := b.db.GetUserByID(userID)
+	if err == nil && user.Reputation <= b.cfg.Reputation.FlagThreshold {
+		targetRep := b.cfg.Reputation.FlagThreshold + 10
+		if targetRep < 50 {
+			targetRep = 50
+		}
+		_ = b.db.SetReputation(userID, targetRep, "Unbanned & reputation restored", userID)
+	}
+
+	return nil
+}
+
+func (b *Bot) PromoteUserInBot(userID int64) error {
+	return b.db.SetUserAdmin(userID, true)
+}
+
+func (b *Bot) DemoteUserInBot(userID int64) error {
+	return b.db.SetUserAdmin(userID, false)
+}
+
 func escapeMarkdown(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "_", "\\_")
 	s = strings.ReplaceAll(s, "*", "\\*")
 	s = strings.ReplaceAll(s, "`", "\\`")
@@ -218,4 +309,52 @@ func truncateText(text string, maxLen int) string {
 		return text
 	}
 	return text[:maxLen] + "..."
+}
+
+// ExecuteActions executes a set of actions returned by detection triggers against a chat message and user.
+func (b *Bot) ExecuteActions(chatID int64, user *db.User, messageID int, actions []detector.Action) {
+	for _, act := range actions {
+		switch act.Type {
+		case detector.ActionDeleteMessage:
+			log.Printf("[Bot Action] Deleting message %d in chat %d (reason: %s)", messageID, chatID, act.Reason)
+			if err := b.DeleteGroupMessage(chatID, messageID); err != nil {
+				log.Printf("[Bot Action Error] Failed to delete message %d in chat %d: %v", messageID, chatID, err)
+			}
+
+		case detector.ActionBanUser:
+			log.Printf("[Bot Action] Banning user %d in chat %d (reason: %s)", user.UserID, chatID, act.Reason)
+			if err := b.BanUserInGroup(chatID, user.UserID); err != nil {
+				log.Printf("[Bot Action Error] Failed to ban user %d in chat %d: %v", user.UserID, chatID, err)
+			} else {
+				delay := time.Duration(b.cfg.Shieldy.RecheckDelayMinutes) * time.Minute
+				if delay <= 0 {
+					delay = 6 * time.Minute
+				}
+				b.ScheduleBanRecheck(chatID, user.UserID, delay)
+			}
+			_ = b.db.SetUserBanned(user.UserID, true)
+
+		case detector.ActionAdjustReputation:
+			log.Printf("[Bot Action] Adjusting reputation for user %d by %d (reason: %s)", user.UserID, act.RepDelta, act.Reason)
+			newRep, err := b.db.AdjustReputation(user.UserID, act.RepDelta, act.Reason, 0)
+			if err != nil {
+				log.Printf("[Bot Action Error] Failed to adjust reputation for user %d: %v", user.UserID, err)
+			} else {
+				user.Reputation = newRep
+			}
+
+		case detector.ActionFlagMessage:
+			log.Printf("[Bot Action] Flagging message %d in chat %d for moderation review (reason: %s)", messageID, chatID, act.Reason)
+			flag, err := b.db.CreateFlaggedPost(chatID, messageID, user.UserID, act.Reason)
+			if err == nil && b.cfg.ModerationGroupID != 0 {
+				dbMsg := &db.Message{
+					ChatID:    chatID,
+					MessageID: messageID,
+					UserID:    user.UserID,
+					Text:      act.Reason,
+				}
+				_ = b.SendModAlert(flag, dbMsg, user, "")
+			}
+		}
+	}
 }

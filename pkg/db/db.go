@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -22,6 +23,7 @@ type User struct {
 	Reputation int       `json:"reputation"`
 	WarnCount  int       `json:"warn_count"`
 	IsBanned   bool      `json:"is_banned"`
+	IsAdmin    bool      `json:"is_admin"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
@@ -72,7 +74,7 @@ func OpenDB(dbPath string) (*DB, error) {
 	dir := filepath.Dir(dbPath)
 	if dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create db directory: %w", err)
+			return nil, fmt.Errorf("failed to create database directory '%s': %w\n-> Action: Ensure parent directory '%s' is writable.", dir, err, dir)
 		}
 	}
 
@@ -80,19 +82,35 @@ func OpenDB(dbPath string) (*DB, error) {
 	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", dbPath)
 	sqliteDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
+		return nil, fmt.Errorf("failed to open SQLite database at '%s': %w\n-> Action: Check file access permissions for '%s'.", dbPath, err, dbPath)
 	}
 
 	if err := sqliteDB.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping sqlite database: %w", err)
+		return nil, fmt.Errorf("failed to connect to SQLite database at '%s': %w\n-> Action: Verify SQLite file is not corrupted or locked by another process.", dbPath, err)
 	}
 
 	database := &DB{DB: sqliteDB}
-	if err := database.InitSchema(); err != nil {
-		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+	if err := database.AutoMigrate(); err != nil {
+		return nil, fmt.Errorf("failed to initialize SQLite database schema: %w\n-> Action: Ensure database path '%s' is writable.", err, dbPath)
 	}
 
 	return database, nil
+}
+
+func (d *DB) AutoMigrate() error {
+	if err := d.InitSchema(); err != nil {
+		return err
+	}
+
+	// Schema evolution migrations
+	migrations := []string{
+		`ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0;`,
+	}
+
+	for _, stmt := range migrations {
+		_, _ = d.Exec(stmt)
+	}
+	return nil
 }
 
 func (d *DB) InitSchema() error {
@@ -105,6 +123,7 @@ func (d *DB) InitSchema() error {
 		reputation INTEGER NOT NULL DEFAULT 100,
 		warn_count INTEGER NOT NULL DEFAULT 0,
 		is_banned BOOLEAN NOT NULL DEFAULT 0,
+		is_admin BOOLEAN NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
@@ -159,18 +178,24 @@ func (d *DB) InitSchema() error {
 	);
 	`
 	_, err := d.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Auto-migration: ensure is_admin column exists for pre-existing databases
+	_, _ = d.Exec(`ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0;`)
+	return nil
 }
 
 // User Methods
 
-func (d *DB) GetOrCreateUser(userID int64, username, firstName, lastName string, defaultRep int) (*User, error) {
+func (d *DB) GetOrCreateUser(userID int64, username, firstName, lastName string, defaultRep int) (*User, bool, error) {
 	now := time.Now()
 	var user User
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at
 		FROM users WHERE user_id = ?
-	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.CreatedAt, &user.UpdatedAt)
+	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		user = User{
@@ -181,19 +206,20 @@ func (d *DB) GetOrCreateUser(userID int64, username, firstName, lastName string,
 			Reputation: defaultRep,
 			WarnCount:  0,
 			IsBanned:   false,
+			IsAdmin:    false,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
 		_, err := d.Exec(`
-			INSERT INTO users (user_id, username, first_name, last_name, reputation, warn_count, is_banned, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, user.UserID, user.Username, user.FirstName, user.LastName, user.Reputation, user.WarnCount, user.IsBanned, user.CreatedAt, user.UpdatedAt)
+			INSERT INTO users (user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, user.UserID, user.Username, user.FirstName, user.LastName, user.Reputation, user.WarnCount, user.IsBanned, user.IsAdmin, user.CreatedAt, user.UpdatedAt)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return &user, nil
+		return &user, true, nil
 	} else if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// Update names/username if changed
@@ -202,19 +228,19 @@ func (d *DB) GetOrCreateUser(userID int64, username, firstName, lastName string,
 		user.FirstName = firstName
 		user.LastName = lastName
 		user.UpdatedAt = now
-		d.Exec(`UPDATE users SET username = ?, first_name = ?, last_name = ?, updated_at = ? WHERE user_id = ?`,
+		_, _ = d.Exec(`UPDATE users SET username = ?, first_name = ?, last_name = ?, updated_at = ? WHERE user_id = ?`,
 			username, firstName, lastName, now, userID)
 	}
 
-	return &user, nil
+	return &user, false, nil
 }
 
 func (d *DB) GetUserByID(userID int64) (*User, error) {
 	var user User
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at
 		FROM users WHERE user_id = ?
-	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.CreatedAt, &user.UpdatedAt)
+	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -222,18 +248,48 @@ func (d *DB) GetUserByID(userID int64) (*User, error) {
 }
 
 func (d *DB) GetUserByUsername(username string) (*User, error) {
-	if len(username) > 0 && username[0] == '@' {
-		username = username[1:]
+	username = strings.TrimSpace(username)
+	username = strings.TrimPrefix(username, "@")
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return nil, sql.ErrNoRows
 	}
+
 	var user User
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, created_at, updated_at
-		FROM users WHERE LOWER(username) = LOWER(?)
-	`, username).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.CreatedAt, &user.UpdatedAt)
+		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		FROM users WHERE LOWER(TRIM(username, '@ ')) = LOWER(?)
+	`, username).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	return &user, nil
+}
+
+func (d *DB) GetAllUsers(limit int) ([]User, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := d.Query(`
+		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		FROM users
+		ORDER BY reputation DESC, created_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
 }
 
 func (d *DB) AdjustReputation(userID int64, delta int, reason string, byUserID int64) (int, error) {
@@ -242,7 +298,7 @@ func (d *DB) AdjustReputation(userID int64, delta int, reason string, byUserID i
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var newRep int
 	err = tx.QueryRow(`
@@ -266,13 +322,72 @@ func (d *DB) AdjustReputation(userID int64, delta int, reason string, byUserID i
 	return newRep, tx.Commit()
 }
 
+func (d *DB) AdjustReputationWithCap(userID int64, delta int, maxCap int, reason string, byUserID int64) (int, error) {
+	now := time.Now()
+	tx, err := d.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var currentRep int
+	err = tx.QueryRow(`SELECT reputation FROM users WHERE user_id = ?`, userID).Scan(&currentRep)
+	if err != nil {
+		return 0, err
+	}
+
+	newRep := currentRep + delta
+	if maxCap > 0 && newRep > maxCap {
+		newRep = maxCap
+	}
+	actualDelta := newRep - currentRep
+	if actualDelta == 0 {
+		return currentRep, nil
+	}
+
+	_, err = tx.Exec(`UPDATE users SET reputation = ?, updated_at = ? WHERE user_id = ?`, newRep, now, userID)
+	if err != nil {
+		return 0, err
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO reputation_logs (user_id, change_amount, reason, by_user_id, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, userID, actualDelta, reason, byUserID, now)
+	if err != nil {
+		return 0, err
+	}
+
+	return newRep, tx.Commit()
+}
+
+func (d *DB) HasReceivedDailyRepBump(userID int64, reasonPrefix string) (bool, error) {
+	now := time.Now()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	var count int
+	err := d.QueryRow(`
+		SELECT COUNT(*) FROM reputation_logs
+		WHERE user_id = ? AND reason LIKE ? AND created_at >= ?
+	`, userID, reasonPrefix+"%", startOfDay).Scan(&count)
+	return count > 0, err
+}
+
+func (d *DB) HasReceivedRepBonus(userID int64, reasonPrefix string) (bool, error) {
+	var count int
+	err := d.QueryRow(`
+		SELECT COUNT(*) FROM reputation_logs
+		WHERE user_id = ? AND reason LIKE ?
+	`, userID, reasonPrefix+"%").Scan(&count)
+	return count > 0, err
+}
+
 func (d *DB) SetReputation(userID int64, targetRep int, reason string, byUserID int64) error {
 	now := time.Now()
 	tx, err := d.Begin()
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var currentRep int
 	err = tx.QueryRow(`SELECT reputation FROM users WHERE user_id = ?`, userID).Scan(&currentRep)
@@ -313,9 +428,21 @@ func (d *DB) IncrementWarning(userID int64) (int, error) {
 	return newWarns, err
 }
 
+func (d *DB) ResetWarnings(userID int64) error {
+	now := time.Now()
+	_, err := d.Exec(`UPDATE users SET warn_count = 0, updated_at = ? WHERE user_id = ?`, now, userID)
+	return err
+}
+
 func (d *DB) SetUserBanned(userID int64, banned bool) error {
 	now := time.Now()
 	_, err := d.Exec(`UPDATE users SET is_banned = ?, updated_at = ? WHERE user_id = ?`, banned, now, userID)
+	return err
+}
+
+func (d *DB) SetUserAdmin(userID int64, isAdmin bool) error {
+	now := time.Now()
+	_, err := d.Exec(`UPDATE users SET is_admin = ?, updated_at = ? WHERE user_id = ?`, isAdmin, now, userID)
 	return err
 }
 
@@ -494,19 +621,29 @@ func (d *DB) PruneUserPostHistory(maxPostsPerUser int) (int64, error) {
 // Stats
 
 type Stats struct {
-	TotalUsers     int   `json:"total_users"`
-	TotalGroups    int   `json:"total_groups"`
-	TotalMessages  int   `json:"total_messages"`
-	PendingFlags   int   `json:"pending_flags"`
-	ResolvedFlags  int   `json:"resolved_flags"`
+	TotalUsers    int `json:"total_users"`
+	TotalGroups   int `json:"total_groups"`
+	TotalMessages int `json:"total_messages"`
+	PendingFlags  int `json:"pending_flags"`
+	ResolvedFlags int `json:"resolved_flags"`
 }
 
 func (d *DB) GetStats() (*Stats, error) {
 	var s Stats
-	d.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&s.TotalUsers)
-	d.QueryRow(`SELECT COUNT(*) FROM groups WHERE is_monitored = 1`).Scan(&s.TotalGroups)
-	d.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&s.TotalMessages)
-	d.QueryRow(`SELECT COUNT(*) FROM flagged_posts WHERE status = 'pending'`).Scan(&s.PendingFlags)
-	d.QueryRow(`SELECT COUNT(*) FROM flagged_posts WHERE status != 'pending'`).Scan(&s.ResolvedFlags)
+	if err := d.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&s.TotalUsers); err != nil {
+		return nil, err
+	}
+	if err := d.QueryRow(`SELECT COUNT(*) FROM groups WHERE is_monitored = 1`).Scan(&s.TotalGroups); err != nil {
+		return nil, err
+	}
+	if err := d.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&s.TotalMessages); err != nil {
+		return nil, err
+	}
+	if err := d.QueryRow(`SELECT COUNT(*) FROM flagged_posts WHERE status = 'pending'`).Scan(&s.PendingFlags); err != nil {
+		return nil, err
+	}
+	if err := d.QueryRow(`SELECT COUNT(*) FROM flagged_posts WHERE status != 'pending'`).Scan(&s.ResolvedFlags); err != nil {
+		return nil, err
+	}
 	return &s, nil
 }

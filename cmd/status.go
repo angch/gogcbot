@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/angch/gogcbot/pkg/config"
 	"github.com/angch/gogcbot/pkg/db"
@@ -14,18 +15,23 @@ var statusCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.LoadConfig(cfgFile)
 		if err != nil {
-			return fmt.Errorf("failed to load configuration: %w", err)
+			return fmt.Errorf("failed to load configuration from '%s': %w\n-> Action: Ensure '%s' exists, or run 'gogcbot init-config' to create a default configuration.", cfgFile, err, cfgFile)
 		}
 
-		database, err := db.OpenDB(cfg.DBPath)
+		dbPath := cfg.DBPath
+		if !filepath.IsAbs(dbPath) {
+			dbPath = filepath.Join(filepath.Dir(cfgFile), dbPath)
+		}
+
+		database, err := db.OpenDB(dbPath)
 		if err != nil {
-			return fmt.Errorf("failed to open database at %s: %w", cfg.DBPath, err)
+			return fmt.Errorf("failed to open database at '%s': %w\n-> Action: Verify that '%s' exists and you have read/write permissions.", dbPath, err, dbPath)
 		}
 		defer database.Close()
 
 		stats, err := database.GetStats()
 		if err != nil {
-			return fmt.Errorf("failed to query database stats: %w", err)
+			return fmt.Errorf("failed to query database stats: %w\n-> Action: Ensure the database schema is initialized by running 'gogcbot run'.", err)
 		}
 
 		fmt.Println("📊 === GoGCBot Status Summary ===")
