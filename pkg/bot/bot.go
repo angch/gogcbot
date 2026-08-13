@@ -76,6 +76,9 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 // Send wraps b.api.Send to echo all outgoing Telegram API message calls to standard logs for debugging.
 func (b *Bot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	log.Printf("[Telegram API Call] Send -> Payload: %#v", c)
+	if b.api == nil {
+		return tgbotapi.Message{}, nil
+	}
 	msg, err := b.api.Send(c)
 	if err != nil {
 		log.Printf("[Telegram API Error] Send failed: %v", err)
@@ -88,6 +91,9 @@ func (b *Bot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 // Request wraps b.api.Request to echo all outgoing Telegram API request calls to standard logs for debugging.
 func (b *Bot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 	log.Printf("[Telegram API Call] Request -> Payload: %#v", c)
+	if b.api == nil {
+		return &tgbotapi.APIResponse{Ok: true}, nil
+	}
 	resp, err := b.api.Request(c)
 	if err != nil {
 		log.Printf("[Telegram API Error] Request failed: %v", err)
@@ -100,6 +106,9 @@ func (b *Bot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 // GetChatMember wraps b.api.GetChatMember to echo chat member query calls to standard logs for debugging.
 func (b *Bot) GetChatMember(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
 	log.Printf("[Telegram API Call] GetChatMember -> ChatID: %d | UserID: %d", config.ChatID, config.UserID)
+	if b.api == nil {
+		return tgbotapi.ChatMember{Status: "member"}, nil
+	}
 	cm, err := b.api.GetChatMember(config)
 	if err != nil {
 		log.Printf("[Telegram API Error] GetChatMember failed: %v", err)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/angch/gogcbot/pkg/config"
 	"github.com/angch/gogcbot/pkg/db"
+	"github.com/angch/gogcbot/pkg/detector"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
@@ -88,4 +89,43 @@ func TestHandleChatMemberUpdate_DetectsBanChanged(t *testing.T) {
 
 	// Should not panic, logs detection and schedules re-ban recheck
 	b.handleChatMemberUpdate(cmu)
+}
+
+func TestSendTriggerBanAlert(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	user, _, _ := b.db.GetOrCreateUser(998877, "spammer", "Spam", "User", 0)
+
+	// Case 1: ModerationGroupID == 0 (Warning logged, no error)
+	b.cfg.ModerationGroupID = 0
+	if err := b.SendTriggerBanAlert(-1001, user, 42, "Chinese spam trigger"); err != nil {
+		t.Errorf("expected no error when mod group is 0, got %v", err)
+	}
+
+	// Case 2: ModerationGroupID set
+	b.cfg.ModerationGroupID = -100998877
+	if err := b.SendTriggerBanAlert(-1001, user, 42, "Chinese spam trigger"); err != nil {
+		t.Errorf("expected no error when sending trigger ban alert, got %v", err)
+	}
+}
+
+func TestExecuteActions_BanUser(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	user, _, _ := b.db.GetOrCreateUser(112233, "badactor", "Bad", "Actor", 0)
+
+	b.ExecuteActions(-1001, user, 101, []detector.Action{
+		{Type: detector.ActionBanUser, Reason: "Detection trigger: High-ID Chinese Spam"},
+	})
+
+	u, err := b.db.GetUserByID(user.UserID)
+	if err != nil {
+		t.Fatalf("failed to fetch user: %v", err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user IsBanned to be true after ExecuteActions ActionBanUser")
+	}
 }

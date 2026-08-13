@@ -485,6 +485,15 @@ func (d *DB) GetMonitoredGroups() ([]Group, error) {
 	return groups, nil
 }
 
+func (d *DB) GetGroup(chatID int64) (*Group, error) {
+	row := d.QueryRow(`SELECT chat_id, title, type, is_monitored, added_at, updated_at FROM groups WHERE chat_id = ?`, chatID)
+	var g Group
+	if err := row.Scan(&g.ChatID, &g.Title, &g.Type, &g.IsMonitored, &g.AddedAt, &g.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &g, nil
+}
+
 // Message Methods
 
 func (d *DB) SaveMessage(msg *Message) error {

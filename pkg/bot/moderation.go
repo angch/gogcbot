@@ -311,6 +311,70 @@ func truncateText(text string, maxLen int) string {
 	return text[:maxLen] + "..."
 }
 
+// SendTriggerBanAlert sends a notification message to the management monitoring channel (b.cfg.ModerationGroupID)
+// whenever a user ban is triggered by an automated detection trigger.
+func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, messageID int, reason string) error {
+	modGroupID := b.cfg.ModerationGroupID
+	if modGroupID == 0 {
+		log.Printf("[Bot] Warning: ModerationGroupID not set. Cannot send trigger ban alert for user %d in chat %d", user.UserID, chatID)
+		return nil
+	}
+
+	groupTitle := fmt.Sprintf("Chat %d", chatID)
+	if group, err := b.db.GetGroup(chatID); err == nil && group != nil && group.Title != "" {
+		groupTitle = group.Title
+	}
+
+	totalUserMsgs, _ := b.db.GetUserMessageCount(user.UserID)
+
+	userDisplayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+	if userDisplayName == "" {
+		userDisplayName = fmt.Sprintf("User %d", user.UserID)
+	}
+
+	usernameStr := user.Username
+	if usernameStr == "" {
+		usernameStr = "none"
+	}
+
+	text := fmt.Sprintf(
+		"🚫 **TRIGGER BAN EXECUTED**\n\n"+
+			"📌 **Reason**: `%s`\n\n"+
+			"👤 **User**: %s (@%s)\n"+
+			"🆔 **User ID**: `%d`\n"+
+			"⭐ **Reputation**: `%d` | ⚠️ **Warns**: `%d` | 💬 **Logged Posts**: `%d`\n\n"+
+			"👥 **Group**: %s (`%d`)\n"+
+			"🆔 **Message ID**: `%d`\n"+
+			"🕒 **Time**: `%s`",
+		escapeMarkdown(reason),
+		escapeMarkdown(userDisplayName),
+		escapeMarkdown(usernameStr),
+		user.UserID,
+		user.Reputation,
+		user.WarnCount,
+		totalUserMsgs,
+		escapeMarkdown(groupTitle),
+		chatID,
+		messageID,
+		time.Now().Format("2006-01-02 15:04:05 MST"),
+	)
+
+	msgConfig := tgbotapi.NewMessage(modGroupID, text)
+	msgConfig.ParseMode = tgbotapi.ModeMarkdown
+
+	_, err := b.Send(msgConfig)
+	if err != nil {
+		// Fallback without markdown formatting if markdown fails
+		msgConfig.ParseMode = ""
+		_, err = b.Send(msgConfig)
+		if err != nil {
+			log.Printf("[Bot Error] Failed to send trigger ban alert to mod group: %v", err)
+			return fmt.Errorf("failed to send trigger ban alert: %w", err)
+		}
+	}
+	return nil
+}
+
 // ExecuteActions executes a set of actions returned by detection triggers against a chat message and user.
 func (b *Bot) ExecuteActions(chatID int64, user *db.User, messageID int, actions []detector.Action) {
 	for _, act := range actions {
@@ -333,6 +397,10 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, messageID int, actions
 				b.ScheduleBanRecheck(chatID, user.UserID, delay)
 			}
 			_ = b.db.SetUserBanned(user.UserID, true)
+
+			if err := b.SendTriggerBanAlert(chatID, user, messageID, act.Reason); err != nil {
+				log.Printf("[Bot Action Error] Failed to send trigger ban alert: %v", err)
+			}
 
 		case detector.ActionAdjustReputation:
 			log.Printf("[Bot Action] Adjusting reputation for user %d by %d (reason: %s)", user.UserID, act.RepDelta, act.Reason)
