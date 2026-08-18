@@ -264,3 +264,87 @@ func TestHandleMessage_FirstNonEmptyMessageFlagged(t *testing.T) {
 		t.Errorf("expected 1 pending flag for first non-empty message with low rep, got %d", pendingFlags)
 	}
 }
+
+func TestHandleMessage_CJKSpamAfterFirstEmptyMessage_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.cfg.Reputation.DefaultInitial = 0
+	b.cfg.Reputation.FlagThreshold = 40
+	b.cfg.Detector.Enabled = true
+	b.cfg.Detector.NewUserCJK.Enabled = true
+	b.cfg.Detector.NewUserCJK.MinHighUserID = 1000000000
+	b.cfg.Detector.NewUserCJK.MaxReputation = 5
+	b.cfg.Detector.NewUserCJK.MaxUserPosts = 5
+	b.cfg.Detector.NewUserCJK.RepPenalty = 20
+
+	det := detector.NewDetector(detector.NewNewUserCJKTrigger(b.cfg.Detector.NewUserCJK))
+	b.detector = det
+
+	chatID := int64(-1001072966891)
+	userID := int64(6170094611)
+
+	// Save group so it's monitored
+	_ = b.db.SaveGroup(chatID, "Test Monitored Group", "supergroup")
+
+	// Message 1: Empty message from new user
+	emptyMsg := &tgbotapi.Message{
+		MessageID: 64839,
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "",
+			FirstName: "Kamsa",
+			LastName:  "Jangid",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		Text: "",
+		Date: int(time.Now().Unix()),
+	}
+	b.handleMessage(emptyMsg)
+
+	userAfterFirst, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to get user: %v", err)
+	}
+	if userAfterFirst.IsBanned {
+		t.Errorf("expected user not to be banned after first empty message")
+	}
+	if userAfterFirst.Reputation != 0 {
+		t.Errorf("expected user rep to be 0 (no bump on empty message), got %d", userAfterFirst.Reputation)
+	}
+
+	// Message 2: Affiliate scam message with CJK characters
+	spamMsg := &tgbotapi.Message{
+		MessageID: 64841,
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "",
+			FirstName: "Kamsa",
+			LastName:  "Jangid",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		Text: "油管联盟-fb联盟-外汇盘-币盘-商城盘-NFT盘-刷单盘-提供模特视频-可以挂自己地址和客服-联系; @ Ai16811",
+		Date: int(time.Now().Unix()),
+	}
+	b.handleMessage(spamMsg)
+
+	userAfterSpam, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to get user after spam: %v", err)
+	}
+	if !userAfterSpam.IsBanned {
+		t.Errorf("expected user to be banned after sending CJK spam message, but was not banned")
+	}
+	if userAfterSpam.Reputation != -20 {
+		t.Errorf("expected user reputation to be -20, got %d", userAfterSpam.Reputation)
+	}
+}

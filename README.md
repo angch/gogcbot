@@ -142,6 +142,15 @@ reputation:
   mute_penalty: 30
   ban_penalty: 50
 
+detector:
+  enabled: true
+  new_user_cjk:
+    enabled: true
+    min_high_user_id: 1000000000       # User ID threshold for newly generated accounts
+    max_reputation: 5                  # Maximum reputation score to apply detection
+    max_user_posts: 5                  # Post count window for new user evaluation
+    rep_penalty: 20                    # Reputation penalty applied upon detection
+
 shieldy:
   enabled: true                       # Enable Shieldy captcha bot verification
   rep_bonus: 5                        # Rep bonus for typing "I am not a bot"

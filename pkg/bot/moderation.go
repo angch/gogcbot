@@ -452,18 +452,10 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, messageID int, actions
 			}
 
 		case detector.ActionBanUser:
-			log.Printf("[Bot Action] Banning user %d in chat %d (reason: %s)", user.UserID, chatID, act.Reason)
-			if err := b.BanUserInGroup(chatID, user.UserID); err != nil {
-				log.Printf("[Bot Action Error] Failed to ban user %d in chat %d: %v", user.UserID, chatID, err)
-			} else {
-				delay := time.Duration(b.cfg.Shieldy.RecheckDelayMinutes) * time.Minute
-				if delay <= 0 {
-					delay = 6 * time.Minute
-				}
-				b.ScheduleBanRecheck(chatID, user.UserID, delay)
+			log.Printf("[Bot Action] Banning user %d across groups (reason: %s)", user.UserID, act.Reason)
+			if err := b.BanUserAcrossAllGroups(user.UserID, chatID); err != nil {
+				log.Printf("[Bot Action Error] Failed to ban user %d across groups: %v", user.UserID, err)
 			}
-			_ = b.db.SetUserBanned(user.UserID, true)
-
 			if err := b.SendTriggerBanAlert(chatID, user, messageID, act.Reason); err != nil {
 				log.Printf("[Bot Action Error] Failed to send trigger ban alert: %v", err)
 			}

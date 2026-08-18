@@ -243,12 +243,11 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			if err := b.SendFirstEmptyMessageInfo(chat.ID, dbMsg, user, chat.Title); err != nil {
 				log.Printf("[Bot] Error sending first empty message info: %v", err)
 			}
-			b.bumpUnflaggedReputation(user)
 			return
 		}
 
 		flagged := b.checkAutoFlagRules(msg, dbMsg, user, chat.Title)
-		if !flagged {
+		if !flagged && strings.TrimSpace(text) != "" {
 			b.bumpUnflaggedReputation(user)
 		}
 	}

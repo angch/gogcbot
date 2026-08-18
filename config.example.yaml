@@ -33,7 +33,8 @@ detector:
   new_user_cjk:
     enabled: true
     min_high_user_id: 1000000000
-    max_reputation: 0
+    max_reputation: 5
+    max_user_posts: 5
     rep_penalty: 20
 
 shieldy:

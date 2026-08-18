@@ -12,7 +12,8 @@ func TestNewUserCJKTrigger_Evaluate(t *testing.T) {
 	cfg := NewUserCJKTriggerConfig{
 		Enabled:       true,
 		MinHighUserID: 1000000000,
-		MaxReputation: 0,
+		MaxReputation: 5,
+		MaxUserPosts:  5,
 		RepPenalty:    20,
 	}
 	trig := NewNewUserCJKTriggerWithDetector(cfg, ld)
@@ -50,6 +51,49 @@ func TestNewUserCJKTrigger_Evaluate(t *testing.T) {
 			wantActions:   3,
 		},
 		{
+			name: "Matching high-ID user on 2nd post (IsNewUser: false, UserMessageCount: 2) with 1 rep sending 六栢o壹天",
+			ctx: &TriggerContext{
+				IsNewUser:        false,
+				UserMessageCount: 2,
+				User: &db.User{
+					UserID:     8972972199,
+					Reputation: 1,
+				},
+				Text: "六栢o壹天",
+			},
+			wantTriggered: true,
+			wantActions:   3,
+		},
+		{
+			name: "Matching high-ID user on 2nd post after empty first message sending syndicate scam message with contact",
+			ctx: &TriggerContext{
+				IsNewUser:        false,
+				UserMessageCount: 2,
+				User: &db.User{
+					UserID:     6170094611,
+					Reputation: 1,
+				},
+				Text: "油管联盟-fb联盟-外汇盘-币盘-商城盘-NFT盘-刷单盘-提供模特视频-可以挂自己地址和客服-联系; @ Ai16811",
+			},
+			wantTriggered: true,
+			wantActions:   3,
+		},
+		{
+			name: "Matching high-ID user who got Shieldy rep bonus (Reputation: 5, UserMessageCount: 2) sending CJK spam",
+			ctx: &TriggerContext{
+				IsNewUser:         false,
+				UserMessageCount:  2,
+				HasVerifiedNotBot: true,
+				User: &db.User{
+					UserID:     8887001007,
+					Reputation: 5,
+				},
+				Text: "六栢o壹天",
+			},
+			wantTriggered: true,
+			wantActions:   3,
+		},
+		{
 			name: "Matching new high-ID user sending spam phrase with 六栢o壹天",
 			ctx: &TriggerContext{
 				IsNewUser: true,
@@ -63,9 +107,10 @@ func TestNewUserCJKTrigger_Evaluate(t *testing.T) {
 			wantActions:   3,
 		},
 		{
-			name: "Not new user (seen before)",
+			name: "Established user seen before with high post count (>5)",
 			ctx: &TriggerContext{
-				IsNewUser: false,
+				IsNewUser:        false,
+				UserMessageCount: 15,
 				User: &db.User{
 					UserID:     5000000000,
 					Reputation: 0,
@@ -89,12 +134,12 @@ func TestNewUserCJKTrigger_Evaluate(t *testing.T) {
 			wantActions:   0,
 		},
 		{
-			name: "High rep user",
+			name: "High rep user (> max_reputation 5)",
 			ctx: &TriggerContext{
 				IsNewUser: true,
 				User: &db.User{
 					UserID:     5000000000,
-					Reputation: 10,
+					Reputation: 50,
 				},
 				Text: "恭喜发财 万事如意",
 			},
@@ -192,20 +237,6 @@ func TestNewUserCJKTrigger_Evaluate(t *testing.T) {
 			wantTriggered: false,
 			wantActions:   0,
 		},
-		{
-			name: "User with HasVerifiedNotBot flag set should not trigger CJK ban even if message has CJK",
-			ctx: &TriggerContext{
-				IsNewUser: true,
-				User: &db.User{
-					UserID:     5000000000,
-					Reputation: 0,
-				},
-				Text:              "恭喜发财 万事如意",
-				HasVerifiedNotBot: true,
-			},
-			wantTriggered: false,
-			wantActions:   0,
-		},
 	}
 
 	for _, tt := range tests {
@@ -258,6 +289,7 @@ func TestNewUserCJKTrigger_IsOnlyCJK_And_ContainsCJK(t *testing.T) {
 		{"六百一天", true},
 		{"六佰一天", true},
 		{"兼职日结 六栢o壹天", true},
+		{"油管联盟-fb联盟-外汇盘-币盘-商城盘-NFT盘-刷单盘-提供模特视频-可以挂自己地址和客服-联系; @ Ai16811", true},
 		{"你好！今天怎么样？", true},
 		{"恭喜发财 123", true},
 		{"無風險有想法的莱", true},

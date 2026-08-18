@@ -97,7 +97,8 @@ func DefaultConfig() Config {
 			NewUserCJK: detector.NewUserCJKTriggerConfig{
 				Enabled:       true,
 				MinHighUserID: 1000000000,
-				MaxReputation: 0,
+				MaxReputation: 5,
+				MaxUserPosts:  5,
 				RepPenalty:    20,
 			},
 		},
@@ -143,12 +144,14 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.enabled", true)
 	v.SetDefault("detector.new_user_cjk.enabled", true)
 	v.SetDefault("detector.new_user_cjk.min_high_user_id", int64(1000000000))
-	v.SetDefault("detector.new_user_cjk.max_reputation", 0)
+	v.SetDefault("detector.new_user_cjk.max_reputation", 5)
+	v.SetDefault("detector.new_user_cjk.max_user_posts", 5)
 	v.SetDefault("detector.new_user_cjk.rep_penalty", 20)
 
 	v.SetDefault("detector.new_user_chinese.enabled", true)
 	v.SetDefault("detector.new_user_chinese.min_high_user_id", int64(1000000000))
-	v.SetDefault("detector.new_user_chinese.max_reputation", 0)
+	v.SetDefault("detector.new_user_chinese.max_reputation", 5)
+	v.SetDefault("detector.new_user_chinese.max_user_posts", 5)
 	v.SetDefault("detector.new_user_chinese.rep_penalty", 20)
 
 	v.SetDefault("shieldy.enabled", true)

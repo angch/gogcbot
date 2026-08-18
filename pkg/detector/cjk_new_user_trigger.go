@@ -12,6 +12,7 @@ type NewUserCJKTriggerConfig struct {
 	Enabled         bool  `mapstructure:"enabled" yaml:"enabled"`
 	MinHighUserID   int64 `mapstructure:"min_high_user_id" yaml:"min_high_user_id"`
 	MaxReputation   int   `mapstructure:"max_reputation" yaml:"max_reputation"`
+	MaxUserPosts    int   `mapstructure:"max_user_posts" yaml:"max_user_posts"`
 	MinCJKChars     int   `mapstructure:"min_cjk_chars" yaml:"min_cjk_chars"`
 	MinChineseChars int   `mapstructure:"min_chinese_chars" yaml:"min_chinese_chars"` // Backwards compatibility alias
 	RepPenalty      int   `mapstructure:"rep_penalty" yaml:"rep_penalty"`
@@ -73,13 +74,18 @@ func (t *NewUserCJKTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, error
 		return &TriggerResult{Triggered: false}, nil
 	}
 
-	// Condition 0: Shieldy verification message ("I am not a bot") or verified user
-	if ctx.HasVerifiedNotBot || IsShieldyVerificationText(ctx.Text) {
+	// Condition 0: Shieldy verification text message ("I am not a bot")
+	if IsShieldyVerificationText(ctx.Text) {
 		return &TriggerResult{Triggered: false}, nil
 	}
 
-	// Condition 1: Must be a new user we have not seen before
-	if !ctx.IsNewUser {
+	// Condition 1: Must be a new user (newly created in DB or within max user post threshold)
+	maxPosts := t.cfg.MaxUserPosts
+	if maxPosts <= 0 {
+		maxPosts = 5
+	}
+	isNewUser := ctx.IsNewUser || (ctx.UserMessageCount > 0 && ctx.UserMessageCount <= maxPosts)
+	if !isNewUser {
 		return &TriggerResult{Triggered: false}, nil
 	}
 
