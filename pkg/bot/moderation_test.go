@@ -99,13 +99,13 @@ func TestSendTriggerBanAlert(t *testing.T) {
 
 	// Case 1: ModerationGroupID == 0 (Warning logged, no error)
 	b.cfg.ModerationGroupID = 0
-	if err := b.SendTriggerBanAlert(-1001, user, 42, "Chinese spam trigger"); err != nil {
+	if err := b.SendTriggerBanAlert(-1001, user, 42, "CJK spam trigger"); err != nil {
 		t.Errorf("expected no error when mod group is 0, got %v", err)
 	}
 
 	// Case 2: ModerationGroupID set
 	b.cfg.ModerationGroupID = -100998877
-	if err := b.SendTriggerBanAlert(-1001, user, 42, "Chinese spam trigger"); err != nil {
+	if err := b.SendTriggerBanAlert(-1001, user, 42, "CJK spam trigger"); err != nil {
 		t.Errorf("expected no error when sending trigger ban alert, got %v", err)
 	}
 }
@@ -118,7 +118,7 @@ func TestExecuteActions_BanUser(t *testing.T) {
 	user, _, _ := b.db.GetOrCreateUser(112233, "badactor", "Bad", "Actor", 0)
 
 	b.ExecuteActions(-1001, user, 101, []detector.Action{
-		{Type: detector.ActionBanUser, Reason: "Detection trigger: High-ID Chinese Spam"},
+		{Type: detector.ActionBanUser, Reason: "Detection trigger: High-ID CJK Spam"},
 	})
 
 	u, err := b.db.GetUserByID(user.UserID)

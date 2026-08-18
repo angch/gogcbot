@@ -54,8 +54,12 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 
 	det := detector.NewDetector()
 	if cfg.Detector.Enabled {
-		if cfg.Detector.NewUserChinese.Enabled {
-			det.RegisterTrigger(detector.NewNewUserChineseTrigger(cfg.Detector.NewUserChinese))
+		if cfg.Detector.NewUserCJK.Enabled || cfg.Detector.NewUserChinese.Enabled {
+			cjkCfg := cfg.Detector.NewUserCJK
+			if !cjkCfg.Enabled && cfg.Detector.NewUserChinese.Enabled {
+				cjkCfg = cfg.Detector.NewUserChinese
+			}
+			det.RegisterTrigger(detector.NewNewUserCJKTrigger(cjkCfg))
 		}
 	}
 

@@ -149,11 +149,11 @@ func TestDefaultConfig_DefaultInitialZero(t *testing.T) {
 	if !cfg.Detector.Enabled {
 		t.Errorf("Expected Detector.Enabled to be true by default")
 	}
-	if !cfg.Detector.NewUserChinese.Enabled {
-		t.Errorf("Expected Detector.NewUserChinese.Enabled to be true by default")
+	if !cfg.Detector.NewUserCJK.Enabled {
+		t.Errorf("Expected Detector.NewUserCJK.Enabled to be true by default")
 	}
-	if cfg.Detector.NewUserChinese.MinHighUserID != 1000000000 {
-		t.Errorf("Expected MinHighUserID 1000000000, got %d", cfg.Detector.NewUserChinese.MinHighUserID)
+	if cfg.Detector.NewUserCJK.MinHighUserID != 1000000000 {
+		t.Errorf("Expected MinHighUserID 1000000000, got %d", cfg.Detector.NewUserCJK.MinHighUserID)
 	}
 	if !cfg.Shieldy.Enabled {
 		t.Errorf("Expected Shieldy.Enabled to be true by default")
@@ -163,5 +163,41 @@ func TestDefaultConfig_DefaultInitialZero(t *testing.T) {
 	}
 	if cfg.Shieldy.MaxMessages != 5 {
 		t.Errorf("Expected Shieldy.MaxMessages to be 5 by default, got %d", cfg.Shieldy.MaxMessages)
+	}
+}
+
+func TestLoadConfig_LegacyNewUserChineseCompatibility(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "legacy_config.yaml")
+
+	content := `
+detector:
+  enabled: true
+  new_user_chinese:
+    enabled: true
+    min_high_user_id: 2000000000
+    max_reputation: 5
+    rep_penalty: 35
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if !cfg.Detector.NewUserCJK.Enabled {
+		t.Errorf("Expected NewUserCJK to be enabled from legacy new_user_chinese config")
+	}
+	if cfg.Detector.NewUserCJK.MinHighUserID != 2000000000 {
+		t.Errorf("Expected MinHighUserID 2000000000, got %d", cfg.Detector.NewUserCJK.MinHighUserID)
+	}
+	if cfg.Detector.NewUserCJK.MaxReputation != 5 {
+		t.Errorf("Expected MaxReputation 5, got %d", cfg.Detector.NewUserCJK.MaxReputation)
+	}
+	if cfg.Detector.NewUserCJK.RepPenalty != 35 {
+		t.Errorf("Expected RepPenalty 35, got %d", cfg.Detector.NewUserCJK.RepPenalty)
 	}
 }

@@ -7,15 +7,15 @@ import (
 	lingua "github.com/pemistahl/lingua-go"
 )
 
-func TestNewUserChineseTrigger_Evaluate(t *testing.T) {
+func TestNewUserCJKTrigger_Evaluate(t *testing.T) {
 	ld := lingua.NewLanguageDetectorBuilder().FromAllLanguages().Build()
-	cfg := NewUserChineseTriggerConfig{
+	cfg := NewUserCJKTriggerConfig{
 		Enabled:       true,
 		MinHighUserID: 1000000000,
 		MaxReputation: 0,
 		RepPenalty:    20,
 	}
-	trig := NewNewUserChineseTriggerWithDetector(cfg, ld)
+	trig := NewNewUserCJKTriggerWithDetector(cfg, ld)
 
 	tests := []struct {
 		name          string
@@ -32,6 +32,32 @@ func TestNewUserChineseTrigger_Evaluate(t *testing.T) {
 					Reputation: 0,
 				},
 				Text: "恭喜发财 万事如意",
+			},
+			wantTriggered: true,
+			wantActions:   3,
+		},
+		{
+			name: "Matching new high-ID user sending 六栢o壹天 phrase",
+			ctx: &TriggerContext{
+				IsNewUser: true,
+				User: &db.User{
+					UserID:     6000000001,
+					Reputation: 0,
+				},
+				Text: "六栢o壹天",
+			},
+			wantTriggered: true,
+			wantActions:   3,
+		},
+		{
+			name: "Matching new high-ID user sending spam phrase with 六栢o壹天",
+			ctx: &TriggerContext{
+				IsNewUser: true,
+				User: &db.User{
+					UserID:     6000000002,
+					Reputation: 0,
+				},
+				Text: "兼职日结 六栢o壹天 联系TG",
 			},
 			wantTriggered: true,
 			wantActions:   3,
@@ -128,7 +154,33 @@ func TestNewUserChineseTrigger_Evaluate(t *testing.T) {
 			wantActions:   3,
 		},
 		{
-			name: "Shieldy verification text (I am not a bot) should not trigger Chinese ban",
+			name: "Japanese message from new high-ID user",
+			ctx: &TriggerContext{
+				IsNewUser: true,
+				User: &db.User{
+					UserID:     7778889999,
+					Reputation: 0,
+				},
+				Text: "こんにちは世界",
+			},
+			wantTriggered: true,
+			wantActions:   3,
+		},
+		{
+			name: "Korean message from new high-ID user",
+			ctx: &TriggerContext{
+				IsNewUser: true,
+				User: &db.User{
+					UserID:     7778889998,
+					Reputation: 0,
+				},
+				Text: "안녕하세요 반갑습니다",
+			},
+			wantTriggered: true,
+			wantActions:   3,
+		},
+		{
+			name: "Shieldy verification text (I am not a bot) should not trigger CJK ban",
 			ctx: &TriggerContext{
 				IsNewUser: true,
 				User: &db.User{
@@ -141,7 +193,7 @@ func TestNewUserChineseTrigger_Evaluate(t *testing.T) {
 			wantActions:   0,
 		},
 		{
-			name: "User with HasVerifiedNotBot flag set should not trigger Chinese ban even if message has Chinese",
+			name: "User with HasVerifiedNotBot flag set should not trigger CJK ban even if message has CJK",
 			ctx: &TriggerContext{
 				IsNewUser: true,
 				User: &db.User{
@@ -192,34 +244,77 @@ func TestNewUserChineseTrigger_Evaluate(t *testing.T) {
 	}
 }
 
-func TestNewUserChineseTrigger_IsOnlyChinese(t *testing.T) {
+func TestNewUserCJKTrigger_IsOnlyCJK_And_ContainsCJK(t *testing.T) {
 	ld := lingua.NewLanguageDetectorBuilder().FromAllLanguages().Build()
-	cfg := NewUserChineseTriggerConfig{Enabled: true}
-	trig := NewNewUserChineseTriggerWithDetector(cfg, ld)
+	cfg := NewUserCJKTriggerConfig{Enabled: true}
+	trig := NewNewUserCJKTriggerWithDetector(cfg, ld)
 
 	tests := []struct {
 		text string
 		want bool
 	}{
 		{"你好世界", true},
+		{"六栢o壹天", true},
+		{"六百一天", true},
+		{"六佰一天", true},
+		{"兼职日结 六栢o壹天", true},
 		{"你好！今天怎么样？", true},
 		{"恭喜发财 123", true},
 		{"無風險有想法的莱", true},
 		{"演员来", true},
 		{"Hello 你好", true},
 		{"i test edge cases only. @hulksmashbannerbot 你是笨蛋吗？", true},
+		{"こんにちは", true},
+		{"カタカナ", true},
+		{"안녕하세요", true},
+		{"ㄅㄆㄇㄈ", true},
 		{"English text only", false},
 		{"123456", false},
+		{"!@#$%^&*()_+", false},
 		{"", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.text, func(t *testing.T) {
-			got := trig.IsOnlyChinese(tt.text)
+			got := trig.ContainsCJK(tt.text)
 			if got != tt.want {
-				t.Errorf("IsOnlyChinese(%q) = %v, want %v", tt.text, got, tt.want)
+				t.Errorf("ContainsCJK(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+			gotOnly := trig.IsOnlyCJK(tt.text)
+			if gotOnly != tt.want {
+				t.Errorf("IsOnlyCJK(%q) = %v, want %v", tt.text, gotOnly, tt.want)
+			}
+			// Test backwards compatibility aliases
+			gotChinese := trig.ContainsChinese(tt.text)
+			if gotChinese != tt.want {
+				t.Errorf("ContainsChinese(%q) = %v, want %v", tt.text, gotChinese, tt.want)
+			}
+			gotOnlyChinese := trig.IsOnlyChinese(tt.text)
+			if gotOnlyChinese != tt.want {
+				t.Errorf("IsOnlyChinese(%q) = %v, want %v", tt.text, gotOnlyChinese, tt.want)
 			}
 		})
+	}
+}
+
+func TestBackwardsCompatibilityConstructors(t *testing.T) {
+	cfg := NewUserChineseTriggerConfig{
+		Enabled:         true,
+		MinHighUserID:   1000000000,
+		MaxReputation:   0,
+		MinChineseChars: 1,
+		RepPenalty:      20,
+	}
+
+	trig1 := NewNewUserChineseTrigger(cfg)
+	if trig1.ID() != "new_user_cjk" {
+		t.Errorf("Expected ID 'new_user_cjk', got %q", trig1.ID())
+	}
+
+	ld := lingua.NewLanguageDetectorBuilder().FromAllLanguages().Build()
+	trig2 := NewNewUserChineseTriggerWithDetector(cfg, ld)
+	if !trig2.ContainsCJK("六栢o壹天") {
+		t.Errorf("Expected ContainsCJK to be true for 六栢o壹天")
 	}
 }
 

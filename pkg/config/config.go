@@ -36,8 +36,9 @@ type ShieldyConfig struct {
 
 // DetectorConfig defines settings for modular detection triggers.
 type DetectorConfig struct {
-	Enabled        bool                                 `mapstructure:"enabled" yaml:"enabled"`
-	NewUserChinese detector.NewUserChineseTriggerConfig `mapstructure:"new_user_chinese" yaml:"new_user_chinese"`
+	Enabled        bool                             `mapstructure:"enabled" yaml:"enabled"`
+	NewUserCJK     detector.NewUserCJKTriggerConfig `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
+	NewUserChinese detector.NewUserCJKTriggerConfig `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -93,7 +94,7 @@ func DefaultConfig() Config {
 		},
 		Detector: DetectorConfig{
 			Enabled: true,
-			NewUserChinese: detector.NewUserChineseTriggerConfig{
+			NewUserCJK: detector.NewUserCJKTriggerConfig{
 				Enabled:       true,
 				MinHighUserID: 1000000000,
 				MaxReputation: 0,
@@ -140,6 +141,11 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("reputation.ban_penalty", 50)
 
 	v.SetDefault("detector.enabled", true)
+	v.SetDefault("detector.new_user_cjk.enabled", true)
+	v.SetDefault("detector.new_user_cjk.min_high_user_id", int64(1000000000))
+	v.SetDefault("detector.new_user_cjk.max_reputation", 0)
+	v.SetDefault("detector.new_user_cjk.rep_penalty", 20)
+
 	v.SetDefault("detector.new_user_chinese.enabled", true)
 	v.SetDefault("detector.new_user_chinese.min_high_user_id", int64(1000000000))
 	v.SetDefault("detector.new_user_chinese.max_reputation", 0)
@@ -179,6 +185,10 @@ func LoadConfig(cfgFile string) (*Config, error) {
 	cfg := DefaultConfig()
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unable to decode config into struct: %w", err)
+	}
+
+	if (v.InConfig("detector.new_user_chinese") || cfg.Detector.NewUserChinese.MinHighUserID != 0 || cfg.Detector.NewUserChinese.RepPenalty != 0) && !v.InConfig("detector.new_user_cjk") {
+		cfg.Detector.NewUserCJK = cfg.Detector.NewUserChinese
 	}
 
 	return &cfg, nil

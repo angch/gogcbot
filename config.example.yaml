@@ -30,7 +30,7 @@ reputation:
 
 detector:
   enabled: true
-  new_user_chinese:
+  new_user_cjk:
     enabled: true
     min_high_user_id: 1000000000
     max_reputation: 0
