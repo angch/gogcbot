@@ -40,6 +40,7 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
      - Blocked spam/crypto keywords or custom regexes.
      - Reputation falling below threshold.
    - Dispatches automated ban notifications (`🚫 TRIGGER BAN EXECUTED`) directly to the Private Moderation Group / management monitoring channel whenever a ban is triggered by detection rules.
+   - Dispatches silent notifications (`ℹ️ FIRST MESSAGE SEEN (EMPTY)`) to the Private Moderation Group without flagging or penalizing when a new user's first message is empty.
    - Manual user/moderator reporting via `/flag [reason]` command.
 
 5. **Private Moderation Group Workflow**:

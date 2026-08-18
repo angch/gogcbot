@@ -22,6 +22,11 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 		return
 	}
 
+	if update.ChannelPost != nil {
+		b.handleMessage(update.ChannelPost)
+		return
+	}
+
 	if update.ChatMember != nil {
 		b.handleChatMemberUpdate(update.ChatMember)
 		return
@@ -69,7 +74,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 	chat := msg.Chat
 	// If message is in a supergroup/group/channel, track the group
-	if chat.IsGroup() || chat.IsSuperGroup() {
+	if chat.IsGroup() || chat.IsSuperGroup() || chat.IsChannel() {
 		_ = b.db.SaveGroup(chat.ID, chat.Title, chat.Type)
 	}
 
@@ -171,9 +176,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Moderation check only for monitored groups (not private chats or moderation group)
+	// Moderation check only for monitored groups/channels (not private chats or moderation group)
 	// Skip moderation for whitelisted users with maximum reputation (>= 100)
-	if (chat.IsGroup() || chat.IsSuperGroup()) && chat.ID != b.cfg.ModerationGroupID && user.Reputation < 100 {
+	if (chat.IsGroup() || chat.IsSuperGroup() || chat.IsChannel()) && chat.ID != b.cfg.ModerationGroupID && user.Reputation < 100 {
 		userMsgCount, _ := b.db.GetUserMessageCount(user.UserID)
 
 		hasVerified := false
@@ -229,6 +234,17 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 					return
 				}
 			}
+		}
+
+		// First message seen from user in monitored channel/group and message is empty:
+		// Don't flag, just send a silent info message to the moderation channel.
+		if (isNewUser || userMsgCount <= 1) && strings.TrimSpace(text) == "" {
+			log.Printf("[Bot] First message from user %d in chat %d is empty. Sending silent info message to moderation channel.", user.UserID, chat.ID)
+			if err := b.SendFirstEmptyMessageInfo(chat.ID, dbMsg, user, chat.Title); err != nil {
+				log.Printf("[Bot] Error sending first empty message info: %v", err)
+			}
+			b.bumpUnflaggedReputation(user)
+			return
 		}
 
 		flagged := b.checkAutoFlagRules(msg, dbMsg, user, chat.Title)

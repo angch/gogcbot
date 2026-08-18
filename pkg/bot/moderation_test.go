@@ -129,3 +129,138 @@ func TestExecuteActions_BanUser(t *testing.T) {
 		t.Errorf("expected user IsBanned to be true after ExecuteActions ActionBanUser")
 	}
 }
+
+func TestSendFirstEmptyMessageInfo(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	user, _, _ := b.db.GetOrCreateUser(334455, "emptyuser", "Empty", "User", 0)
+	msg := &db.Message{
+		ChatID:    -1001,
+		MessageID: 10,
+		UserID:    user.UserID,
+		Text:      "",
+		CreatedAt: time.Now(),
+	}
+
+	// Case 1: ModerationGroupID == 0 (Warning logged, no error)
+	b.cfg.ModerationGroupID = 0
+	if err := b.SendFirstEmptyMessageInfo(-1001, msg, user, "Test Group"); err != nil {
+		t.Errorf("expected no error when mod group is 0, got %v", err)
+	}
+
+	// Case 2: ModerationGroupID set
+	b.cfg.ModerationGroupID = -100998877
+	if err := b.SendFirstEmptyMessageInfo(-1001, msg, user, "Test Group"); err != nil {
+		t.Errorf("expected no error when sending first empty message info, got %v", err)
+	}
+}
+
+func TestHandleMessage_FirstEmptyMessageNotFlagged(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.cfg.Reputation.DefaultInitial = 0
+	b.cfg.Reputation.FlagThreshold = 40
+
+	chatID := int64(-100123)
+	userID := int64(778899)
+
+	// Message 1: First message from this user, and it is empty
+	emptyMsg := &tgbotapi.Message{
+		MessageID: 100,
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "firstempty",
+			FirstName: "First",
+			LastName:  "Empty",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Monitored Channel",
+			Type:  "supergroup",
+		},
+		Text: "",
+		Date: int(time.Now().Unix()),
+	}
+
+	b.handleMessage(emptyMsg)
+
+	// Ensure no flagged posts were created in DB
+	pendingFlags, err := b.db.GetPendingFlagsCount()
+	if err != nil {
+		t.Fatalf("failed to get pending flags count: %v", err)
+	}
+	if pendingFlags != 0 {
+		t.Errorf("expected 0 pending flags for first empty message, got %d", pendingFlags)
+	}
+
+	// Message 2: Second message from this user, also empty - should be flagged by low reputation rule
+	emptyMsg2 := &tgbotapi.Message{
+		MessageID: 101,
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "firstempty",
+			FirstName: "First",
+			LastName:  "Empty",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Monitored Channel",
+			Type:  "supergroup",
+		},
+		Text: "",
+		Date: int(time.Now().Unix()),
+	}
+
+	b.handleMessage(emptyMsg2)
+
+	pendingFlagsAfter, err := b.db.GetPendingFlagsCount()
+	if err != nil {
+		t.Fatalf("failed to get pending flags count: %v", err)
+	}
+	if pendingFlagsAfter != 1 {
+		t.Errorf("expected 1 pending flag for second empty message from low-rep user, got %d", pendingFlagsAfter)
+	}
+}
+
+func TestHandleMessage_FirstNonEmptyMessageFlagged(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.cfg.Reputation.DefaultInitial = 0
+	b.cfg.Reputation.FlagThreshold = 40
+
+	chatID := int64(-100123)
+	userID := int64(889900)
+
+	// Message: First message from this user, but has content and user has low rep (0 <= 40)
+	nonEmptyMsg := &tgbotapi.Message{
+		MessageID: 200,
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "nonempty",
+			FirstName: "Non",
+			LastName:  "Empty",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Monitored Channel",
+			Type:  "supergroup",
+		},
+		Text: "Hello world",
+		Date: int(time.Now().Unix()),
+	}
+
+	b.handleMessage(nonEmptyMsg)
+
+	pendingFlags, err := b.db.GetPendingFlagsCount()
+	if err != nil {
+		t.Fatalf("failed to get pending flags count: %v", err)
+	}
+	if pendingFlags != 1 {
+		t.Errorf("expected 1 pending flag for first non-empty message with low rep, got %d", pendingFlags)
+	}
+}

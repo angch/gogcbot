@@ -375,6 +375,72 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, messageID int, re
 	return nil
 }
 
+// SendFirstEmptyMessageInfo sends a silent notification to the moderation channel (b.cfg.ModerationGroupID)
+// when a user's first message seen in a monitored group/channel is empty.
+func (b *Bot) SendFirstEmptyMessageInfo(chatID int64, msg *db.Message, user *db.User, groupTitle string) error {
+	modGroupID := b.cfg.ModerationGroupID
+	if modGroupID == 0 {
+		log.Printf("[Bot] Warning: ModerationGroupID not set. Cannot send first empty message info for user %d in chat %d", user.UserID, chatID)
+		return nil
+	}
+
+	if groupTitle == "" {
+		groupTitle = fmt.Sprintf("Chat %d", chatID)
+		if group, err := b.db.GetGroup(chatID); err == nil && group != nil && group.Title != "" {
+			groupTitle = group.Title
+		}
+	}
+
+	totalUserMsgs, _ := b.db.GetUserMessageCount(user.UserID)
+
+	userDisplayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+	if userDisplayName == "" {
+		userDisplayName = fmt.Sprintf("User %d", user.UserID)
+	}
+
+	usernameStr := user.Username
+	if usernameStr == "" {
+		usernameStr = "none"
+	}
+
+	text := fmt.Sprintf(
+		"ℹ️ **FIRST MESSAGE SEEN (EMPTY)**\n\n"+
+			"📌 **Info**: Poster's first message is empty (unflagged)\n\n"+
+			"👤 **User**: %s (@%s)\n"+
+			"🆔 **User ID**: `%d`\n"+
+			"⭐ **Reputation**: `%d` | ⚠️ **Warns**: `%d` | 💬 **Logged Posts**: `%d`\n\n"+
+			"👥 **Group**: %s (`%d`)\n"+
+			"🆔 **Message ID**: `%d`\n"+
+			"🕒 **Time**: `%s`",
+		escapeMarkdown(userDisplayName),
+		escapeMarkdown(usernameStr),
+		user.UserID,
+		user.Reputation,
+		user.WarnCount,
+		totalUserMsgs,
+		escapeMarkdown(groupTitle),
+		chatID,
+		msg.MessageID,
+		msg.CreatedAt.Format("2006-01-02 15:04:05 MST"),
+	)
+
+	msgConfig := tgbotapi.NewMessage(modGroupID, text)
+	msgConfig.ParseMode = tgbotapi.ModeMarkdown
+	msgConfig.DisableNotification = true
+
+	_, err := b.Send(msgConfig)
+	if err != nil {
+		// Fallback without markdown formatting if markdown fails
+		msgConfig.ParseMode = ""
+		_, err = b.Send(msgConfig)
+		if err != nil {
+			log.Printf("[Bot Error] Failed to send first empty message info to mod group: %v", err)
+			return fmt.Errorf("failed to send first empty message info: %w", err)
+		}
+	}
+	return nil
+}
+
 // ExecuteActions executes a set of actions returned by detection triggers against a chat message and user.
 func (b *Bot) ExecuteActions(chatID int64, user *db.User, messageID int, actions []detector.Action) {
 	for _, act := range actions {
