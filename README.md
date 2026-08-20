@@ -57,6 +57,11 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
    - Dynamic `/setsuperadmin` and `/setmodgroup` commands automatically persist settings back to `config.yaml`.
    - Full control over bot settings, group monitoring management (`/addgroup`, `/removegroup`, `/listgroups`), and reputation overrides.
 
+8. **Spam Snippet & Bio Detection**:
+   - **Profile Bio Scanning**: Identifies unbanned new users whose profiles contain spam promotions, gift card scams, or syndicate marketing.
+   - **`spam_snippets` Database Table**: Stores dynamic spam snippets synced from runtime `config.yaml` or added programmatically.
+   - **CLI & Bot Commands**: Search and inspect suspicious bios via `gogcbot list-spambios` and `/listspambios`.
+
 ---
 
 ## 🚀 Installation & Usage
