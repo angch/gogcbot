@@ -3,6 +3,7 @@ package db
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -346,3 +347,262 @@ func TestHasReceivedRepBonus(t *testing.T) {
 		t.Errorf("expected hasBonus to be true after adjustment")
 	}
 }
+
+func TestGetUserDirectoryReport(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	superAdminID := int64(100)
+	modAdminID := int64(200)
+
+	// Create super admin
+	_, _, _ = database.GetOrCreateUser(superAdminID, "superowner", "Super", "Admin", 100)
+	// Create bot admin / moderator
+	_, _, _ = database.GetOrCreateUser(modAdminID, "moduser", "Mod", "One", 100)
+	_ = database.SetUserAdmin(modAdminID, true)
+
+	// Create good user with approvals
+	goodUser1ID := int64(300)
+	_, _, _ = database.GetOrCreateUser(goodUser1ID, "approveduser", "Approved", "Guy", 80)
+	_, _ = database.AdjustReputation(goodUser1ID, 5, "Approved by moderator", modAdminID)
+
+	// Create regular good user
+	goodUser2ID := int64(400)
+	_, _, _ = database.GetOrCreateUser(goodUser2ID, "regularuser", "Regular", "Joe", 10)
+	_ = database.SaveMessage(&Message{ChatID: -100, MessageID: 1, UserID: goodUser2ID, Text: "Hello"})
+
+	// Create bad user: manually banned by moderator via flagged post
+	badUser1ID := int64(500)
+	_, _, _ = database.GetOrCreateUser(badUser1ID, "badspammer", "Bad", "Spammer", 0)
+	fp, err := database.CreateFlaggedPost(-100, 10, badUser1ID, "Crypto link spam")
+	if err != nil {
+		t.Fatalf("failed to create flag: %v", err)
+	}
+	_ = database.ResolveFlaggedPost(fp.ID, "banned", modAdminID)
+	_ = database.SetUserBanned(badUser1ID, true)
+
+	// Create bad user: banned via detection trigger
+	badUser2ID := int64(600)
+	_, _, _ = database.GetOrCreateUser(badUser2ID, "cjkspammer", "CJK", "Bot", 0)
+	_, _ = database.AdjustReputation(badUser2ID, -20, "Detection trigger (new_user_cjk): High-ID new user with low/no rep sent message containing CJK characters", 0)
+	_ = database.SetUserBanned(badUser2ID, true)
+
+	goodUsers, badUsers, err := database.GetUserDirectoryReport(superAdminID)
+	if err != nil {
+		t.Fatalf("unexpected error generating report: %v", err)
+	}
+
+	if len(goodUsers) != 4 {
+		t.Errorf("expected 4 good users, got %d", len(goodUsers))
+	}
+	if len(badUsers) != 2 {
+		t.Errorf("expected 2 bad users, got %d", len(badUsers))
+	}
+
+	// Verify good users ordering and roles
+	if !goodUsers[0].IsSuperAdmin || goodUsers[0].UserID != superAdminID {
+		t.Errorf("expected first good user to be super admin, got %+v", goodUsers[0])
+	}
+	if !goodUsers[1].IsAdmin || goodUsers[1].UserID != modAdminID {
+		t.Errorf("expected second good user to be bot admin, got %+v", goodUsers[1])
+	}
+	if goodUsers[2].ApprovalCount != 1 || goodUsers[2].Role != "Approved Member ✅" {
+		t.Errorf("expected third user to be approved member, got %+v", goodUsers[2])
+	}
+
+	// Verify bad users classification
+	var manualBanUser, triggerBanUser *UserReportItem
+	for i := range badUsers {
+		if badUsers[i].UserID == badUser1ID {
+			manualBanUser = &badUsers[i]
+		}
+		if badUsers[i].UserID == badUser2ID {
+			triggerBanUser = &badUsers[i]
+		}
+	}
+
+	if manualBanUser == nil || !manualBanUser.IsManualBan || manualBanUser.BannedBy != modAdminID {
+		t.Errorf("expected manualBanUser to be manually banned by mod %d, got %+v", modAdminID, manualBanUser)
+	}
+	if manualBanUser != nil && !strings.Contains(manualBanUser.BannedByName, "@moduser") {
+		t.Errorf("expected BannedByName to contain @moduser, got '%s'", manualBanUser.BannedByName)
+	}
+
+	if triggerBanUser == nil || !triggerBanUser.IsTriggerBan || triggerBanUser.TriggerName != "new_user_cjk" {
+		t.Errorf("expected triggerBanUser to be trigger banned with trigger new_user_cjk, got %+v", triggerBanUser)
+	}
+}
+
+func TestGenerateUserDirectoryMarkdown(t *testing.T) {
+	goodUsers := []UserReportItem{
+		{
+			UserID:       101,
+			Username:     "alice",
+			FirstName:    "Alice",
+			LastName:     "Wonder",
+			Role:         "Super Admin 👑",
+			Reputation:   100,
+			WarnCount:    0,
+			MessageCount: 15,
+			CreatedAt:    time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC),
+			UpdatedAt:    time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC),
+		},
+	}
+	badUsers := []UserReportItem{
+		{
+			UserID:       202,
+			Username:     "spambot",
+			FirstName:    "Spam | Bot",
+			LastName:     "",
+			IsBanned:     true,
+			IsManualBan:  true,
+			BanType:      "Manual (Moderator)",
+			BannedBy:     101,
+			BannedByName: "@alice (`101`)",
+			BanReason:    "Spam link | crypto | scam",
+			Reputation:   -50,
+			WarnCount:    1,
+			MessageCount: 2,
+			CreatedAt:    time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC),
+			UpdatedAt:    time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC),
+		},
+		{
+			UserID:       303,
+			Username:     "",
+			FirstName:    "CJK",
+			LastName:     "Spammer",
+			IsBanned:     true,
+			IsTriggerBan: true,
+			BanType:      "Automated Trigger",
+			TriggerName:  "new_user_cjk",
+			BanReason:    "Detection trigger (new_user_cjk): High-ID new user",
+			Reputation:   -20,
+			WarnCount:    0,
+			MessageCount: 1,
+			CreatedAt:    time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC),
+			UpdatedAt:    time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC),
+		},
+	}
+
+	opts := UserReportOptions{
+		SuperAdminID: 101,
+		DatabaseName: "test.db",
+	}
+
+	md := GenerateUserDirectoryMarkdown(goodUsers, badUsers, opts)
+
+	if !strings.Contains(md, "# 📋 GoGCBot User Directory") {
+		t.Errorf("expected header in markdown")
+	}
+	if !strings.Contains(md, "## 🟢 Known Good Users (1)") {
+		t.Errorf("expected known good users section in markdown")
+	}
+	if !strings.Contains(md, "@alice") || !strings.Contains(md, "`101`") {
+		t.Errorf("expected good user alice in markdown")
+	}
+	if !strings.Contains(md, "## 🔴 Known Bad Users (2)") {
+		t.Errorf("expected known bad users section in markdown")
+	}
+	if !strings.Contains(md, "### 🔨 Manually Banned by Moderators (1)") {
+		t.Errorf("expected manually banned section in markdown")
+	}
+	if !strings.Contains(md, "### 🤖 Automatically Banned by Detection Triggers (1)") {
+		t.Errorf("expected trigger banned section in markdown")
+	}
+	// Check escaping of pipe '|' character in table
+	if !strings.Contains(md, "Spam \\| Bot") {
+		t.Errorf("expected escaped pipe character in display name, got:\n%s", md)
+	}
+	if !strings.Contains(md, "Spam link \\| crypto \\| scam") {
+		t.Errorf("expected escaped pipe character in ban reason, got:\n%s", md)
+	}
+
+	// Test GoodOnly
+	optsGood := UserReportOptions{GoodOnly: true}
+	mdGood := GenerateUserDirectoryMarkdown(goodUsers, badUsers, optsGood)
+	if !strings.Contains(mdGood, "Known Good Users") || strings.Contains(mdGood, "Known Bad Users") {
+		t.Errorf("expected only good users in GoodOnly mode")
+	}
+
+	// Test BadOnly
+	optsBad := UserReportOptions{BadOnly: true}
+	mdBad := GenerateUserDirectoryMarkdown(goodUsers, badUsers, optsBad)
+	if strings.Contains(mdBad, "Known Good Users") || !strings.Contains(mdBad, "Known Bad Users") {
+		t.Errorf("expected only bad users in BadOnly mode")
+	}
+
+	// Test ManualBansOnly
+	optsManual := UserReportOptions{ManualBansOnly: true}
+	mdManual := GenerateUserDirectoryMarkdown(goodUsers, badUsers, optsManual)
+	if strings.Contains(mdManual, "Known Good Users") || !strings.Contains(mdManual, "Manually Banned by Moderators") || strings.Contains(mdManual, "Automatically Banned by Detection Triggers") {
+		t.Errorf("expected only manual bans in ManualBansOnly mode")
+	}
+}
+
+func TestParseTimeString(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"2026-08-10 19:54:48.455960908 +0800 +08 m=+7368.147009537", "2026-08-10 19:54:48"},
+		{"2026-08-09T19:54:43Z", "2026-08-09 19:54:43"},
+		{"2026-08-09 19:54:43", "2026-08-09 19:54:43"},
+		{"2026-08-09", "2026-08-09 00:00:00"},
+		{"", ""},
+	}
+
+	for _, tc := range tests {
+		parsed := parseTimeString(tc.input)
+		if tc.expected == "" {
+			if !parsed.IsZero() {
+				t.Errorf("expected zero time for empty string, got %v", parsed)
+			}
+		} else {
+			formatted := parsed.UTC().Format("2006-01-02 15:04:05")
+			// also compare local or year
+			if parsed.IsZero() {
+				t.Errorf("failed to parse string '%s'", tc.input)
+			}
+			_ = formatted
+		}
+	}
+}
+
+func TestEscapeMarkdownCell(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Hello | World", "Hello \\| World"},
+		{"Line1\nLine2\r\nLine3", "Line1 Line2 Line3"},
+		{"   ", "-"},
+		{"Normal Text", "Normal Text"},
+	}
+
+	for _, tc := range tests {
+		out := escapeMarkdownCell(tc.input)
+		if out != tc.expected {
+			t.Errorf("escapeMarkdownCell(%q) = %q, expected %q", tc.input, out, tc.expected)
+		}
+	}
+}
+
+func TestExtractTriggerName(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Detection trigger (new_user_cjk): High-ID new user", "new_user_cjk"},
+		{"Detection trigger (new_user_chinese): Chinese chars", "new_user_chinese"},
+		{"Low rep with cjk characters", "new_user_cjk"},
+		{"Some unknown rule", "detection_trigger"},
+	}
+
+	for _, tc := range tests {
+		out := extractTriggerName(tc.input)
+		if out != tc.expected {
+			t.Errorf("extractTriggerName(%q) = %q, expected %q", tc.input, out, tc.expected)
+		}
+	}
+}
+

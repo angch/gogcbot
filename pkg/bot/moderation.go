@@ -313,7 +313,7 @@ func truncateText(text string, maxLen int) string {
 
 // SendTriggerBanAlert sends a notification message to the management monitoring channel (b.cfg.ModerationGroupID)
 // whenever a user ban is triggered by an automated detection trigger.
-func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, messageID int, reason string) error {
+func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, msg *db.Message, reason string) error {
 	modGroupID := b.cfg.ModerationGroupID
 	if modGroupID == 0 {
 		log.Printf("[Bot] Warning: ModerationGroupID not set. Cannot send trigger ban alert for user %d in chat %d", user.UserID, chatID)
@@ -337,6 +337,20 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, messageID int, re
 		usernameStr = "none"
 	}
 
+	msgID := 0
+	msgContent := ""
+	if msg != nil {
+		msgID = msg.MessageID
+		msgContent = msg.Text
+	}
+	if strings.TrimSpace(msgContent) == "" {
+		if msg != nil && msg.HasMedia {
+			msgContent = "[Media message]"
+		} else {
+			msgContent = "(empty message)"
+		}
+	}
+
 	text := fmt.Sprintf(
 		"🚫 **TRIGGER BAN EXECUTED**\n\n"+
 			"📌 **Reason**: `%s`\n\n"+
@@ -345,7 +359,8 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, messageID int, re
 			"⭐ **Reputation**: `%d` | ⚠️ **Warns**: `%d` | 💬 **Logged Posts**: `%d`\n\n"+
 			"👥 **Group**: %s (`%d`)\n"+
 			"🆔 **Message ID**: `%d`\n"+
-			"🕒 **Time**: `%s`",
+			"🕒 **Time**: `%s`\n\n"+
+			"📝 **Message Snippet**:\n```\n%s\n```",
 		escapeMarkdown(reason),
 		escapeMarkdown(userDisplayName),
 		escapeMarkdown(usernameStr),
@@ -355,23 +370,33 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, messageID int, re
 		totalUserMsgs,
 		escapeMarkdown(groupTitle),
 		chatID,
-		messageID,
+		msgID,
 		time.Now().Format("2006-01-02 15:04:05 MST"),
+		truncateText(msgContent, 500),
 	)
 
 	msgConfig := tgbotapi.NewMessage(modGroupID, text)
 	msgConfig.ParseMode = tgbotapi.ModeMarkdown
 
-	_, err := b.Send(msgConfig)
+	sentMsg, err := b.Send(msgConfig)
 	if err != nil {
 		// Fallback without markdown formatting if markdown fails
 		msgConfig.ParseMode = ""
-		_, err = b.Send(msgConfig)
+		sentMsg, err = b.Send(msgConfig)
 		if err != nil {
 			log.Printf("[Bot Error] Failed to send trigger ban alert to mod group: %v", err)
 			return fmt.Errorf("failed to send trigger ban alert: %w", err)
 		}
 	}
+
+	// Also log into flagged_posts table as a resolved trigger ban for audit trail in DB
+	if msg != nil {
+		flag, err := b.db.CreateResolvedFlaggedPost(chatID, msg.MessageID, user.UserID, reason, "banned", 0)
+		if err == nil && flag != nil && sentMsg.MessageID != 0 {
+			_ = b.db.UpdateFlagModMessageID(flag.ID, sentMsg.MessageID)
+		}
+	}
+
 	return nil
 }
 
@@ -442,7 +467,11 @@ func (b *Bot) SendFirstEmptyMessageInfo(chatID int64, msg *db.Message, user *db.
 }
 
 // ExecuteActions executes a set of actions returned by detection triggers against a chat message and user.
-func (b *Bot) ExecuteActions(chatID int64, user *db.User, messageID int, actions []detector.Action) {
+func (b *Bot) ExecuteActions(chatID int64, user *db.User, msg *db.Message, actions []detector.Action) {
+	if msg == nil {
+		return
+	}
+	messageID := msg.MessageID
 	for _, act := range actions {
 		switch act.Type {
 		case detector.ActionDeleteMessage:
@@ -456,7 +485,7 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, messageID int, actions
 			if err := b.BanUserAcrossAllGroups(user.UserID, chatID); err != nil {
 				log.Printf("[Bot Action Error] Failed to ban user %d across groups: %v", user.UserID, err)
 			}
-			if err := b.SendTriggerBanAlert(chatID, user, messageID, act.Reason); err != nil {
+			if err := b.SendTriggerBanAlert(chatID, user, msg, act.Reason); err != nil {
 				log.Printf("[Bot Action Error] Failed to send trigger ban alert: %v", err)
 			}
 
@@ -473,13 +502,11 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, messageID int, actions
 			log.Printf("[Bot Action] Flagging message %d in chat %d for moderation review (reason: %s)", messageID, chatID, act.Reason)
 			flag, err := b.db.CreateFlaggedPost(chatID, messageID, user.UserID, act.Reason)
 			if err == nil && b.cfg.ModerationGroupID != 0 {
-				dbMsg := &db.Message{
-					ChatID:    chatID,
-					MessageID: messageID,
-					UserID:    user.UserID,
-					Text:      act.Reason,
+				groupTitle := fmt.Sprintf("Chat %d", chatID)
+				if group, err := b.db.GetGroup(chatID); err == nil && group != nil && group.Title != "" {
+					groupTitle = group.Title
 				}
-				_ = b.SendModAlert(flag, dbMsg, user, "")
+				_ = b.SendModAlert(flag, msg, user, groupTitle)
 			}
 		}
 	}

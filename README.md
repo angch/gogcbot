@@ -87,6 +87,11 @@ CGO_ENABLED=0 go build -o gogcbot main.go
 
 # 4. Perform a manual database retention cleanup (7-day logs & 50 posts/user cap)
 ./gogcbot cleanup --config config.yaml
+
+# 5. List known good and bad users (with manual moderator bans highlighted) in Markdown form
+./gogcbot list-users --config config.yaml
+./gogcbot list-users --config config.yaml --output user_directory.md
+./gogcbot list-users --config config.yaml --manual-bans-only
 ```
 
 ### OS System Service Management (Windows Service / Systemd / launchd)

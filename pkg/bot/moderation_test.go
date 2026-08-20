@@ -3,6 +3,7 @@ package bot
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,17 +97,33 @@ func TestSendTriggerBanAlert(t *testing.T) {
 	defer cleanup()
 
 	user, _, _ := b.db.GetOrCreateUser(998877, "spammer", "Spam", "User", 0)
+	msg := &db.Message{
+		ChatID:    -1001,
+		MessageID: 42,
+		UserID:    user.UserID,
+		Text:      "Spam message content here",
+		CreatedAt: time.Now(),
+	}
 
 	// Case 1: ModerationGroupID == 0 (Warning logged, no error)
 	b.cfg.ModerationGroupID = 0
-	if err := b.SendTriggerBanAlert(-1001, user, 42, "CJK spam trigger"); err != nil {
+	if err := b.SendTriggerBanAlert(-1001, user, msg, "CJK spam trigger"); err != nil {
 		t.Errorf("expected no error when mod group is 0, got %v", err)
 	}
 
 	// Case 2: ModerationGroupID set
 	b.cfg.ModerationGroupID = -100998877
-	if err := b.SendTriggerBanAlert(-1001, user, 42, "CJK spam trigger"); err != nil {
+	if err := b.SendTriggerBanAlert(-1001, user, msg, "CJK spam trigger"); err != nil {
 		t.Errorf("expected no error when sending trigger ban alert, got %v", err)
+	}
+
+	// Check flagged post audit record in DB
+	fp, err := b.db.GetFlaggedPost(1)
+	if err != nil {
+		t.Fatalf("expected flagged post to be created in DB, got error: %v", err)
+	}
+	if fp.UserID != user.UserID || fp.Status != "banned" {
+		t.Errorf("unexpected flagged post in DB: %+v", fp)
 	}
 }
 
@@ -116,8 +133,15 @@ func TestExecuteActions_BanUser(t *testing.T) {
 
 	b.cfg.ModerationGroupID = -100998877
 	user, _, _ := b.db.GetOrCreateUser(112233, "badactor", "Bad", "Actor", 0)
+	msg := &db.Message{
+		ChatID:    -1001,
+		MessageID: 101,
+		UserID:    user.UserID,
+		Text:      "Bad actor trigger message",
+		CreatedAt: time.Now(),
+	}
 
-	b.ExecuteActions(-1001, user, 101, []detector.Action{
+	b.ExecuteActions(-1001, user, msg, []detector.Action{
 		{Type: detector.ActionBanUser, Reason: "Detection trigger: High-ID CJK Spam"},
 	})
 
@@ -346,5 +370,91 @@ func TestHandleMessage_CJKSpamAfterFirstEmptyMessage_TriggersBan(t *testing.T) {
 	}
 	if userAfterSpam.Reputation != -20 {
 		t.Errorf("expected user reputation to be -20, got %d", userAfterSpam.Reputation)
+	}
+
+	// Verify the spam message is recorded in DB with its actual text
+	msgs, err := b.db.GetRecentUserMessages(userID, 5)
+	if err != nil {
+		t.Fatalf("failed to get user messages: %v", err)
+	}
+	if len(msgs) == 0 {
+		t.Fatalf("expected at least 1 message in DB for user")
+	}
+	foundSpam := false
+	for _, m := range msgs {
+		if m.MessageID == 64841 && strings.Contains(m.Text, "油管联盟") {
+			foundSpam = true
+		}
+	}
+	if !foundSpam {
+		t.Errorf("expected spam message with content '油管联盟...' to be saved in DB messages table")
+	}
+
+	// Verify trigger ban audit entry in flagged_posts
+	goodUsers, badUsers, err := b.db.GetUserDirectoryReport(b.cfg.SuperAdminID)
+	if err != nil {
+		t.Fatalf("failed to get user directory report: %v", err)
+	}
+	_ = goodUsers
+	var foundBad *db.UserReportItem
+	for i := range badUsers {
+		if badUsers[i].UserID == userID {
+			foundBad = &badUsers[i]
+			break
+		}
+	}
+	if foundBad == nil {
+		t.Fatalf("expected user %d in bad users report", userID)
+	}
+	if !foundBad.IsTriggerBan {
+		t.Errorf("expected IsTriggerBan to be true, got %+v", foundBad)
+	}
+}
+
+func TestExtractMessageText_MediaTypes(t *testing.T) {
+	// Plain text
+	m1 := &tgbotapi.Message{Text: "hello"}
+	if extractMessageText(m1) != "hello" {
+		t.Errorf("expected 'hello', got '%s'", extractMessageText(m1))
+	}
+
+	// Caption fallback
+	m2 := &tgbotapi.Message{Caption: "photo caption"}
+	if extractMessageText(m2) != "photo caption" {
+		t.Errorf("expected 'photo caption', got '%s'", extractMessageText(m2))
+	}
+
+	// Photo without caption
+	m3 := &tgbotapi.Message{Photo: []tgbotapi.PhotoSize{{FileID: "123"}}}
+	if extractMessageText(m3) != "[Photo]" {
+		t.Errorf("expected '[Photo]', got '%s'", extractMessageText(m3))
+	}
+
+	// Sticker with emoji
+	m4 := &tgbotapi.Message{Sticker: &tgbotapi.Sticker{Emoji: "😀"}}
+	if extractMessageText(m4) != "[Sticker 😀]" {
+		t.Errorf("expected '[Sticker 😀]', got '%s'", extractMessageText(m4))
+	}
+
+	// Document with filename
+	m5 := &tgbotapi.Message{Document: &tgbotapi.Document{FileName: "spam.pdf"}}
+	if extractMessageText(m5) != "[Document: spam.pdf]" {
+		t.Errorf("expected '[Document: spam.pdf]', got '%s'", extractMessageText(m5))
+	}
+}
+
+func TestIsServiceMessage(t *testing.T) {
+	joinMsg := &tgbotapi.Message{
+		NewChatMembers: []tgbotapi.User{{ID: 12345}},
+	}
+	if !isServiceMessage(joinMsg) {
+		t.Errorf("expected join message to be recognized as service message")
+	}
+
+	normalMsg := &tgbotapi.Message{
+		Text: "regular message",
+	}
+	if isServiceMessage(normalMsg) {
+		t.Errorf("expected normal text message not to be service message")
 	}
 }

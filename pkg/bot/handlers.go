@@ -22,8 +22,18 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 		return
 	}
 
+	if update.EditedMessage != nil {
+		b.handleMessage(update.EditedMessage)
+		return
+	}
+
 	if update.ChannelPost != nil {
 		b.handleMessage(update.ChannelPost)
+		return
+	}
+
+	if update.EditedChannelPost != nil {
+		b.handleMessage(update.EditedChannelPost)
 		return
 	}
 
@@ -135,14 +145,16 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		}
 	}
 
+	// Ignore service messages (user joined, left, pinned message, etc.) from being saved as user chat messages
+	if isServiceMessage(msg) {
+		return
+	}
+
 	// Detect links & media
 	hasMedia := msg.Photo != nil || msg.Video != nil || msg.Document != nil || msg.Audio != nil || msg.Animation != nil || msg.Sticker != nil
 	hasLinks := containsLinks(msg)
 
-	text := msg.Text
-	if text == "" && msg.Caption != "" {
-		text = msg.Caption
-	}
+	text := extractMessageText(msg)
 
 	groupName := chat.Title
 	if groupName == "" {
@@ -223,7 +235,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 				actionTaken := false
 				for _, res := range results {
 					log.Printf("[Bot Trigger] Rule '%s' fired for user %d in chat %d: %s", res.TriggerID, user.UserID, chat.ID, res.Reason)
-					b.ExecuteActions(chat.ID, user, msg.MessageID, res.Actions)
+					b.ExecuteActions(chat.ID, user, dbMsg, res.Actions)
 					for _, act := range res.Actions {
 						if act.Type == detector.ActionDeleteMessage || act.Type == detector.ActionBanUser {
 							actionTaken = true
@@ -351,4 +363,77 @@ func containsLinks(msg *tgbotapi.Message) bool {
 	}
 
 	return false
+}
+
+func isServiceMessage(msg *tgbotapi.Message) bool {
+	if msg == nil {
+		return false
+	}
+	return len(msg.NewChatMembers) > 0 ||
+		msg.LeftChatMember != nil ||
+		msg.PinnedMessage != nil ||
+		msg.GroupChatCreated ||
+		msg.SuperGroupChatCreated ||
+		msg.ChannelChatCreated ||
+		msg.MigrateToChatID != 0 ||
+		msg.MigrateFromChatID != 0
+}
+
+func extractMessageText(msg *tgbotapi.Message) string {
+	if msg == nil {
+		return ""
+	}
+	if msg.Text != "" {
+		return msg.Text
+	}
+	if msg.Caption != "" {
+		return msg.Caption
+	}
+	if msg.Photo != nil {
+		return "[Photo]"
+	}
+	if msg.Sticker != nil {
+		if msg.Sticker.Emoji != "" {
+			return fmt.Sprintf("[Sticker %s]", msg.Sticker.Emoji)
+		}
+		return "[Sticker]"
+	}
+	if msg.Document != nil {
+		if msg.Document.FileName != "" {
+			return fmt.Sprintf("[Document: %s]", msg.Document.FileName)
+		}
+		return "[Document]"
+	}
+	if msg.Video != nil {
+		return "[Video]"
+	}
+	if msg.Voice != nil {
+		return "[Voice Message]"
+	}
+	if msg.Audio != nil {
+		return "[Audio]"
+	}
+	if msg.Animation != nil {
+		return "[Animation/GIF]"
+	}
+	if msg.Poll != nil {
+		return fmt.Sprintf("[Poll: %s]", msg.Poll.Question)
+	}
+	if msg.Contact != nil {
+		name := strings.TrimSpace(msg.Contact.FirstName + " " + msg.Contact.LastName)
+		if name != "" {
+			return fmt.Sprintf("[Contact: %s (%s)]", name, msg.Contact.PhoneNumber)
+		}
+		return fmt.Sprintf("[Contact: %s]", msg.Contact.PhoneNumber)
+	}
+	if msg.Location != nil {
+		return "[Location]"
+	}
+	if msg.Venue != nil {
+		if msg.Venue.Title != "" {
+			return fmt.Sprintf("[Venue: %s (%s)]", msg.Venue.Title, msg.Venue.Address)
+		}
+		return "[Venue]"
+	}
+	return ""
 }
