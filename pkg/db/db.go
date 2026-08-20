@@ -1504,3 +1504,254 @@ func extractTriggerName(reason string) string {
 	return "detection_trigger"
 }
 
+// Spam Bio Tracking Types and Methods
+
+// SpamBioKeywords contains common promotional, discount card, gift card, and syndicate scam terms seen in Telegram bio spam.
+var SpamBioKeywords = []string{
+	"锦鲤代发",
+	"代发",
+	"油卡",
+	"础油卡",
+	"加油卡",
+	"中石化",
+	"中石油",
+	"E卡",
+	"e卡",
+	"京东E卡",
+	"京东卡",
+	"沃尔玛",
+	"永辉",
+	"携程",
+	"天猫",
+	"苹果礼品卡",
+	"礼品卡",
+	"Steam",
+	"steam",
+	"6折",
+	"7折",
+	"8折",
+	"9折",
+	"折础",
+	"慢充",
+	"代充",
+	"代缴",
+	"代付",
+	"刷单",
+	"兼职",
+	"日结",
+	"外汇盘",
+	"币盘",
+	"NFT盘",
+	"商城盘",
+	"模特视频",
+	"六百一天",
+	"六佰一天",
+	"六栢o壹天",
+	"無風險",
+	"无风险",
+	"演员来",
+	"出卡",
+	"收卡",
+	"跑分",
+	"承兑",
+	"精准粉",
+	"引流",
+	"盘口",
+	"包赔",
+	"日赚",
+	"月入",
+}
+
+// MatchSpamBio checks if a user bio matches known spam/marketing/syndicate keywords or custom filters.
+func MatchSpamBio(bio string, customKeywords ...string) (bool, []string) {
+	if strings.TrimSpace(bio) == "" {
+		return false, nil
+	}
+
+	bioLower := strings.ToLower(bio)
+	var matched []string
+	seen := make(map[string]bool)
+
+	// If specific custom keywords are provided, match against them
+	hasCustom := false
+	for _, kw := range customKeywords {
+		kw = strings.TrimSpace(kw)
+		if kw != "" {
+			hasCustom = true
+			if strings.Contains(bioLower, strings.ToLower(kw)) && !seen[kw] {
+				matched = append(matched, kw)
+				seen[kw] = true
+			}
+		}
+	}
+	if hasCustom {
+		return len(matched) > 0, matched
+	}
+
+	// Match against default spam keywords
+	for _, kw := range SpamBioKeywords {
+		if strings.Contains(bioLower, strings.ToLower(kw)) && !seen[kw] {
+			matched = append(matched, kw)
+			seen[kw] = true
+		}
+	}
+
+	return len(matched) > 0, matched
+}
+
+// SpamBioUserItem holds metadata for an unbanned user with a matching spam bio.
+type SpamBioUserItem struct {
+	UserID          int64     `json:"user_id"`
+	Username        string    `json:"username"`
+	FirstName       string    `json:"first_name"`
+	LastName        string    `json:"last_name"`
+	Reputation      int       `json:"reputation"`
+	WarnCount       int       `json:"warn_count"`
+	MessageCount    int       `json:"message_count"`
+	Bio             string    `json:"bio"`
+	HasPhoto        bool      `json:"has_photo"`
+	PhotoCount      int       `json:"photo_count"`
+	CreatedAt       time.Time `json:"created_at"`
+	FetchedAt       time.Time `json:"fetched_at"`
+	MatchedKeywords []string  `json:"matched_keywords"`
+}
+
+// SpamBioOptions configures filtering for GetUnbannedSpamBioUsers.
+type SpamBioOptions struct {
+	Keyword      string `json:"keyword"`
+	MaxPosts     int    `json:"max_posts"`
+	Limit        int    `json:"limit"`
+	DatabaseName string `json:"database_name"`
+}
+
+// GetUnbannedSpamBioUsers retrieves unbanned users whose profile bio matches spam keywords or custom filters.
+func (d *DB) GetUnbannedSpamBioUsers(opts SpamBioOptions) ([]SpamBioUserItem, error) {
+	query := `
+		SELECT u.user_id, u.username, u.first_name, u.last_name, u.reputation, u.warn_count, u.is_admin, u.created_at,
+		       p.bio, p.has_photo, p.photo_count, p.fetched_at,
+		       (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.user_id) AS msg_count
+		FROM users u
+		JOIN user_profiles p ON u.user_id = p.user_id
+		WHERE u.is_banned = 0
+		  AND p.bio != ''
+		  AND p.not_found = 0
+		ORDER BY u.created_at DESC
+	`
+
+	rows, err := d.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query users with bios: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SpamBioUserItem
+	for rows.Next() {
+		var item SpamBioUserItem
+		var rawCreatedAt, rawFetchedAt any
+		var isAdmin bool
+
+		if err := rows.Scan(
+			&item.UserID, &item.Username, &item.FirstName, &item.LastName,
+			&item.Reputation, &item.WarnCount, &isAdmin, &rawCreatedAt,
+			&item.Bio, &item.HasPhoto, &item.PhotoCount, &rawFetchedAt,
+			&item.MessageCount,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan user spam bio item: %w", err)
+		}
+
+		if isAdmin {
+			continue
+		}
+
+		// Filter by max posts if specified (> 0)
+		if opts.MaxPosts > 0 && item.MessageCount > opts.MaxPosts {
+			continue
+		}
+
+		item.CreatedAt = parseTime(rawCreatedAt)
+		item.FetchedAt = parseTime(rawFetchedAt)
+
+		// Check keyword matches
+		var custom []string
+		if opts.Keyword != "" {
+			custom = []string{opts.Keyword}
+		}
+		isMatch, matched := MatchSpamBio(item.Bio, custom...)
+		if !isMatch {
+			continue
+		}
+		item.MatchedKeywords = matched
+
+		results = append(results, item)
+		if opts.Limit > 0 && len(results) >= opts.Limit {
+			break
+		}
+	}
+
+	return results, nil
+}
+
+// GenerateSpamBioMarkdown formats the list of unbanned users with spam bios into GitHub Flavored Markdown.
+func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) string {
+	var sb strings.Builder
+
+	dbName := opts.DatabaseName
+	if dbName == "" {
+		dbName = "SQLite Database"
+	}
+
+	sb.WriteString("# 🚨 Unbanned New Users with Suspicious/Spam Bios\n\n")
+	sb.WriteString(fmt.Sprintf("- **Generated At**: %s\n", time.Now().Format("2006-01-02 15:04:05 MST")))
+	sb.WriteString(fmt.Sprintf("- **Database**: `%s`\n", dbName))
+	if opts.Keyword != "" {
+		sb.WriteString(fmt.Sprintf("- **Keyword Filter**: `%s`\n", opts.Keyword))
+	}
+	if opts.MaxPosts > 0 {
+		sb.WriteString(fmt.Sprintf("- **Max Logged Posts**: `%d`\n", opts.MaxPosts))
+	}
+	sb.WriteString(fmt.Sprintf("- **Total Matched Users**: %d\n\n", len(items)))
+
+	if len(items) == 0 {
+		sb.WriteString("*No unbanned users with matching spam bios found.*\n")
+		return sb.String()
+	}
+
+	sb.WriteString("| # | User ID | Username | Display Name | Rep | Posts | Matched Keywords | Bio Snippet | Action |\n")
+	sb.WriteString("|---|---|---|---|---|---|---|---|---|\n")
+
+	for i, u := range items {
+		username := "-"
+		if u.Username != "" {
+			username = "@" + escapeMarkdownCell(u.Username)
+		}
+		name := strings.TrimSpace(u.FirstName + " " + u.LastName)
+		if name == "" {
+			name = "-"
+		}
+		kwStr := strings.Join(u.MatchedKeywords, ", ")
+		if kwStr == "" {
+			kwStr = "-"
+		}
+		bioSnippet := escapeMarkdownCell(truncateString(u.Bio, 60))
+
+		sb.WriteString(fmt.Sprintf(
+			"| %d | `%d` | %s | %s | %d | %d | `%s` | %s | `/ban %d` |\n",
+			i+1, u.UserID, username, escapeMarkdownCell(name), u.Reputation, u.MessageCount,
+			escapeMarkdownCell(kwStr), bioSnippet, u.UserID,
+		))
+	}
+
+	return sb.String()
+}
+
+func truncateString(s string, maxLen int) string {
+	if maxLen <= 0 || len([]rune(s)) <= maxLen {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) > maxLen {
+		return string(runes[:maxLen]) + "..."
+	}
+	return s
+}
+

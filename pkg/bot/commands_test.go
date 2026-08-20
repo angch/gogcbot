@@ -700,3 +700,67 @@ func TestCmdUserInfo_WithNotFoundProfile(t *testing.T) {
 
 	b.handleCommand(msg, adminUser)
 }
+
+func TestCmdListSpamBios(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	superAdminID := int64(111222)
+	b.cfg.SuperAdminID = superAdminID
+
+	adminUser, _, _ := b.db.GetOrCreateUser(superAdminID, "superadmin", "Super", "Admin", 100)
+
+	// Create an unbanned user with exact spam bio
+	targetUser, _, _ := b.db.GetOrCreateUser(888999, "spambot", "Spam", "Bot", 0)
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     targetUser.UserID,
+		Username:   "spambot",
+		FirstName:  "Spam",
+		LastName:   "Bot",
+		Bio:        "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。天猫、苹果礼品卡、Steam等 联系 @xgshenqing888",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	msg := &tgbotapi.Message{
+		MessageID: 60,
+		From: &tgbotapi.User{
+			ID:        superAdminID,
+			UserName:  "superadmin",
+			FirstName: "Super",
+			LastName:  "Admin",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:   superAdminID,
+			Type: "private",
+		},
+		Text: "/listspambios",
+		Entities: []tgbotapi.MessageEntity{
+			{Type: "bot_command", Offset: 0, Length: 13},
+		},
+	}
+
+	b.handleCommand(msg, adminUser)
+
+	// Test with filter keyword
+	msgFilter := &tgbotapi.Message{
+		MessageID: 61,
+		From: &tgbotapi.User{
+			ID:        superAdminID,
+			UserName:  "superadmin",
+			FirstName: "Super",
+			LastName:  "Admin",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:   superAdminID,
+			Type: "private",
+		},
+		Text: "/spambios 沃尔玛",
+		Entities: []tgbotapi.MessageEntity{
+			{Type: "bot_command", Offset: 0, Length: 9},
+		},
+	}
+
+	b.handleCommand(msgFilter, adminUser)
+}

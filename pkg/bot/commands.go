@@ -79,6 +79,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 		b.cmdDemote(msg, user, args, isSuperAdmin)
 	case "listusers", "users":
 		b.cmdListUsers(msg, isAuthorized)
+	case "listspambios", "spambios", "listspambiousers", "spambiousers", "spamusers":
+		b.cmdListSpamBios(msg, args, isAuthorized)
 	case "cleanup":
 		b.cmdCleanup(msg, isAuthorized)
 	case "getdb", "backup", "db", "dumpdb", "downloaddb":
@@ -760,6 +762,78 @@ func (b *Bot) cmdListUsers(msg *tgbotapi.Message, isAuthorized bool) {
 	b.replyText(msg, sb.String())
 }
 
+func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	if !isAuthorized {
+		b.replyText(msg, "❌ Permission denied.")
+		return
+	}
+
+	keyword := strings.TrimSpace(args)
+	opts := db.SpamBioOptions{
+		Keyword:  keyword,
+		MaxPosts: 5,
+		Limit:    30,
+	}
+
+	items, err := b.db.GetUnbannedSpamBioUsers(opts)
+	if err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Error querying users with spam bios: %v", err))
+		return
+	}
+
+	if len(items) == 0 {
+		filterMsg := ""
+		if keyword != "" {
+			filterMsg = fmt.Sprintf(" matching %q", keyword)
+		}
+		b.replyText(msg, fmt.Sprintf("✅ No unbanned new users with suspicious spam bios found%s.", filterMsg))
+		return
+	}
+
+	var sb strings.Builder
+	filterHeader := ""
+	if keyword != "" {
+		filterHeader = fmt.Sprintf(" [Filter: `%s`]", escapeMarkdown(keyword))
+	}
+	sb.WriteString(fmt.Sprintf("🚨 **Unbanned Users with Spam Bios** (Found: %d)%s:\n\n", len(items), filterHeader))
+
+	for i, u := range items {
+		userHandle := ""
+		if u.Username != "" {
+			userHandle = fmt.Sprintf(" (@%s)", escapeMarkdown(u.Username))
+		}
+		name := strings.TrimSpace(u.FirstName + " " + u.LastName)
+		if name == "" {
+			name = "Unknown"
+		}
+
+		matchedStr := strings.Join(u.MatchedKeywords, ", ")
+		if len(matchedStr) > 40 {
+			matchedStr = matchedStr[:37] + "..."
+		}
+
+		bioSnippet := u.Bio
+		if len(bioSnippet) > 120 {
+			bioSnippet = bioSnippet[:117] + "..."
+		}
+
+		sb.WriteString(fmt.Sprintf(
+			"%d. **%s**%s\n"+
+				"   • ID: `%d` | Rep: `%d` | Posts: `%d`\n"+
+				"   • Matched: `%s`\n"+
+				"   • Bio: ```\n%s\n```\n"+
+				"   • Action: `/ban %d`\n\n",
+			i+1, escapeMarkdown(name), userHandle,
+			u.UserID, u.Reputation, u.MessageCount,
+			escapeMarkdown(matchedStr),
+			escapeMarkdown(bioSnippet),
+			u.UserID,
+		))
+	}
+
+	b.replyText(msg, sb.String())
+}
+
 func (b *Bot) cmdCleanup(msg *tgbotapi.Message, isAuthorized bool) {
 	if !isAuthorized {
 		b.replyText(msg, "❌ Permission denied.")
@@ -965,6 +1039,7 @@ func getHelpText(isSuperAdmin, isModGroup bool) string {
 		"• `/promote <user|@username>` - Promote user to Group Admin & set rep to 100\n" +
 		"• `/demote <user|@username>` - Remove admin status & reset rep (Super Admin only)\n" +
 		"• `/listusers` - List all known users, reputation scores & admin flags\n" +
+		"• `/listspambios [keyword]` - List unbanned new users with suspicious or syndicate spam bios\n" +
 		"• `/cleanup` - Manually run 7-day logs & 50-post-per-user retention cleanup\n" +
 		"• `/getdb` - Download a copy of the current SQLite3 database (Admin direct message only)\n" +
 		"• `/fetchprofile <user|@username>` - Fetch fresh Telegram profile (bio & picture) & cache in DB\n" +

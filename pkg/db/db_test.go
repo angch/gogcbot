@@ -800,3 +800,122 @@ func TestUserProfileOperations(t *testing.T) {
 	}
 }
 
+func TestMatchSpamBio(t *testing.T) {
+	exactBio := "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。天猫、苹果礼品卡、Steam等 联系 @xgshenqing888"
+	matched, kws := MatchSpamBio(exactBio)
+	if !matched {
+		t.Fatalf("expected exact bio to match spam keywords, got false")
+	}
+	if len(kws) == 0 {
+		t.Fatalf("expected matched keywords to be non-empty")
+	}
+
+	cleanBio := "Backend software engineer working with Go and distributed systems."
+	matchedClean, _ := MatchSpamBio(cleanBio)
+	if matchedClean {
+		t.Errorf("expected clean bio to not match spam keywords")
+	}
+
+	matchedEmpty, _ := MatchSpamBio("")
+	if matchedEmpty {
+		t.Errorf("expected empty bio to return false")
+	}
+
+	// Test custom keyword
+	matchedCustom, customKws := MatchSpamBio("Crypto trader and investor", "crypto")
+	if !matchedCustom || len(customKws) != 1 || customKws[0] != "crypto" {
+		t.Errorf("expected custom keyword match for 'crypto', got %t, %v", matchedCustom, customKws)
+	}
+}
+
+func TestGetUnbannedSpamBioUsers(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Unbanned new user with spam bio (should be matched)
+	_, _, err := database.GetOrCreateUser(2001, "spammer1", "Spam", "One", 0)
+	if err != nil {
+		t.Fatalf("failed to create user 2001: %v", err)
+	}
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     2001,
+		Username:   "spammer1",
+		FirstName:  "Spam",
+		LastName:   "One",
+		Bio:        "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。天猫、苹果礼品卡、Steam等 联系 @xgshenqing888",
+		HasPhoto:   true,
+		PhotoCount: 1,
+	})
+
+	// 2. Banned user with spam bio (should be excluded)
+	_, _, err = database.GetOrCreateUser(2002, "banned_spammer", "Banned", "Spammer", 0)
+	if err != nil {
+		t.Fatalf("failed to create user 2002: %v", err)
+	}
+	_ = database.SetUserBanned(2002, true)
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     2002,
+		Username:   "banned_spammer",
+		FirstName:  "Banned",
+		LastName:   "Spammer",
+		Bio:        "兼职日结 六百一天 沃尔玛 6折油卡 联系 @xgshenqing888",
+		HasPhoto:   false,
+		PhotoCount: 0,
+	})
+
+	// 3. Admin user with matching bio (should be excluded)
+	_, _, err = database.GetOrCreateUser(2003, "adminuser", "Admin", "User", 100)
+	if err != nil {
+		t.Fatalf("failed to create user 2003: %v", err)
+	}
+	_ = database.SetUserAdmin(2003, true)
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     2003,
+		Username:   "adminuser",
+		FirstName:  "Admin",
+		LastName:   "User",
+		Bio:        "Testing steam cards and 6折油卡",
+		HasPhoto:   true,
+		PhotoCount: 1,
+	})
+
+	// 4. Normal unbanned user with clean bio (should be excluded)
+	_, _, err = database.GetOrCreateUser(2004, "normaluser", "Normal", "User", 50)
+	if err != nil {
+		t.Fatalf("failed to create user 2004: %v", err)
+	}
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     2004,
+		Username:   "normaluser",
+		FirstName:  "Normal",
+		LastName:   "User",
+		Bio:        "Just a normal crypto chat member and developer",
+		HasPhoto:   true,
+		PhotoCount: 1,
+	})
+
+	// 5. Query without filters
+	items, err := database.GetUnbannedSpamBioUsers(SpamBioOptions{})
+	if err != nil {
+		t.Fatalf("GetUnbannedSpamBioUsers failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected exactly 1 unbanned spam bio user, got %d", len(items))
+	}
+	if items[0].UserID != 2001 {
+		t.Errorf("expected user ID 2001, got %d", items[0].UserID)
+	}
+	if len(items[0].MatchedKeywords) == 0 {
+		t.Errorf("expected matched keywords for user 2001")
+	}
+
+	// 6. Generate Markdown report
+	md := GenerateSpamBioMarkdown(items, SpamBioOptions{DatabaseName: "test.db"})
+	if md == "" {
+		t.Errorf("expected non-empty Markdown report")
+	}
+	if !strings.Contains(md, "2001") || !strings.Contains(md, "@spammer1") {
+		t.Errorf("expected markdown report to contain user 2001 info, got: %s", md)
+	}
+}
+

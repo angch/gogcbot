@@ -96,6 +96,10 @@ CGO_ENABLED=0 go build -o gogcbot main.go
 # 6. Backfill user profiles (bios and profile pictures) from Telegram API into user_profiles table
 ./gogcbot backfill-profiles --config config.yaml
 ./gogcbot backfill-profiles --config config.yaml --force --delay-ms 100
+
+# 7. List unbanned new users with suspicious or spam bios (e.g. 锦鲤代发, 油卡, E卡, 沃尔玛, 携程, Steam)
+./gogcbot list-spambios --config config.yaml
+./gogcbot list-spambios --config config.yaml --keyword "沃尔玛" --output spambios.md
 ```
 
 ### OS System Service Management (Windows Service / Systemd / launchd)
@@ -195,6 +199,7 @@ shieldy:
 | `/promote <user>` | Admin/Mod | Promote user to Bot Admin & set rep to 100 |
 | `/demote <user>` | Super Admin | Remove Bot Admin privileges and reset rep |
 | `/listusers` | Admin/Mod | List known good/bad users and moderation status |
+| `/listspambios [kw]` | Admin/Mod | List unbanned new users with suspicious or syndicate spam bios |
 | `/cleanup` | Admin/Mod | Run retention cleanup on demand |
 | `/getdb` | Bot Admin (Direct PM only) | Download a copy of current SQLite3 database |
 
