@@ -107,6 +107,12 @@ CGO_ENABLED=0 go build -o gogcbot main.go
 ./gogcbot list-spambios --config config.yaml
 ./gogcbot list-spambios --config config.yaml --keyword "沃尔玛" --output spambios.md
 ./gogcbot list-spambios --config config.yaml --ban
+
+# 8. Dump all known database info and profiles for a user by @tag or numeric ID
+./gogcbot user @spambot --config config.yaml
+./gogcbot user 555666 --config config.yaml
+./gogcbot user @spambot --config config.yaml --json
+./gogcbot user 555666 --config config.yaml --output user_dossier.md
 ```
 
 ### OS System Service Management (Windows Service / Systemd / launchd)

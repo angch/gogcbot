@@ -1003,3 +1003,82 @@ func TestSpamSnippetsTable(t *testing.T) {
 	}
 }
 
+func TestGetUserFullDump(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	userID := int64(888777)
+	_, _, err := database.GetOrCreateUser(userID, "testdumpuser", "Test", "Dump", 50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     userID,
+		Username:   "testdumpuser",
+		FirstName:  "Test",
+		LastName:   "Dump",
+		Bio:        "油卡 礼品卡 沃尔玛 永辉 6折联系",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	_ = database.SaveMessage(&Message{
+		ChatID:    -1001,
+		MessageID: 10,
+		UserID:    userID,
+		Text:      "Test logged message",
+		CreatedAt: time.Now(),
+	})
+
+	_, _ = database.AdjustReputation(userID, -20, "Spam detected", 0)
+	fp, _ := database.CreateFlaggedPost(-1001, 10, userID, "Spam message")
+	_ = database.ResolveFlaggedPost(fp.ID, "banned", 0)
+
+	// 1. Search by @username
+	dump1, err := database.GetUserFullDump("@testdumpuser", 1001)
+	if err != nil {
+		t.Fatalf("failed to get full dump by @username: %v", err)
+	}
+	if dump1.User.UserID != userID {
+		t.Errorf("expected user ID %d, got %d", userID, dump1.User.UserID)
+	}
+	if dump1.Profile == nil || dump1.Profile.Bio == "" {
+		t.Errorf("expected profile with bio in dump")
+	}
+	if !dump1.IsSpamBioMatch {
+		t.Errorf("expected spam bio match to be true")
+	}
+	if len(dump1.RecentMessages) != 1 {
+		t.Errorf("expected 1 recent message, got %d", len(dump1.RecentMessages))
+	}
+	if len(dump1.ReputationLogs) != 1 {
+		t.Errorf("expected 1 rep log, got %d", len(dump1.ReputationLogs))
+	}
+	if len(dump1.FlaggedPosts) != 1 {
+		t.Errorf("expected 1 flagged post, got %d", len(dump1.FlaggedPosts))
+	}
+
+	// 2. Search by numeric user ID
+	dump2, err := database.GetUserFullDump(fmt.Sprintf("%d", userID), 1001)
+	if err != nil {
+		t.Fatalf("failed to get full dump by ID: %v", err)
+	}
+	if dump2.User.Username != "testdumpuser" {
+		t.Errorf("expected username 'testdumpuser', got %s", dump2.User.Username)
+	}
+
+	// 3. Format dump as Markdown
+	formatted := FormatUserDump(dump1)
+	if !strings.Contains(formatted, "# 👤 Telegram User Dossier: @testdumpuser") {
+		t.Errorf("expected header in formatted dump")
+	}
+	if !strings.Contains(formatted, "Test logged message") {
+		t.Errorf("expected message in formatted dump")
+	}
+	if !strings.Contains(formatted, "Spam detected") {
+		t.Errorf("expected reason in formatted dump")
+	}
+}
+

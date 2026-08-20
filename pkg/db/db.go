@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -863,6 +864,367 @@ func (d *DB) GetUserProfile(userID int64) (*UserProfile, error) {
 		return nil, err
 	}
 	return &p, nil
+}
+
+// GetUserProfileByUsername retrieves the cached UserProfile matching the given username.
+func (d *DB) GetUserProfileByUsername(username string) (*UserProfile, error) {
+	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
+	if username == "" {
+		return nil, fmt.Errorf("empty username")
+	}
+	var p UserProfile
+	err := d.QueryRow(`
+		SELECT user_id, username, first_name, last_name, bio,
+		       photo_file_id, photo_file_unique_id, photo_small_file_id, photo_small_file_unique_id,
+		       photo_count, has_photo, not_found, raw_json, fetched_at, updated_at
+		FROM user_profiles WHERE LOWER(username) = LOWER(?)
+		ORDER BY updated_at DESC LIMIT 1
+	`, username).Scan(
+		&p.UserID, &p.Username, &p.FirstName, &p.LastName, &p.Bio,
+		&p.PhotoFileID, &p.PhotoFileUniqueID, &p.PhotoSmallFileID, &p.PhotoSmallFileUniqueID,
+		&p.PhotoCount, &p.HasPhoto, &p.NotFound, &p.RawJSON, &p.FetchedAt, &p.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// ReputationLog represents a single reputation adjustment audit log entry.
+type ReputationLog struct {
+	ID           int64     `json:"id"`
+	UserID       int64     `json:"user_id"`
+	ChangeAmount int       `json:"change_amount"`
+	Reason       string    `json:"reason"`
+	ByUserID     int64     `json:"by_user_id"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// GetUserReputationLogs returns the audit history of reputation adjustments for a user.
+func (d *DB) GetUserReputationLogs(userID int64, limit int) ([]ReputationLog, error) {
+	query := `
+		SELECT id, user_id, change_amount, reason, by_user_id, created_at
+		FROM reputation_logs
+		WHERE user_id = ?
+		ORDER BY created_at DESC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := d.Query(query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []ReputationLog
+	for rows.Next() {
+		var rl ReputationLog
+		if err := rows.Scan(&rl.ID, &rl.UserID, &rl.ChangeAmount, &rl.Reason, &rl.ByUserID, &rl.CreatedAt); err != nil {
+			return nil, err
+		}
+		logs = append(logs, rl)
+	}
+	return logs, nil
+}
+
+// GetUserFlaggedPosts returns the moderation and trigger ban history for a user.
+func (d *DB) GetUserFlaggedPosts(userID int64, limit int) ([]FlaggedPost, error) {
+	query := `
+		SELECT id, group_chat_id, group_message_id, mod_group_message_id, user_id, reason, status, flagged_at, resolved_at, resolved_by
+		FROM flagged_posts
+		WHERE user_id = ?
+		ORDER BY flagged_at DESC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := d.Query(query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var posts []FlaggedPost
+	for rows.Next() {
+		var fp FlaggedPost
+		var resolvedAt sql.NullTime
+		if err := rows.Scan(&fp.ID, &fp.GroupChatID, &fp.GroupMessageID, &fp.ModGroupMessageID, &fp.UserID, &fp.Reason, &fp.Status, &fp.FlaggedAt, &resolvedAt, &fp.ResolvedBy); err != nil {
+			return nil, err
+		}
+		if resolvedAt.Valid {
+			fp.ResolvedAt = &resolvedAt.Time
+		}
+		posts = append(posts, fp)
+	}
+	return posts, nil
+}
+
+// UserFullDump contains comprehensive information about a single Telegram user.
+type UserFullDump struct {
+	User           *User           `json:"user"`
+	Profile        *UserProfile    `json:"profile,omitempty"`
+	MessageCount   int             `json:"message_count"`
+	RecentMessages []Message       `json:"recent_messages,omitempty"`
+	ReputationLogs []ReputationLog `json:"reputation_logs,omitempty"`
+	FlaggedPosts   []FlaggedPost   `json:"flagged_posts,omitempty"`
+	IsSpamBioMatch bool            `json:"is_spam_bio_match"`
+	MatchedBioKws  []string        `json:"matched_bio_keywords,omitempty"`
+	IsSuperAdmin   bool            `json:"is_super_admin"`
+}
+
+// GetUserFullDump searches for a user by numeric user ID or @username, aggregating all known records.
+func (d *DB) GetUserFullDump(identifier string, superAdminID int64, extraKeywords ...string) (*UserFullDump, error) {
+	rawIdentifier := identifier
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, fmt.Errorf("user identifier cannot be empty")
+	}
+
+	var user *User
+	var profile *UserProfile
+
+	// 1. Try parsing as numeric Telegram user ID
+	if id, err := strconv.ParseInt(strings.TrimPrefix(identifier, "@"), 10, 64); err == nil && id != 0 {
+		u, errUser := d.GetUserByID(id)
+		if errUser == nil && u != nil {
+			user = u
+		}
+		p, errProf := d.GetUserProfile(id)
+		if errProf == nil && p != nil {
+			profile = p
+		}
+	}
+
+	// 2. If not found by numeric ID, try username lookup
+	if user == nil && profile == nil {
+		cleanUsername := strings.TrimPrefix(identifier, "@")
+		u, errUser := d.GetUserByUsername(cleanUsername)
+		if errUser == nil && u != nil {
+			user = u
+		}
+		p, errProf := d.GetUserProfileByUsername(cleanUsername)
+		if errProf == nil && p != nil {
+			profile = p
+		}
+	}
+
+	// If we found a profile but no user row yet, check user by profile.UserID
+	if user == nil && profile != nil {
+		u, errUser := d.GetUserByID(profile.UserID)
+		if errUser == nil && u != nil {
+			user = u
+		}
+	}
+
+	// If we found a user row but no profile row yet, check profile by user.UserID
+	if user != nil && profile == nil {
+		p, errProf := d.GetUserProfile(user.UserID)
+		if errProf == nil && p != nil {
+			profile = p
+		}
+	}
+
+	if user == nil && profile == nil {
+		return nil, fmt.Errorf("user %q not found in database", rawIdentifier)
+	}
+
+	var targetID int64
+	if user != nil {
+		targetID = user.UserID
+	} else if profile != nil {
+		targetID = profile.UserID
+	}
+
+	// Fallback stub user if user table didn't have record but profile existed
+	if user == nil && profile != nil {
+		user = &User{
+			UserID:    profile.UserID,
+			Username:  profile.Username,
+			FirstName: profile.FirstName,
+			LastName:  profile.LastName,
+			CreatedAt: profile.FetchedAt,
+			UpdatedAt: profile.UpdatedAt,
+		}
+	}
+
+	msgCount, _ := d.GetUserMessageCount(targetID)
+	recentMsgs, _ := d.GetRecentUserMessages(targetID, 20)
+	repLogs, _ := d.GetUserReputationLogs(targetID, 50)
+	flaggedPosts, _ := d.GetUserFlaggedPosts(targetID, 50)
+
+	var isSpamMatch bool
+	var matchedKws []string
+	if profile != nil && strings.TrimSpace(profile.Bio) != "" {
+		dbSnippets, _ := d.GetSpamSnippetStrings()
+		allKws := append([]string{}, extraKeywords...)
+		allKws = append(allKws, dbSnippets...)
+		isSpamMatch, matchedKws = MatchSpamBioAll(profile.Bio, allKws...)
+	}
+
+	isSuperAdmin := (superAdminID != 0 && targetID == superAdminID)
+
+	return &UserFullDump{
+		User:           user,
+		Profile:        profile,
+		MessageCount:   msgCount,
+		RecentMessages: recentMsgs,
+		ReputationLogs: repLogs,
+		FlaggedPosts:   flaggedPosts,
+		IsSpamBioMatch: isSpamMatch,
+		MatchedBioKws:  matchedKws,
+		IsSuperAdmin:   isSuperAdmin,
+	}, nil
+}
+
+// FormatUserDump formats a UserFullDump into a detailed Markdown report.
+func FormatUserDump(dump *UserFullDump) string {
+	if dump == nil || dump.User == nil {
+		return "*(No user data)*\n"
+	}
+
+	var sb strings.Builder
+	u := dump.User
+
+	handleStr := "-"
+	if u.Username != "" {
+		handleStr = "@" + u.Username
+	}
+	fullName := strings.TrimSpace(u.FirstName + " " + u.LastName)
+	if fullName == "" {
+		fullName = "-"
+	}
+
+	role := "Regular User"
+	if dump.IsSuperAdmin {
+		role = "👑 Super Admin"
+	} else if u.IsAdmin {
+		role = "🛡️ Bot Administrator"
+	}
+
+	status := "🟢 Active / Unbanned"
+	if u.IsBanned {
+		status = "🚫 Banned"
+	}
+
+	sb.WriteString(fmt.Sprintf("# 👤 Telegram User Dossier: %s (ID: `%d`)\n\n", handleStr, u.UserID))
+
+	sb.WriteString("## 📌 Account Overview\n")
+	sb.WriteString(fmt.Sprintf("- **User ID**: `%d`\n", u.UserID))
+	sb.WriteString(fmt.Sprintf("- **Username**: %s\n", handleStr))
+	sb.WriteString(fmt.Sprintf("- **Display Name**: %s\n", fullName))
+	sb.WriteString(fmt.Sprintf("- **Reputation**: `%d`\n", u.Reputation))
+	sb.WriteString(fmt.Sprintf("- **Warnings**: `%d`\n", u.WarnCount))
+	sb.WriteString(fmt.Sprintf("- **Role**: %s\n", role))
+	sb.WriteString(fmt.Sprintf("- **Status**: %s\n", status))
+	sb.WriteString(fmt.Sprintf("- **First Seen (Created At)**: %s\n", u.CreatedAt.Format("2006-01-02 15:04:05 MST")))
+	sb.WriteString(fmt.Sprintf("- **Last Active (Updated At)**: %s\n\n", u.UpdatedAt.Format("2006-01-02 15:04:05 MST")))
+
+	sb.WriteString("## 📋 Telegram Profile & Bio\n")
+	if dump.Profile == nil {
+		sb.WriteString("*(No profile cached in database - use `/fetchprofile` or `gogcbot backfill-profiles`)*\n\n")
+	} else if dump.Profile.NotFound {
+		sb.WriteString("⚠️ **Profile Status**: Not found on Telegram (marked to skip redundant re-fetching)\n")
+		sb.WriteString(fmt.Sprintf("- **Last Attempted**: %s\n\n", dump.Profile.FetchedAt.Format("2006-01-02 15:04:05 MST")))
+	} else {
+		p := dump.Profile
+		sb.WriteString("✅ **Profile Status**: Cached in Database\n")
+		photoStr := "❌ No photo"
+		if p.HasPhoto {
+			photoStr = fmt.Sprintf("✅ Yes (%d photos)", p.PhotoCount)
+		}
+		sb.WriteString(fmt.Sprintf("- **Profile Photo**: %s\n", photoStr))
+		if p.PhotoFileID != "" {
+			sb.WriteString(fmt.Sprintf("- **Photo File ID (Large)**: `%s`\n", p.PhotoFileID))
+		}
+		if p.PhotoSmallFileID != "" {
+			sb.WriteString(fmt.Sprintf("- **Photo File ID (Small)**: `%s`\n", p.PhotoSmallFileID))
+		}
+		sb.WriteString(fmt.Sprintf("- **Last Fetched**: %s\n", p.FetchedAt.Format("2006-01-02 15:04:05 MST")))
+
+		spamFilterStr := "🟢 Clean"
+		if dump.IsSpamBioMatch || len(dump.MatchedBioKws) > 0 {
+			spamFilterStr = fmt.Sprintf("🚨 Spam Match [Matched: `%s`]", strings.Join(dump.MatchedBioKws, ", "))
+		}
+		sb.WriteString(fmt.Sprintf("- **Spam Bio Filter**: %s\n", spamFilterStr))
+
+		bioText := p.Bio
+		if strings.TrimSpace(bioText) == "" {
+			bioText = "*(None)*"
+		}
+		sb.WriteString("- **Bio**:\n```\n")
+		sb.WriteString(bioText)
+		sb.WriteString("\n```\n\n")
+	}
+
+	// Messages
+	sb.WriteString(fmt.Sprintf("## 💬 Activity & Messages (Total Logged: %d)\n", dump.MessageCount))
+	if len(dump.RecentMessages) == 0 {
+		sb.WriteString("*(No logged messages for this user)*\n\n")
+	} else {
+		sb.WriteString("| # | Chat ID | Message ID | Media | Links | Timestamp | Message Content |\n")
+		sb.WriteString("|---|---|---|---|---|---|---|\n")
+		for i, m := range dump.RecentMessages {
+			mediaStr := "No"
+			if m.HasMedia {
+				mediaStr = "Yes"
+			}
+			linkStr := "No"
+			if m.HasLinks {
+				linkStr = "Yes"
+			}
+			msgText := escapeMarkdownCell(truncateString(m.Text, 80))
+			sb.WriteString(fmt.Sprintf("| %d | `%d` | `%d` | %s | %s | `%s` | %s |\n",
+				i+1, m.ChatID, m.MessageID, mediaStr, linkStr, m.CreatedAt.Format("2006-01-02 15:04:05 MST"), msgText))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Reputation Logs
+	sb.WriteString(fmt.Sprintf("## ⭐ Reputation Audit Trail (Total Logs: %d)\n", len(dump.ReputationLogs)))
+	if len(dump.ReputationLogs) == 0 {
+		sb.WriteString("*(No reputation changes recorded for this user)*\n\n")
+	} else {
+		sb.WriteString("| # | Delta | Reason | Action By | Timestamp |\n")
+		sb.WriteString("|---|---|---|---|---|\n")
+		for i, rl := range dump.ReputationLogs {
+			deltaStr := fmt.Sprintf("%+d", rl.ChangeAmount)
+			byUserStr := fmt.Sprintf("`%d`", rl.ByUserID)
+			if rl.ByUserID == 0 {
+				byUserStr = "System (`0`)"
+			}
+			reasonStr := escapeMarkdownCell(rl.Reason)
+			sb.WriteString(fmt.Sprintf("| %d | `%s` | %s | %s | `%s` |\n",
+				i+1, deltaStr, reasonStr, byUserStr, rl.CreatedAt.Format("2006-01-02 15:04:05 MST")))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Flagged Posts & Moderation
+	sb.WriteString(fmt.Sprintf("## 🚨 Moderation & Flagged Posts (Total Records: %d)\n", len(dump.FlaggedPosts)))
+	if len(dump.FlaggedPosts) == 0 {
+		sb.WriteString("*(No moderation flags or trigger bans for this user)*\n\n")
+	} else {
+		sb.WriteString("| # | Flag ID | Chat ID | Message ID | Status | Reason | Resolved By | Timestamp |\n")
+		sb.WriteString("|---|---|---|---|---|---|---|---|\n")
+		for i, fp := range dump.FlaggedPosts {
+			reasonStr := escapeMarkdownCell(fp.Reason)
+			statusStr := fp.Status
+			if statusStr == "banned" {
+				statusStr = "🚫 banned"
+			} else if statusStr == "approved" {
+				statusStr = "✅ approved"
+			} else if statusStr == "deleted" {
+				statusStr = "🗑️ deleted"
+			}
+			resolvedByStr := fmt.Sprintf("`%d`", fp.ResolvedBy)
+			sb.WriteString(fmt.Sprintf("| %d | `%d` | `%d` | `%d` | %s | %s | %s | `%s` |\n",
+				i+1, fp.ID, fp.GroupChatID, fp.GroupMessageID, statusStr, reasonStr, resolvedByStr, fp.FlaggedAt.Format("2006-01-02 15:04:05 MST")))
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }
 
 func (d *DB) GetUsersWithoutProfile(limit int) ([]User, error) {
