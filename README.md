@@ -92,6 +92,10 @@ CGO_ENABLED=0 go build -o gogcbot main.go
 ./gogcbot list-users --config config.yaml
 ./gogcbot list-users --config config.yaml --output user_directory.md
 ./gogcbot list-users --config config.yaml --manual-bans-only
+
+# 6. Backfill user profiles (bios and profile pictures) from Telegram API into user_profiles table
+./gogcbot backfill-profiles --config config.yaml
+./gogcbot backfill-profiles --config config.yaml --force --delay-ms 100
 ```
 
 ### OS System Service Management (Windows Service / Systemd / launchd)
@@ -174,7 +178,9 @@ shieldy:
 | `/status` | Admin/Mod | Bot status, metrics, and database stats |
 | `/checkperms` | Admin/Mod | Verify bot admin rights in current chat |
 | `/flag [reason]` | Admin/Mod | Reply to a message to flag it for moderation review |
-| `/userinfo <user\|@user>` | Admin/Mod | View user reputation, warning count, & post history |
+| `/userinfo <user\|@user>` | Admin/Mod | View user reputation, warning count, profile & post history |
+| `/fetchprofile <user>` | Admin/Mod | Fetch fresh Telegram profile (bio & picture) & cache in DB |
+| `/backfillprofiles [force]` | Admin/Mod | Backfill bios and profile photos for tracked users (marks not-found users to skip repeats) |
 | `/setsuperadmin` | First User / Super Admin | Set self as Super Admin (persists to `config.yaml`) |
 | `/setmodgroup` | Super Admin | Set current group as Private Moderation Group |
 | `/addgroup` | Admin/Mod | Add current group to monitored groups |
@@ -182,10 +188,15 @@ shieldy:
 | `/listgroups` | Admin/Mod | List all monitored groups |
 | `/rep <user> [delta]` | Admin/Mod | Check or adjust user reputation |
 | `/warn <user>` | Admin/Mod | Warn user, delete message, deduct rep |
+| `/resetwarns <user>` | Admin/Mod | Reset warning count for user to 0 |
 | `/mute <user> [hours]` | Admin/Mod | Mute user in group & deduct rep |
 | `/ban <user>` | Admin/Mod | Ban user across all monitored groups |
 | `/unban <user>` | Admin/Mod | Unban user across groups |
+| `/promote <user>` | Admin/Mod | Promote user to Bot Admin & set rep to 100 |
+| `/demote <user>` | Super Admin | Remove Bot Admin privileges and reset rep |
+| `/listusers` | Admin/Mod | List known good/bad users and moderation status |
 | `/cleanup` | Admin/Mod | Run retention cleanup on demand |
+| `/getdb` | Bot Admin (Direct PM only) | Download a copy of current SQLite3 database |
 
 ---
 

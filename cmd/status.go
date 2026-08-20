@@ -52,6 +52,7 @@ func fmtPrintfStats(stats *db.Stats) {
 	fmt.Printf("Total Logged Messages  : %d\n", stats.TotalMessages)
 	fmt.Printf("Pending Mod Flags      : %d\n", stats.PendingFlags)
 	fmt.Printf("Resolved Mod Flags     : %d\n", stats.ResolvedFlags)
+	fmt.Printf("Cached User Profiles   : %d\n", stats.TotalUserProfiles)
 }
 
 func init() {

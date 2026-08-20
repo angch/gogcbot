@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/angch/gogcbot/pkg/cleaner"
 	"github.com/angch/gogcbot/pkg/config"
@@ -120,6 +121,206 @@ func (b *Bot) GetChatMember(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatM
 		log.Printf("[Telegram API Response] GetChatMember success -> UserID: %d, Status: %s", cm.User.ID, cm.Status)
 	}
 	return cm, err
+}
+
+// GetChat wraps b.api.GetChat to echo chat / user query calls to standard logs for debugging.
+func (b *Bot) GetChat(config tgbotapi.ChatInfoConfig) (tgbotapi.Chat, error) {
+	log.Printf("[Telegram API Call] GetChat -> ChatID: %d", config.ChatID)
+	if b.api == nil {
+		if config.ChatID < 0 || config.ChatID == 404 || config.ChatID == 999999 {
+			return tgbotapi.Chat{}, fmt.Errorf("Bad Request: chat not found")
+		}
+		return tgbotapi.Chat{
+			ID:        config.ChatID,
+			Type:      "private",
+			FirstName: "Mock",
+			LastName:  "User",
+			UserName:  "mockuser",
+			Bio:       "Mock bio description",
+		}, nil
+	}
+	chat, err := b.api.GetChat(config)
+	if err != nil {
+		log.Printf("[Telegram API Error] GetChat failed for %d: %v", config.ChatID, err)
+	} else {
+		log.Printf("[Telegram API Response] GetChat success -> ID: %d, UserName: @%s, Bio: %q", chat.ID, chat.UserName, chat.Bio)
+	}
+	return chat, err
+}
+
+// GetUserProfilePhotos wraps b.api.GetUserProfilePhotos to echo query calls to standard logs for debugging.
+func (b *Bot) GetUserProfilePhotos(config tgbotapi.UserProfilePhotosConfig) (tgbotapi.UserProfilePhotos, error) {
+	log.Printf("[Telegram API Call] GetUserProfilePhotos -> UserID: %d, Offset: %d, Limit: %d", config.UserID, config.Offset, config.Limit)
+	if b.api == nil {
+		if config.UserID < 0 || config.UserID == 404 || config.UserID == 999999 {
+			return tgbotapi.UserProfilePhotos{}, fmt.Errorf("Bad Request: user not found")
+		}
+		return tgbotapi.UserProfilePhotos{
+			TotalCount: 1,
+			Photos: [][]tgbotapi.PhotoSize{
+				{
+					{FileID: "mock_small_file_id", FileUniqueID: "mock_small_unique_id", Width: 160, Height: 160, FileSize: 1024},
+					{FileID: "mock_big_file_id", FileUniqueID: "mock_big_unique_id", Width: 640, Height: 640, FileSize: 4096},
+				},
+			},
+		}, nil
+	}
+	photos, err := b.api.GetUserProfilePhotos(config)
+	if err != nil {
+		log.Printf("[Telegram API Error] GetUserProfilePhotos failed for %d: %v", config.UserID, err)
+	} else {
+		log.Printf("[Telegram API Response] GetUserProfilePhotos success -> UserID: %d, TotalCount: %d", config.UserID, photos.TotalCount)
+	}
+	return photos, err
+}
+
+// FetchUserProfile retrieves the latest profile (bio, profile picture) for a user from Telegram API and saves it to user_profiles table.
+// If the profile cannot be found on Telegram, it is saved with NotFound = true so subsequent backfills skip it.
+func (b *Bot) FetchUserProfile(userID int64) (*db.UserProfile, error) {
+	if userID == 0 {
+		return nil, fmt.Errorf("invalid user ID 0")
+	}
+
+	profile := &db.UserProfile{
+		UserID:    userID,
+		FetchedAt: time.Now(),
+	}
+
+	// 1. Fetch Chat Info (for Bio and ChatPhoto)
+	chat, errChat := b.GetChat(tgbotapi.ChatInfoConfig{
+		ChatConfig: tgbotapi.ChatConfig{
+			ChatID: userID,
+		},
+	})
+	if errChat == nil {
+		profile.Username = chat.UserName
+		profile.FirstName = chat.FirstName
+		profile.LastName = chat.LastName
+		profile.Bio = chat.Bio
+		if chat.Photo != nil {
+			profile.HasPhoto = true
+			profile.PhotoSmallFileID = chat.Photo.SmallFileID
+			profile.PhotoSmallFileUniqueID = chat.Photo.SmallFileUniqueID
+			profile.PhotoFileID = chat.Photo.BigFileID
+			profile.PhotoFileUniqueID = chat.Photo.BigFileUniqueID
+		}
+	} else {
+		log.Printf("[Bot] Warning: GetChat failed for user %d: %v", userID, errChat)
+	}
+
+	// 2. Fetch User Profile Photos (for full photo count & highest resolution file_id)
+	photos, errPhotos := b.GetUserProfilePhotos(tgbotapi.UserProfilePhotosConfig{
+		UserID: userID,
+		Offset: 0,
+		Limit:  1,
+	})
+	if errPhotos == nil {
+		profile.PhotoCount = photos.TotalCount
+		if photos.TotalCount > 0 && len(photos.Photos) > 0 && len(photos.Photos[0]) > 0 {
+			profile.HasPhoto = true
+			sizes := photos.Photos[0]
+			if profile.PhotoSmallFileID == "" {
+				profile.PhotoSmallFileID = sizes[0].FileID
+				profile.PhotoSmallFileUniqueID = sizes[0].FileUniqueID
+			}
+			largest := sizes[len(sizes)-1]
+			if profile.PhotoFileID == "" || profile.PhotoFileID == profile.PhotoSmallFileID {
+				profile.PhotoFileID = largest.FileID
+				profile.PhotoFileUniqueID = largest.FileUniqueID
+			}
+		}
+	} else {
+		log.Printf("[Bot] Warning: GetUserProfilePhotos failed for user %d: %v", userID, errPhotos)
+	}
+
+	// Fallback names/username from DB user record if Telegram GetChat didn't return them
+	if profile.Username == "" || (profile.FirstName == "" && profile.LastName == "") {
+		if dbUser, err := b.db.GetUserByID(userID); err == nil && dbUser != nil {
+			if profile.Username == "" {
+				profile.Username = dbUser.Username
+			}
+			if profile.FirstName == "" {
+				profile.FirstName = dbUser.FirstName
+			}
+			if profile.LastName == "" {
+				profile.LastName = dbUser.LastName
+			}
+		}
+	}
+
+	if errChat != nil && errPhotos != nil {
+		profile.NotFound = true
+		if saveErr := b.db.SaveUserProfile(profile); saveErr != nil {
+			log.Printf("[Bot] Warning: failed to save not_found user profile for %d: %v", userID, saveErr)
+		}
+		return profile, fmt.Errorf("user profile not found on Telegram (chat err: %v, photos err: %v)", errChat, errPhotos)
+	}
+
+	profile.NotFound = false
+	if err := b.db.SaveUserProfile(profile); err != nil {
+		return profile, fmt.Errorf("failed to save user profile to database: %w", err)
+	}
+
+	return profile, nil
+}
+
+// BackfillUserProfiles iterates over tracked users and fetches their latest profile from Telegram API with rate limiting.
+func (b *Bot) BackfillUserProfiles(ctx context.Context, delay time.Duration, force bool, progressCb func(current, total int, user *db.User, profile *db.UserProfile, err error)) (int, int, error) {
+	var users []db.User
+	var err error
+
+	if force {
+		users, err = b.db.GetAllUsers(0)
+	} else {
+		users, err = b.db.GetUsersWithoutProfile(0)
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to query users for profile backfill: %w", err)
+	}
+
+	if delay <= 0 {
+		delay = 100 * time.Millisecond
+	}
+
+	total := len(users)
+	successCount := 0
+	errorCount := 0
+
+	for i, u := range users {
+		select {
+		case <-ctx.Done():
+			return successCount, errorCount, ctx.Err()
+		default:
+		}
+
+		profile, err := b.FetchUserProfile(u.UserID)
+		if err != nil {
+			errorCount++
+			if profile != nil && profile.NotFound {
+				log.Printf("[Profile Backfill] (%d/%d) User %d (@%s) not found on Telegram (marked as not found)", i+1, total, u.UserID, u.Username)
+			} else {
+				log.Printf("[Profile Backfill] (%d/%d) Error fetching user %d (@%s): %v", i+1, total, u.UserID, u.Username, err)
+			}
+		} else {
+			successCount++
+			log.Printf("[Profile Backfill] (%d/%d) Fetched user %d (@%s) -> Bio: %q, Photos: %d", i+1, total, u.UserID, u.Username, profile.Bio, profile.PhotoCount)
+		}
+
+		if progressCb != nil {
+			userCopy := u
+			progressCb(i+1, total, &userCopy, profile, err)
+		}
+
+		if i < total-1 {
+			select {
+			case <-ctx.Done():
+				return successCount, errorCount, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
+
+	return successCount, errorCount, nil
 }
 
 func (b *Bot) SetCfgPath(path string) {

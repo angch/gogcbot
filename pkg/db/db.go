@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,7 @@ import (
 
 type DB struct {
 	*sql.DB
+	path string
 }
 
 type User struct {
@@ -71,6 +73,24 @@ type RepLog struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+type UserProfile struct {
+	UserID                 int64     `json:"user_id"`
+	Username               string    `json:"username"`
+	FirstName              string    `json:"first_name"`
+	LastName               string    `json:"last_name"`
+	Bio                    string    `json:"bio"`
+	PhotoFileID            string    `json:"photo_file_id"`
+	PhotoFileUniqueID      string    `json:"photo_file_unique_id"`
+	PhotoSmallFileID       string    `json:"photo_small_file_id"`
+	PhotoSmallFileUniqueID string    `json:"photo_small_file_unique_id"`
+	PhotoCount             int       `json:"photo_count"`
+	HasPhoto               bool      `json:"has_photo"`
+	NotFound               bool      `json:"not_found"`
+	RawJSON                string    `json:"raw_json,omitempty"`
+	FetchedAt              time.Time `json:"fetched_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
+}
+
 func OpenDB(dbPath string) (*DB, error) {
 	dir := filepath.Dir(dbPath)
 	if dir != "" && dir != "." {
@@ -90,12 +110,50 @@ func OpenDB(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to connect to SQLite database at '%s': %w\n-> Action: Verify SQLite file is not corrupted or locked by another process.", dbPath, err)
 	}
 
-	database := &DB{DB: sqliteDB}
+	database := &DB{DB: sqliteDB, path: dbPath}
 	if err := database.AutoMigrate(); err != nil {
 		return nil, fmt.Errorf("failed to initialize SQLite database schema: %w\n-> Action: Ensure database path '%s' is writable.", err, dbPath)
 	}
 
 	return database, nil
+}
+
+// Path returns the SQLite database file path.
+func (d *DB) Path() string {
+	return d.path
+}
+
+// BackupTo creates a consistent, standalone SQLite database backup file at the specified destination path.
+func (d *DB) BackupTo(destPath string) error {
+	// First checkpoint WAL journal to flush pending commits
+	_, _ = d.Exec(`PRAGMA wal_checkpoint(PASSIVE);`)
+
+	// Remove destination file if it already exists, as VACUUM INTO requires target file to NOT exist
+	_ = os.Remove(destPath)
+
+	escapedPath := strings.ReplaceAll(destPath, "'", "''")
+	_, err := d.Exec(fmt.Sprintf("VACUUM INTO '%s';", escapedPath))
+	if err == nil {
+		return nil
+	}
+
+	// Fallback: checkpoint WAL with TRUNCATE and perform direct file copy if VACUUM INTO fails
+	_, _ = d.Exec(`PRAGMA wal_checkpoint(TRUNCATE);`)
+	if d.path != "" {
+		srcFile, errSrc := os.Open(d.path)
+		if errSrc == nil {
+			defer srcFile.Close()
+			dstFile, errDst := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+			if errDst == nil {
+				defer dstFile.Close()
+				if _, errCopy := io.Copy(dstFile, srcFile); errCopy == nil {
+					return nil
+				}
+			}
+		}
+	}
+
+	return fmt.Errorf("failed to backup database: %w", err)
 }
 
 func (d *DB) AutoMigrate() error {
@@ -106,6 +164,25 @@ func (d *DB) AutoMigrate() error {
 	// Schema evolution migrations
 	migrations := []string{
 		`ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0;`,
+		`CREATE TABLE IF NOT EXISTS user_profiles (
+			user_id INTEGER PRIMARY KEY,
+			username TEXT NOT NULL DEFAULT '',
+			first_name TEXT NOT NULL DEFAULT '',
+			last_name TEXT NOT NULL DEFAULT '',
+			bio TEXT NOT NULL DEFAULT '',
+			photo_file_id TEXT NOT NULL DEFAULT '',
+			photo_file_unique_id TEXT NOT NULL DEFAULT '',
+			photo_small_file_id TEXT NOT NULL DEFAULT '',
+			photo_small_file_unique_id TEXT NOT NULL DEFAULT '',
+			photo_count INTEGER NOT NULL DEFAULT 0,
+			has_photo BOOLEAN NOT NULL DEFAULT 0,
+			not_found BOOLEAN NOT NULL DEFAULT 0,
+			raw_json TEXT NOT NULL DEFAULT '',
+			fetched_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_profiles_updated ON user_profiles(updated_at);`,
+		`ALTER TABLE user_profiles ADD COLUMN not_found BOOLEAN NOT NULL DEFAULT 0;`,
 	}
 
 	for _, stmt := range migrations {
@@ -177,6 +254,26 @@ func (d *DB) InitSchema() error {
 		by_user_id INTEGER NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS user_profiles (
+		user_id INTEGER PRIMARY KEY,
+		username TEXT NOT NULL DEFAULT '',
+		first_name TEXT NOT NULL DEFAULT '',
+		last_name TEXT NOT NULL DEFAULT '',
+		bio TEXT NOT NULL DEFAULT '',
+		photo_file_id TEXT NOT NULL DEFAULT '',
+		photo_file_unique_id TEXT NOT NULL DEFAULT '',
+		photo_small_file_id TEXT NOT NULL DEFAULT '',
+		photo_small_file_unique_id TEXT NOT NULL DEFAULT '',
+		photo_count INTEGER NOT NULL DEFAULT 0,
+		has_photo BOOLEAN NOT NULL DEFAULT 0,
+		not_found BOOLEAN NOT NULL DEFAULT 0,
+		raw_json TEXT NOT NULL DEFAULT '',
+		fetched_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_user_profiles_updated ON user_profiles(updated_at);
 	`
 	_, err := d.Exec(schema)
 	if err != nil {
@@ -662,11 +759,12 @@ func (d *DB) PruneUserPostHistory(maxPostsPerUser int) (int64, error) {
 // Stats
 
 type Stats struct {
-	TotalUsers    int `json:"total_users"`
-	TotalGroups   int `json:"total_groups"`
-	TotalMessages int `json:"total_messages"`
-	PendingFlags  int `json:"pending_flags"`
-	ResolvedFlags int `json:"resolved_flags"`
+	TotalUsers        int `json:"total_users"`
+	TotalGroups       int `json:"total_groups"`
+	TotalMessages     int `json:"total_messages"`
+	PendingFlags      int `json:"pending_flags"`
+	ResolvedFlags     int `json:"resolved_flags"`
+	TotalUserProfiles int `json:"total_user_profiles"`
 }
 
 func (d *DB) GetStats() (*Stats, error) {
@@ -686,7 +784,130 @@ func (d *DB) GetStats() (*Stats, error) {
 	if err := d.QueryRow(`SELECT COUNT(*) FROM flagged_posts WHERE status != 'pending'`).Scan(&s.ResolvedFlags); err != nil {
 		return nil, err
 	}
+	_ = d.QueryRow(`SELECT COUNT(*) FROM user_profiles`).Scan(&s.TotalUserProfiles)
 	return &s, nil
+}
+
+// User Profile Methods
+
+func (d *DB) SaveUserProfile(p *UserProfile) error {
+	now := time.Now()
+	if p.FetchedAt.IsZero() {
+		p.FetchedAt = now
+	}
+	p.UpdatedAt = now
+
+	_, err := d.Exec(`
+		INSERT INTO user_profiles (
+			user_id, username, first_name, last_name, bio,
+			photo_file_id, photo_file_unique_id, photo_small_file_id, photo_small_file_unique_id,
+			photo_count, has_photo, not_found, raw_json, fetched_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET
+			username = excluded.username,
+			first_name = excluded.first_name,
+			last_name = excluded.last_name,
+			bio = excluded.bio,
+			photo_file_id = excluded.photo_file_id,
+			photo_file_unique_id = excluded.photo_file_unique_id,
+			photo_small_file_id = excluded.photo_small_file_id,
+			photo_small_file_unique_id = excluded.photo_small_file_unique_id,
+			photo_count = excluded.photo_count,
+			has_photo = excluded.has_photo,
+			not_found = excluded.not_found,
+			raw_json = excluded.raw_json,
+			fetched_at = excluded.fetched_at,
+			updated_at = excluded.updated_at
+	`, p.UserID, p.Username, p.FirstName, p.LastName, p.Bio,
+		p.PhotoFileID, p.PhotoFileUniqueID, p.PhotoSmallFileID, p.PhotoSmallFileUniqueID,
+		p.PhotoCount, p.HasPhoto, p.NotFound, p.RawJSON, p.FetchedAt, p.UpdatedAt)
+	return err
+}
+
+func (d *DB) GetUserProfile(userID int64) (*UserProfile, error) {
+	var p UserProfile
+	err := d.QueryRow(`
+		SELECT user_id, username, first_name, last_name, bio,
+		       photo_file_id, photo_file_unique_id, photo_small_file_id, photo_small_file_unique_id,
+		       photo_count, has_photo, not_found, raw_json, fetched_at, updated_at
+		FROM user_profiles WHERE user_id = ?
+	`, userID).Scan(
+		&p.UserID, &p.Username, &p.FirstName, &p.LastName, &p.Bio,
+		&p.PhotoFileID, &p.PhotoFileUniqueID, &p.PhotoSmallFileID, &p.PhotoSmallFileUniqueID,
+		&p.PhotoCount, &p.HasPhoto, &p.NotFound, &p.RawJSON, &p.FetchedAt, &p.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (d *DB) GetUsersWithoutProfile(limit int) ([]User, error) {
+	query := `
+		SELECT u.user_id, u.username, u.first_name, u.last_name, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
+		FROM users u
+		LEFT JOIN user_profiles p ON u.user_id = p.user_id
+		WHERE p.user_id IS NULL
+		ORDER BY u.reputation DESC, u.created_at DESC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := d.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
+func (d *DB) GetAllUserProfiles(limit int) ([]UserProfile, error) {
+	query := `
+		SELECT user_id, username, first_name, last_name, bio,
+		       photo_file_id, photo_file_unique_id, photo_small_file_id, photo_small_file_unique_id,
+		       photo_count, has_photo, not_found, raw_json, fetched_at, updated_at
+		FROM user_profiles
+		ORDER BY updated_at DESC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := d.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var profiles []UserProfile
+	for rows.Next() {
+		var p UserProfile
+		if err := rows.Scan(
+			&p.UserID, &p.Username, &p.FirstName, &p.LastName, &p.Bio,
+			&p.PhotoFileID, &p.PhotoFileUniqueID, &p.PhotoSmallFileID, &p.PhotoSmallFileUniqueID,
+			&p.PhotoCount, &p.HasPhoto, &p.NotFound, &p.RawJSON, &p.FetchedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		profiles = append(profiles, p)
+	}
+	return profiles, nil
+}
+
+func (d *DB) GetUserProfileCount() (int, error) {
+	var count int
+	err := d.QueryRow(`SELECT COUNT(*) FROM user_profiles`).Scan(&count)
+	return count, err
 }
 
 // User Directory Report Types and Methods

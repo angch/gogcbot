@@ -606,3 +606,197 @@ func TestExtractTriggerName(t *testing.T) {
 	}
 }
 
+func TestDB_BackupTo(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Verify database Path
+	if database.Path() == "" {
+		t.Errorf("expected database path to be non-empty")
+	}
+
+	// Insert test data
+	_, _, err := database.GetOrCreateUser(12345, "testuser", "Test", "User", 100)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	_ = database.SaveGroup(-100112233, "Test Group", "supergroup")
+	_ = database.SaveMessage(&Message{
+		ChatID:    -100112233,
+		MessageID: 1,
+		UserID:    12345,
+		Text:      "Backup test message",
+		CreatedAt: time.Now(),
+	})
+
+	// Create backup destination
+	tmpDir, err := os.MkdirTemp("", "gogcbot_backup_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	backupPath := filepath.Join(tmpDir, "backup.db")
+
+	if err := database.BackupTo(backupPath); err != nil {
+		t.Fatalf("BackupTo failed: %v", err)
+	}
+
+	fileInfo, err := os.Stat(backupPath)
+	if err != nil {
+		t.Fatalf("failed to stat backup file: %v", err)
+	}
+	if fileInfo.Size() == 0 {
+		t.Fatalf("backup file is empty")
+	}
+
+	// Open backup database to verify integrity and content
+	backupDB, err := OpenDB(backupPath)
+	if err != nil {
+		t.Fatalf("failed to open backup db: %v", err)
+	}
+	defer backupDB.Close()
+
+	u, err := backupDB.GetUserByID(12345)
+	if err != nil {
+		t.Fatalf("failed to get user from backup db: %v", err)
+	}
+	if u.Username != "testuser" || u.Reputation != 100 {
+		t.Errorf("unexpected user in backup db: %+v", u)
+	}
+
+	stats, err := backupDB.GetStats()
+	if err != nil {
+		t.Fatalf("failed to get stats from backup db: %v", err)
+	}
+	if stats.TotalUsers != 1 || stats.TotalGroups != 1 || stats.TotalMessages != 1 {
+		t.Errorf("unexpected stats in backup db: %+v", stats)
+	}
+}
+
+func TestUserProfileOperations(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Initial user
+	_, _, err := database.GetOrCreateUser(1001, "alice", "Alice", "Smith", 100)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	_, _, err = database.GetOrCreateUser(1002, "bob", "Bob", "Jones", 80)
+	if err != nil {
+		t.Fatalf("failed to create user 2: %v", err)
+	}
+
+	// 1. Check users without profile
+	missing, err := database.GetUsersWithoutProfile(0)
+	if err != nil {
+		t.Fatalf("failed to get users without profile: %v", err)
+	}
+	if len(missing) != 2 {
+		t.Errorf("expected 2 users without profile, got %d", len(missing))
+	}
+
+	// 2. Save user profile
+	p := &UserProfile{
+		UserID:            1001,
+		Username:          "alice",
+		FirstName:         "Alice",
+		LastName:          "Smith",
+		Bio:               "Golang developer and crypto enthusiast",
+		PhotoFileID:       "big_file_id_123",
+		PhotoFileUniqueID: "big_unique_id_123",
+		PhotoCount:        2,
+		HasPhoto:          true,
+	}
+
+	if err := database.SaveUserProfile(p); err != nil {
+		t.Fatalf("failed to save user profile: %v", err)
+	}
+
+	// 3. Retrieve user profile
+	gotProfile, err := database.GetUserProfile(1001)
+	if err != nil {
+		t.Fatalf("failed to get user profile: %v", err)
+	}
+	if gotProfile.Bio != "Golang developer and crypto enthusiast" || !gotProfile.HasPhoto || gotProfile.PhotoCount != 2 {
+		t.Errorf("unexpected user profile data: %+v", gotProfile)
+	}
+
+	// 4. Update profile (upsert)
+	p.Bio = "Updated bio text"
+	p.PhotoCount = 3
+	if err := database.SaveUserProfile(p); err != nil {
+		t.Fatalf("failed to update user profile: %v", err)
+	}
+
+	updatedProfile, err := database.GetUserProfile(1001)
+	if err != nil {
+		t.Fatalf("failed to get updated profile: %v", err)
+	}
+	if updatedProfile.Bio != "Updated bio text" || updatedProfile.PhotoCount != 3 {
+		t.Errorf("expected updated bio and photo count, got %+v", updatedProfile)
+	}
+
+	// 5. Count and query without profile after insert
+	cnt, err := database.GetUserProfileCount()
+	if err != nil {
+		t.Fatalf("failed to count profiles: %v", err)
+	}
+	if cnt != 1 {
+		t.Errorf("expected profile count 1, got %d", cnt)
+	}
+
+	missingAfter, err := database.GetUsersWithoutProfile(0)
+	if err != nil {
+		t.Fatalf("failed to get users without profile: %v", err)
+	}
+	if len(missingAfter) != 1 || missingAfter[0].UserID != 1002 {
+		t.Errorf("expected only user 1002 in missing, got %+v", missingAfter)
+	}
+
+	// 6. GetAllUserProfiles
+	allProfiles, err := database.GetAllUserProfiles(10)
+	if err != nil {
+		t.Fatalf("failed to get all user profiles: %v", err)
+	}
+	if len(allProfiles) != 1 {
+		t.Errorf("expected 1 user profile in allProfiles, got %d", len(allProfiles))
+	}
+
+	// 7. Save user 1002 as not found
+	notFoundProfile := &UserProfile{
+		UserID:    1002,
+		Username:  "bob",
+		FirstName: "Bob",
+		LastName:  "Jones",
+		NotFound:  true,
+	}
+	if err := database.SaveUserProfile(notFoundProfile); err != nil {
+		t.Fatalf("failed to save not found profile: %v", err)
+	}
+
+	gotNotFound, err := database.GetUserProfile(1002)
+	if err != nil {
+		t.Fatalf("failed to get user 1002 profile: %v", err)
+	}
+	if !gotNotFound.NotFound {
+		t.Errorf("expected user 1002 to have NotFound = true")
+	}
+
+	// 8. Now missing profiles should be 0 because 1002 is marked as not found (has record in user_profiles)
+	missingNone, err := database.GetUsersWithoutProfile(0)
+	if err != nil {
+		t.Fatalf("failed to get users without profile: %v", err)
+	}
+	if len(missingNone) != 0 {
+		t.Errorf("expected 0 users without profile after marking not found, got %d", len(missingNone))
+	}
+
+	cnt2, err := database.GetUserProfileCount()
+	if err != nil || cnt2 != 2 {
+		t.Errorf("expected profile count 2, got %d, err: %v", cnt2, err)
+	}
+}
+
