@@ -29,15 +29,37 @@ type Bot struct {
 	stopChan chan struct{}
 }
 
+var (
+	newBotAPIFunc   = tgbotapi.NewBotAPI
+	loginRetryDelay = 5 * time.Second
+	maxLoginRetries = 6
+)
+
 // NewBot initializes a new Bot instance using the provided configuration and database client.
 func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 	if cfg.TelegramToken == "" {
 		return nil, fmt.Errorf("telegram_token is required\n-> Action: Set 'telegram_token' in configuration file or export GOGCBOT_TELEGRAM_TOKEN=\"<token>\"")
 	}
 
-	api, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
+	var api *tgbotapi.BotAPI
+	var err error
+
+	for attempt := 1; attempt <= maxLoginRetries; attempt++ {
+		api, err = newBotAPIFunc(cfg.TelegramToken)
+		if err == nil {
+			break
+		}
+
+		log.Printf("[Bot] Telegram login denied/failed (attempt %d/%d): %v. Sleeping %v before retrying (may have started up too soon)...",
+			attempt, maxLoginRetries, err, loginRetryDelay)
+
+		if attempt < maxLoginRetries {
+			time.Sleep(loginRetryDelay)
+		}
+	}
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to authenticate Telegram Bot API: %w\n-> Action: Check your Telegram Bot Token with @BotFather and ensure active internet connectivity", err)
+		return nil, fmt.Errorf("failed to authenticate Telegram Bot API after %d attempts: %w\n-> Action: Check your Telegram Bot Token with @BotFather and ensure active internet connectivity", maxLoginRetries, err)
 	}
 
 	// Enable debug mode for tgbotapi to log raw HTTP Telegram API calls & responses

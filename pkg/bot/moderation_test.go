@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -690,6 +691,79 @@ func TestHandleMessage_SpamBioMessage_TriggersBan(t *testing.T) {
 	}
 	if !u.IsBanned {
 		t.Errorf("expected user %d to be banned after sending message with spam bio", userID)
+	}
+}
+
+func TestNewBot_LoginRetry_Success(t *testing.T) {
+	origFunc := newBotAPIFunc
+	origDelay := loginRetryDelay
+	origRetries := maxLoginRetries
+	defer func() {
+		newBotAPIFunc = origFunc
+		loginRetryDelay = origDelay
+		maxLoginRetries = origRetries
+	}()
+
+	loginRetryDelay = 1 * time.Millisecond
+	maxLoginRetries = 4
+
+	attempts := 0
+	newBotAPIFunc = func(token string) (*tgbotapi.BotAPI, error) {
+		attempts++
+		if attempts < 3 {
+			return nil, fmt.Errorf("HTTP 403 Forbidden: Telegram login denied (started up too soon)")
+		}
+		return &tgbotapi.BotAPI{
+			Self: tgbotapi.User{ID: 123456, UserName: "testretrybot"},
+		}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.TelegramToken = "mock_token"
+
+	b, err := NewBot(&cfg, nil)
+	if err != nil {
+		t.Fatalf("expected NewBot to succeed after retry, got err: %v", err)
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+	if b.BotUser().UserName != "testretrybot" {
+		t.Errorf("expected bot username 'testretrybot', got %s", b.BotUser().UserName)
+	}
+}
+
+func TestNewBot_LoginRetry_Exhausted(t *testing.T) {
+	origFunc := newBotAPIFunc
+	origDelay := loginRetryDelay
+	origRetries := maxLoginRetries
+	defer func() {
+		newBotAPIFunc = origFunc
+		loginRetryDelay = origDelay
+		maxLoginRetries = origRetries
+	}()
+
+	loginRetryDelay = 1 * time.Millisecond
+	maxLoginRetries = 3
+
+	attempts := 0
+	newBotAPIFunc = func(token string) (*tgbotapi.BotAPI, error) {
+		attempts++
+		return nil, fmt.Errorf("HTTP 401 Unauthorized: token denied")
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.TelegramToken = "mock_token"
+
+	_, err := NewBot(&cfg, nil)
+	if err == nil {
+		t.Fatalf("expected NewBot to fail when all login attempts denied")
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+	if !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Errorf("expected error message to mention 3 attempts, got: %v", err)
 	}
 }
 
