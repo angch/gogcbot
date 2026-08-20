@@ -51,7 +51,7 @@ detector:
     min_cjk_chars: 1
     rep_penalty: 20
   ollama_name_classifier:
-    enabled: false
+    enabled: true
     ollama_url: "http://localhost:11434"
     model: "phi4"
     min_high_user_id: 1000000000

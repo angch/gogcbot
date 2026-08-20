@@ -37,13 +37,13 @@ type ShieldyConfig struct {
 
 // DetectorConfig defines settings for modular detection triggers.
 type DetectorConfig struct {
-	Enabled               bool                                `mapstructure:"enabled" yaml:"enabled"`
-	NewUserCJK            detector.NewUserCJKTriggerConfig    `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
-	NewUserChinese        detector.NewUserCJKTriggerConfig    `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
-	NewUserSpamBio        detector.NewUserSpamBioTriggerConfig  `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
-	RedPacketName         detector.RedPacketNameTriggerConfig   `mapstructure:"red_packet_name" yaml:"red_packet_name"`
-	NewUserRedPacket      detector.RedPacketNameTriggerConfig   `mapstructure:"new_user_red_packet" yaml:"new_user_red_packet,omitempty"`
-	OllamaNameClassifier  detector.OllamaNameClassifierConfig `mapstructure:"ollama_name_classifier" yaml:"ollama_name_classifier,omitempty"`
+	Enabled              bool                                 `mapstructure:"enabled" yaml:"enabled"`
+	NewUserCJK           detector.NewUserCJKTriggerConfig     `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
+	NewUserChinese       detector.NewUserCJKTriggerConfig     `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
+	NewUserSpamBio       detector.NewUserSpamBioTriggerConfig `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
+	RedPacketName        detector.RedPacketNameTriggerConfig  `mapstructure:"red_packet_name" yaml:"red_packet_name"`
+	NewUserRedPacket     detector.RedPacketNameTriggerConfig  `mapstructure:"new_user_red_packet" yaml:"new_user_red_packet,omitempty"`
+	OllamaNameClassifier detector.OllamaNameClassifierConfig  `mapstructure:"ollama_name_classifier" yaml:"ollama_name_classifier,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -106,33 +106,33 @@ func DefaultConfig() Config {
 				MaxUserPosts:  5,
 				RepPenalty:    20,
 			},
-		NewUserSpamBio: detector.NewUserSpamBioTriggerConfig{
-			Enabled:       true,
-			MaxReputation: 5,
-			MaxUserPosts:  5,
-			RepPenalty:    20,
-		},
-		RedPacketName: detector.RedPacketNameTriggerConfig{
-			Enabled:           true,
-			MinHighUserID:     1000000000,
-			MaxReputation:     5,
-			MaxUserPosts:      5,
-			MinUsernameLength: 5,
-			MinCJKRatio:       0.5,
-			MinCJKChars:       1,
-			RepPenalty:        20,
-		},
-		OllamaNameClassifier: detector.OllamaNameClassifierConfig{
-			Enabled:        false,
-			OllamaURL:      "http://localhost:11434",
-			Model:          "phi4",
-			MinHighUserID:  1000000000,
-			MaxReputation:  5,
-			MaxUserPosts:   5,
-			RequestTimeout: 10 * time.Second,
-			FlagOnly:       true,
-			RepPenalty:     20,
-		},
+			NewUserSpamBio: detector.NewUserSpamBioTriggerConfig{
+				Enabled:       true,
+				MaxReputation: 5,
+				MaxUserPosts:  5,
+				RepPenalty:    20,
+			},
+			RedPacketName: detector.RedPacketNameTriggerConfig{
+				Enabled:           true,
+				MinHighUserID:     1000000000,
+				MaxReputation:     5,
+				MaxUserPosts:      5,
+				MinUsernameLength: 5,
+				MinCJKRatio:       0.5,
+				MinCJKChars:       1,
+				RepPenalty:        20,
+			},
+			OllamaNameClassifier: detector.OllamaNameClassifierConfig{
+				Enabled:        true,
+				OllamaURL:      "http://localhost:11434",
+				Model:          "phi4",
+				MinHighUserID:  1000000000,
+				MaxReputation:  5,
+				MaxUserPosts:   5,
+				RequestTimeout: 10 * time.Second,
+				FlagOnly:       true,
+				RepPenalty:     20,
+			},
 		},
 		Shieldy: ShieldyConfig{
 			Enabled:             true,
@@ -209,7 +209,7 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.new_user_red_packet.min_cjk_chars", 1)
 	v.SetDefault("detector.new_user_red_packet.rep_penalty", 20)
 
-	v.SetDefault("detector.ollama_name_classifier.enabled", false)
+	v.SetDefault("detector.ollama_name_classifier.enabled", true)
 	v.SetDefault("detector.ollama_name_classifier.ollama_url", "http://localhost:11434")
 	v.SetDefault("detector.ollama_name_classifier.model", "phi4")
 	v.SetDefault("detector.ollama_name_classifier.min_high_user_id", int64(1000000000))
