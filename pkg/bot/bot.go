@@ -103,6 +103,9 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 			}
 			det.RegisterTrigger(detector.NewRedPacketNameTrigger(rpCfg))
 		}
+		if cfg.Detector.UsernameAnomaly.Enabled {
+			det.RegisterTrigger(detector.NewUsernameAnomalyTrigger(cfg.Detector.UsernameAnomaly))
+		}
 	}
 
 	if database != nil && len(cfg.AutoFlag.BlockedKeywords) > 0 {
