@@ -60,7 +60,7 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
 8. **Spam Snippet & Bio Detection**:
    - **Profile Bio Scanning**: Identifies unbanned new users whose profiles contain spam promotions, gift card scams, or syndicate marketing.
    - **`spam_snippets` Database Table**: Stores dynamic spam snippets synced from runtime `config.yaml` or added programmatically.
-   - **CLI & Bot Commands**: Search and inspect suspicious bios via `gogcbot list-spambios` and `/listspambios`.
+   - **CLI & Bot Commands**: Search and inspect suspicious bios via `gogcbot list-spambios` and `/listspambios` (rendered as a compact monospace table with CJK visual alignment).
 
 ---
 
@@ -205,7 +205,7 @@ shieldy:
 | `/promote <user>` | Admin/Mod | Promote user to Bot Admin & set rep to 100 |
 | `/demote <user>` | Super Admin | Remove Bot Admin privileges and reset rep |
 | `/listusers` | Admin/Mod | List known good/bad users and moderation status |
-| `/listspambios [kw] [ban]` | Admin/Mod | List or batch-ban unbanned new users with suspicious or syndicate spam bios |
+| `/listspambios [kw] [ban]` | Admin/Mod | Compact monospace table list or batch-ban unbanned new users with suspicious or syndicate spam bios |
 | `/cleanup` | Admin/Mod | Run retention cleanup on demand |
 | `/getdb` | Bot Admin (Direct PM only) | Download a copy of current SQLite3 database |
 

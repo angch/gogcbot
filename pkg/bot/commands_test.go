@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -798,3 +799,114 @@ func TestCmdListSpamBios(t *testing.T) {
 		t.Errorf("expected user 888999 to be banned after /listspambios ban")
 	}
 }
+
+func TestFormatSpamBioTable(t *testing.T) {
+	items := []db.SpamBioUserItem{
+		{
+			UserID:          888999,
+			Username:        "spambot",
+			FirstName:       "Spam",
+			LastName:        "Bot",
+			Reputation:      0,
+			MessageCount:    1,
+			Bio:             "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。联系 @xgshenqing888",
+			IsSpamMatch:     true,
+			MatchedKeywords: []string{"沃尔玛", "油卡"},
+		},
+		{
+			UserID:          5001,
+			Username:        "",
+			FirstName:       "李",
+			LastName:        "四",
+			Reputation:      0,
+			MessageCount:    0,
+			Bio:             "Line1\nLine2\r\nLine3 with `code`",
+			IsSpamMatch:     true,
+			MatchedKeywords: []string{"兼职"},
+		},
+		{
+			UserID:          7002,
+			Username:        "clean_user",
+			FirstName:       "Clean",
+			LastName:        "User",
+			Reputation:      10,
+			MessageCount:    3,
+			Bio:             "Just a regular bio with no spam",
+			IsSpamMatch:     false,
+			MatchedKeywords: nil,
+		},
+		{
+			UserID:          9003,
+			Username:        "",
+			FirstName:       "",
+			LastName:        "",
+			Reputation:      0,
+			MessageCount:    0,
+			Bio:             "",
+			IsSpamMatch:     false,
+			MatchedKeywords: nil,
+		},
+	}
+
+	table := formatSpamBioTable(items, "沃尔玛")
+
+	if !strings.Contains(table, "🚨 **Unbanned Users with Spam Bios** (Found: 4) [Filter: `沃尔玛`]:") {
+		t.Errorf("expected header with filter in table output:\n%s", table)
+	}
+	if !strings.Contains(table, " # | User ID    | User         | Match      | Bio Snippet") {
+		t.Errorf("expected column headers in table output:\n%s", table)
+	}
+	if !strings.Contains(table, "---+------------+--------------+------------+------------------------------") {
+		t.Errorf("expected divider in table output:\n%s", table)
+	}
+	if !strings.Contains(table, "888999") || !strings.Contains(table, "@spambot") || !strings.Contains(table, "沃尔玛") {
+		t.Errorf("expected user 888999 row in table output:\n%s", table)
+	}
+	if !strings.Contains(table, "5001") || !strings.Contains(table, "李 四") || !strings.Contains(table, "兼职") {
+		t.Errorf("expected user 5001 row in table output:\n%s", table)
+	}
+	// Check multiline flattening in user 5001 bio (should not have newlines breaking rows)
+	if strings.Contains(table, "Line1\nLine2") {
+		t.Errorf("bio should have been flattened into single line")
+	}
+	// Check user with empty name fallback
+	if !strings.Contains(table, "9003") || !strings.Contains(table, "Unknown") {
+		t.Errorf("expected Unknown fallback for user 9003")
+	}
+	// Check quick actions footer
+	if !strings.Contains(table, "💡 **Actions**: `/listspambios ban`") {
+		t.Errorf("expected actions footer in table output:\n%s", table)
+	}
+}
+
+func TestVisualStringWidthAndTruncate(t *testing.T) {
+	// ASCII width
+	if w := visualStringWidth("hello"); w != 5 {
+		t.Errorf("expected visualStringWidth('hello') == 5, got %d", w)
+	}
+	// CJK fullwidth characters (each Chinese character = 2 width)
+	if w := visualStringWidth("沃尔玛"); w != 6 {
+		t.Errorf("expected visualStringWidth('沃尔玛') == 6, got %d", w)
+	}
+	// Mixed
+	if w := visualStringWidth("@沃尔玛_123"); w != 11 { // 1 + 6 + 1 + 3 = 11
+		t.Errorf("expected visualStringWidth('@沃尔玛_123') == 11, got %d", w)
+	}
+
+	// Pad right
+	padded := padRightVisual("沃尔玛", 10)
+	if visualStringWidth(padded) != 10 {
+		t.Errorf("expected visual width 10, got %d (%q)", visualStringWidth(padded), padded)
+	}
+
+	// Truncate visual
+	longChinese := "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程"
+	truncated := truncateVisual(longChinese, 20)
+	if visualStringWidth(truncated) > 20 {
+		t.Errorf("expected visual width <= 20, got %d (%q)", visualStringWidth(truncated), truncated)
+	}
+	if !strings.HasSuffix(truncated, "...") {
+		t.Errorf("expected '...' suffix for truncated string, got %q", truncated)
+	}
+}
+

@@ -877,6 +877,12 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 		return
 	}
 
+	output := formatSpamBioTable(items, keyword)
+	b.replyText(msg, output)
+}
+
+// formatSpamBioTable formats the slice of SpamBioUserItem into a compact monospace table for Telegram output.
+func formatSpamBioTable(items []db.SpamBioUserItem, keyword string) string {
 	var sb strings.Builder
 	filterHeader := ""
 	if keyword != "" {
@@ -884,46 +890,117 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 	}
 	sb.WriteString(fmt.Sprintf("🚨 **Unbanned Users with Spam Bios** (Found: %d)%s:\n\n", len(items), filterHeader))
 
+	sb.WriteString("```\n")
+	sb.WriteString(" # | User ID    | User         | Match      | Bio Snippet\n")
+	sb.WriteString("---+------------+--------------+------------+------------------------------\n")
+
 	for i, u := range items {
-		userHandle := ""
+		idxStr := fmt.Sprintf("%2d", i+1)
+		idStr := padRightVisual(fmt.Sprintf("%d", u.UserID), 10)
+
+		var userDisplay string
 		if u.Username != "" {
-			userHandle = fmt.Sprintf(" (@%s)", escapeMarkdown(u.Username))
+			userDisplay = "@" + u.Username
+		} else {
+			userDisplay = strings.TrimSpace(u.FirstName + " " + u.LastName)
+			if userDisplay == "" {
+				userDisplay = "Unknown"
+			}
 		}
-		name := strings.TrimSpace(u.FirstName + " " + u.LastName)
-		if name == "" {
-			name = "Unknown"
-		}
+		userStr := padRightVisual(truncateVisual(userDisplay, 12), 12)
 
-		matchedStr := truncateText(strings.Join(u.MatchedKeywords, ", "), 40)
-		bioSnippet := truncateText(u.Bio, 120)
-
-		matchBadge := "🟢 Clean"
-		if u.IsSpamMatch || len(u.MatchedKeywords) > 0 {
-			matchBadge = "🚨 Spam Match"
-		}
-
-		matchedLine := ""
+		var matchDisplay string
 		if len(u.MatchedKeywords) > 0 {
-			matchedLine = fmt.Sprintf("   • Matched: `%s`\n", escapeMarkdown(matchedStr))
+			matchDisplay = strings.Join(u.MatchedKeywords, ",")
+		} else if u.IsSpamMatch {
+			matchDisplay = "Spam"
+		} else {
+			matchDisplay = "-"
 		}
+		matchStr := padRightVisual(truncateVisual(matchDisplay, 10), 10)
 
-		cleanBio := strings.ReplaceAll(bioSnippet, "```", "'''")
+		// Sanitize bio: flatten newlines and replace backticks
+		cleanBio := strings.ReplaceAll(u.Bio, "\r\n", " ")
+		cleanBio = strings.ReplaceAll(cleanBio, "\n", " ")
+		cleanBio = strings.ReplaceAll(cleanBio, "\r", " ")
+		cleanBio = strings.ReplaceAll(cleanBio, "\t", " ")
+		cleanBio = strings.ReplaceAll(cleanBio, "`", "'")
+		cleanBio = strings.Join(strings.Fields(cleanBio), " ")
+		if cleanBio == "" {
+			cleanBio = "-"
+		}
+		bioSnippet := truncateVisual(cleanBio, 30)
 
-		sb.WriteString(fmt.Sprintf(
-			"%d. **%s**%s\n"+
-				"   • ID: `%d` | Rep: `%d` | Posts: `%d` | Filter: **%s**\n"+
-				"%s"+
-				"   • Bio: ```\n%s\n```\n"+
-				"   • Action: `/ban %d`\n\n",
-			i+1, escapeMarkdown(name), userHandle,
-			u.UserID, u.Reputation, u.MessageCount, matchBadge,
-			matchedLine,
-			cleanBio,
-			u.UserID,
-		))
+		sb.WriteString(fmt.Sprintf("%s | %s | %s | %s | %s\n", idxStr, idStr, userStr, matchStr, bioSnippet))
+	}
+	sb.WriteString("```\n\n")
+	sb.WriteString("💡 **Actions**: `/listspambios ban` to ban all matching • `/ban <id>` to ban individual user")
+
+	return sb.String()
+}
+
+func runeVisualWidth(r rune) int {
+	if r == 0 || (r >= 0x00 && r < 0x20) || (r >= 0x7F && r < 0xA0) {
+		return 0
+	}
+	if (r >= 0x1100 && r <= 0x115F) || // Hangul Jamo
+		(r >= 0x2E80 && r <= 0xA4CF && r != 0x303F) || // CJK Radicals, Symbols, Chinese, Japanese, Yi
+		(r >= 0xAC00 && r <= 0xD7A3) || // Hangul Syllables
+		(r >= 0xF900 && r <= 0xFAFF) || // CJK Compatibility Ideographs
+		(r >= 0xFE10 && r <= 0xFE19) || // Vertical forms
+		(r >= 0xFE30 && r <= 0xFE6F) || // CJK Compatibility Forms
+		(r >= 0xFF01 && r <= 0xFF60) || // Fullwidth Forms
+		(r >= 0xFFE0 && r <= 0xFFE6) || // Fullwidth Symbols
+		(r >= 0x1F000 && r <= 0x1FAFF) || // Emojis and Pictographs
+		(r >= 0x20000 && r <= 0x2FFFD) || // CJK Extension B-F
+		(r >= 0x30000 && r <= 0x3FFFD) {
+		return 2
+	}
+	return 1
+}
+
+func visualStringWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeVisualWidth(r)
+	}
+	return w
+}
+
+func padRightVisual(s string, targetWidth int) string {
+	w := visualStringWidth(s)
+	if w >= targetWidth {
+		return s
+	}
+	return s + strings.Repeat(" ", targetWidth-w)
+}
+
+func truncateVisual(s string, maxWidth int) string {
+	s = strings.ToValidUTF8(s, "")
+	curWidth := visualStringWidth(s)
+	if curWidth <= maxWidth {
+		return s
 	}
 
-	b.replyText(msg, sb.String())
+	limit := maxWidth - 3
+	if limit <= 0 {
+		limit = maxWidth
+	}
+
+	var sb strings.Builder
+	accum := 0
+	for _, r := range s {
+		rw := runeVisualWidth(r)
+		if accum+rw > limit {
+			break
+		}
+		sb.WriteRune(r)
+		accum += rw
+	}
+	if limit < maxWidth {
+		sb.WriteString("...")
+	}
+	return sb.String()
 }
 
 func (b *Bot) cmdCleanup(msg *tgbotapi.Message, isAuthorized bool) {
