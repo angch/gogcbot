@@ -296,6 +296,7 @@ func (b *Bot) DemoteUserInBot(userID int64) error {
 }
 
 func escapeMarkdown(s string) string {
+	s = strings.ToValidUTF8(s, "")
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "_", "\\_")
 	s = strings.ReplaceAll(s, "*", "\\*")
@@ -305,10 +306,12 @@ func escapeMarkdown(s string) string {
 }
 
 func truncateText(text string, maxLen int) string {
-	if len(text) <= maxLen {
+	text = strings.ToValidUTF8(text, "")
+	runes := []rune(text)
+	if maxLen <= 0 || len(runes) <= maxLen {
 		return text
 	}
-	return text[:maxLen] + "..."
+	return string(runes[:maxLen]) + "..."
 }
 
 // SendTriggerBanAlert sends a notification message to the management monitoring channel (b.cfg.ModerationGroupID)

@@ -43,6 +43,7 @@ type DetectorConfig struct {
 	UsernameAnomaly       detector.UsernameAnomalyTriggerConfig `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
 	ProfileNameKeywordBan detector.ProfileNameKeywordBanConfig  `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
 	OllamaNameClassifier  detector.OllamaNameClassifierConfig   `mapstructure:"ollama_name_classifier" yaml:"ollama_name_classifier,omitempty"`
+	NewUserSpamBio        detector.NewUserSpamBioTriggerConfig  `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -135,6 +136,12 @@ func DefaultConfig() Config {
 				FlagOnly:       true,
 				RepPenalty:     20,
 			},
+			NewUserSpamBio: detector.NewUserSpamBioTriggerConfig{
+				Enabled:       true,
+				MaxReputation: 5,
+				MaxUserPosts:  5,
+				RepPenalty:    20,
+			},
 		},
 		Shieldy: ShieldyConfig{
 			Enabled:             true,
@@ -214,6 +221,11 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.ollama_name_classifier.request_timeout", "10s")
 	v.SetDefault("detector.ollama_name_classifier.flag_only", true)
 	v.SetDefault("detector.ollama_name_classifier.rep_penalty", 20)
+
+	v.SetDefault("detector.new_user_spam_bio.enabled", true)
+	v.SetDefault("detector.new_user_spam_bio.max_reputation", 5)
+	v.SetDefault("detector.new_user_spam_bio.max_user_posts", 5)
+	v.SetDefault("detector.new_user_spam_bio.rep_penalty", 20)
 
 	v.SetDefault("shieldy.enabled", true)
 	v.SetDefault("shieldy.rep_bonus", 5)

@@ -104,3 +104,177 @@ func TestListUsersCmd(t *testing.T) {
 		}
 	})
 }
+
+func TestListSpamBiosCmd(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gogcbot_spambios_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+
+	database, err := db.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+
+	// Insert test data
+	_, _, _ = database.GetOrCreateUser(5001, "spammer_new", "Spam", "User", 0)
+	_ = database.SaveUserProfile(&db.UserProfile{
+		UserID:     5001,
+		Username:   "spammer_new",
+		FirstName:  "Spam",
+		LastName:   "User",
+		Bio:        "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。天猫、苹果礼品卡、Steam等 联系 @xgshenqing888",
+		HasPhoto:   true,
+		PhotoCount: 1,
+	})
+
+	// User with high reputation (> 20) should not be listed by default
+	_, _, _ = database.GetOrCreateUser(5002, "highrep_user", "High", "Rep", 50)
+	_ = database.SaveUserProfile(&db.UserProfile{
+		UserID:     5002,
+		Username:   "highrep_user",
+		FirstName:  "High",
+		LastName:   "Rep",
+		Bio:        "沃尔玛 优惠券测试",
+		HasPhoto:   true,
+		PhotoCount: 1,
+	})
+
+	database.Close()
+
+	// Save test config
+	cfg := config.DefaultConfig()
+	cfg.DBPath = dbPath
+	if err := config.SaveConfig(cfgPath, &cfg); err != nil {
+		t.Fatalf("failed to save test config: %v", err)
+	}
+
+	cfgFile = cfgPath
+
+	t.Run("Execute list-unknownusers stdout", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		rootCmd.SetOut(buf)
+		rootCmd.SetErr(buf)
+		rootCmd.SetArgs([]string{"list-unknownusers", "--config", cfgPath})
+
+		listUnknownUsersOutputFile = ""
+		listUnknownUsersKeyword = ""
+		listUnknownUsersMaxPosts = 5
+		listUnknownUsersMaxReputation = 20
+		listUnknownUsersLimit = 0
+		listUnknownUsersBan = false
+
+		err := rootCmd.Execute()
+		if err != nil {
+			t.Fatalf("list-unknownusers command failed: %v", err)
+		}
+	})
+
+	t.Run("Execute list-unknownusers output file", func(t *testing.T) {
+		outMd := filepath.Join(tmpDir, "unknownusers_report.md")
+		listUnknownUsersOutputFile = outMd
+		listUnknownUsersKeyword = "沃尔玛"
+		listUnknownUsersMaxPosts = 5
+		listUnknownUsersMaxReputation = 20
+		listUnknownUsersLimit = 0
+		listUnknownUsersBan = false
+
+		rootCmd.SetArgs([]string{"list-unknownusers", "--config", cfgPath, "--output", outMd, "--keyword", "沃尔玛"})
+		err := rootCmd.Execute()
+		if err != nil {
+			t.Fatalf("list-unknownusers with output file failed: %v", err)
+		}
+
+		data, err := os.ReadFile(outMd)
+		if err != nil {
+			t.Fatalf("failed to read output markdown file: %v", err)
+		}
+		content := string(data)
+		if !strings.Contains(content, "# 📋 Unbanned Unknown & New Users") {
+			t.Errorf("expected header in generated file, got: %s", content)
+		}
+		if !strings.Contains(content, "@spammer_new") {
+			t.Errorf("expected @spammer_new in generated file")
+		}
+		if !strings.Contains(content, "5001") {
+			t.Errorf("expected user ID 5001 in generated file")
+		}
+		if strings.Contains(content, "5002") || strings.Contains(content, "@highrep_user") {
+			t.Errorf("expected high reputation user 5002 (rep 50 > 20) to be excluded from report, got: %s", content)
+		}
+		if !strings.Contains(content, "Spam Match") {
+			t.Errorf("expected 'Spam Match' header in generated file")
+		}
+		if !strings.Contains(content, "⚠️ YES") {
+			t.Errorf("expected '⚠️ YES' in generated file for spam user")
+		}
+	})
+
+	t.Run("Execute list-unknownusers with high --max-rep flag", func(t *testing.T) {
+		outMd := filepath.Join(tmpDir, "unknownusers_highrep_report.md")
+		listUnknownUsersOutputFile = outMd
+		listUnknownUsersKeyword = "沃尔玛"
+		listUnknownUsersMaxPosts = 5
+		listUnknownUsersMaxReputation = 60
+		listUnknownUsersLimit = 0
+		listUnknownUsersBan = false
+
+		rootCmd.SetArgs([]string{"list-unknownusers", "--config", cfgPath, "--output", outMd, "--keyword", "沃尔玛", "--max-rep", "60"})
+		err := rootCmd.Execute()
+		if err != nil {
+			t.Fatalf("list-unknownusers with max-rep failed: %v", err)
+		}
+
+		data, err := os.ReadFile(outMd)
+		if err != nil {
+			t.Fatalf("failed to read output markdown file: %v", err)
+		}
+		content := string(data)
+		if !strings.Contains(content, "5001") || !strings.Contains(content, "5002") {
+			t.Errorf("expected both users 5001 and 5002 when --max-rep 60 is passed, got: %s", content)
+		}
+	})
+
+	t.Run("Execute list-unknownusers alias list-spambios --ban", func(t *testing.T) {
+		listUnknownUsersOutputFile = ""
+		listUnknownUsersKeyword = ""
+		listUnknownUsersMaxPosts = 5
+		listUnknownUsersMaxReputation = 20
+		listUnknownUsersLimit = 0
+		listUnknownUsersBan = true
+
+		rootCmd.SetArgs([]string{"list-spambios", "--config", cfgPath, "--ban"})
+		err := rootCmd.Execute()
+		if err != nil {
+			t.Fatalf("list-spambios --ban failed: %v", err)
+		}
+
+		// Verify user 5001 is now banned
+		database, err := db.OpenDB(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		u, err := database.GetUserByID(5001)
+		if err != nil {
+			t.Fatalf("failed to get user 5001: %v", err)
+		}
+		if !u.IsBanned {
+			t.Errorf("expected user 5001 to be banned after list-spambios --ban")
+		}
+
+		// User 5002 (rep 50) was not in the list and should NOT be banned
+		u2, err := database.GetUserByID(5002)
+		if err != nil {
+			t.Fatalf("failed to get user 5002: %v", err)
+		}
+		if u2.IsBanned {
+			t.Errorf("expected user 5002 to not be banned because rep 50 > 20")
+		}
+	})
+}

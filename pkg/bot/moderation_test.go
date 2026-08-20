@@ -1,6 +1,8 @@
 package bot
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -458,3 +460,450 @@ func TestIsServiceMessage(t *testing.T) {
 		t.Errorf("expected normal text message not to be service message")
 	}
 }
+
+func TestUTF8SanitizationAndTruncation(t *testing.T) {
+	// 1. Truncating Chinese text should not split multi-byte characters
+	cjkText := "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。天猫、苹果礼品卡、Steam等"
+	truncated := truncateText(cjkText, 10)
+	if !strings.HasSuffix(truncated, "...") {
+		t.Errorf("expected ellipsis suffix, got: %s", truncated)
+	}
+	if []rune(truncated)[10] != '.' {
+		t.Errorf("expected truncation at exactly 10 runes, got %d runes", len([]rune(truncated)))
+	}
+
+	// 2. Escape Markdown on invalid UTF-8 byte sequences
+	invalidByteString := "hello \xff\xfe world"
+	escaped := escapeMarkdown(invalidByteString)
+	if strings.Contains(escaped, "\xff") || strings.Contains(escaped, "\xfe") {
+		t.Errorf("expected invalid UTF-8 bytes to be removed or replaced")
+	}
+
+	// 3. Chattable sanitization
+	msgConfig := &tgbotapi.MessageConfig{
+		Text: "Spam message with invalid \xed\xa0\x80 surrogate",
+	}
+	sanitizeChattable(msgConfig)
+	if strings.Contains(msgConfig.Text, "\xed\xa0\x80") {
+		t.Errorf("expected invalid surrogate sequence to be sanitized from message config")
+	}
+}
+
+func TestHandleChatMemberUpdate_UserJoin_SpamBio(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(888111)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	// Pre-seed mock user profile with spam bio so FetchUserProfile returns it
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "spammer_join",
+		FirstName:  "Spam",
+		LastName:   "Joiner",
+		Bio:        "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。联系 @xgshenqing888",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "spammer_join", FirstName: "Spam", LastName: "Joiner"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "spammer_join", FirstName: "Spam", LastName: "Joiner"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	// User should be banned in DB and reputation adjusted
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after joining with spam bio", userID)
+	}
+	if u.Reputation >= 0 {
+		t.Errorf("expected user %d reputation to be penalized (< 0), got %d", userID, u.Reputation)
+	}
+}
+
+func TestHandleMessage_NewChatMembers_SpamBio(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(888222)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "spammer_join_msg",
+		FirstName:  "Spam",
+		LastName:   "Joiner2",
+		Bio:        "招兼职 日赚300-500 沃尔玛 永辉 礼品卡联系",
+		HasPhoto:   false,
+		PhotoCount: 0,
+		FetchedAt:  time.Now(),
+	})
+
+	joinMsg := &tgbotapi.Message{
+		MessageID: 555,
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "spammer_join_msg",
+			FirstName: "Spam",
+			LastName:  "Joiner2",
+		},
+		NewChatMembers: []tgbotapi.User{
+			{
+				ID:        userID,
+				UserName:  "spammer_join_msg",
+				FirstName: "Spam",
+				LastName:  "Joiner2",
+			},
+		},
+	}
+
+	b.handleMessage(joinMsg)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after joining via NewChatMembers with spam bio", userID)
+	}
+}
+
+func TestHandleChatMemberUpdate_UserJoin_CleanBio(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(777333)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "clean_joiner",
+		FirstName:  "Clean",
+		LastName:   "User",
+		Bio:        "Hello everyone! I'm a software developer from Singapore.",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "clean_joiner", FirstName: "Clean", LastName: "User"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "clean_joiner", FirstName: "Clean", LastName: "User"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if u.IsBanned {
+		t.Errorf("clean user %d should NOT be banned", userID)
+	}
+}
+
+func TestHandleMessage_SpamBioMessage_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(888333)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	// Register detector triggers
+	b.detector = detector.NewDetector(
+		detector.NewNewUserSpamBioTrigger(b.cfg.Detector.NewUserSpamBio),
+	)
+
+	// Pre-seed profile with spam bio
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "spammer_msg",
+		FirstName:  "Spam",
+		LastName:   "Poster",
+		Bio:        "油卡 礼品卡 沃尔玛 6折联系",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	msg := &tgbotapi.Message{
+		MessageID: 100,
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "spammer_msg",
+			FirstName: "Spam",
+			LastName:  "Poster",
+		},
+		Text: "Hello world this is my first message",
+	}
+
+	b.handleMessage(msg)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after sending message with spam bio", userID)
+	}
+}
+
+func TestHandleUserJoined_PersonalChannelSpam_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(888444)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	// Pre-seed profile where Bio is innocent, but PersonalChatTitle contains spam keyword
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:            userID,
+		Username:          "channel_spammer",
+		FirstName:         "Channel",
+		LastName:          "Spam",
+		Bio:               "Welcome to my channel!",
+		PersonalChatTitle: "6折油卡代发专区",
+		HasPhoto:          true,
+		PhotoCount:        1,
+		FetchedAt:         time.Now(),
+	})
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "channel_spammer", FirstName: "Channel", LastName: "Spam", LanguageCode: "zh-hans"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "channel_spammer", FirstName: "Channel", LastName: "Spam", LanguageCode: "zh-hans"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned on join due to spam personal channel title", userID)
+	}
+	if u.LanguageCode != "zh-hans" {
+		t.Errorf("expected user language code 'zh-hans', got %q", u.LanguageCode)
+	}
+}
+
+func TestHandleMessage_UserLanguageMetadataRecorded(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(888555)
+	chatID := int64(-100123)
+
+	msg := &tgbotapi.Message{
+		MessageID: 105,
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{
+			ID:           userID,
+			UserName:     "lang_user",
+			FirstName:    "Lang",
+			LastName:     "User",
+			LanguageCode: "zh-cn",
+		},
+		Text: "Hello general conversation",
+	}
+
+	b.handleMessage(msg)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if u.LanguageCode != "zh-cn" {
+		t.Errorf("expected user language code 'zh-cn', got %q", u.LanguageCode)
+	}
+}
+
+func TestNewBot_LoginRetry_Success(t *testing.T) {
+	origFunc := newBotAPIFunc
+	origDelay := loginRetryDelay
+	origRetries := maxLoginRetries
+	defer func() {
+		newBotAPIFunc = origFunc
+		loginRetryDelay = origDelay
+		maxLoginRetries = origRetries
+	}()
+
+	loginRetryDelay = 1 * time.Millisecond
+	maxLoginRetries = 4
+
+	attempts := 0
+	newBotAPIFunc = func(token string) (*tgbotapi.BotAPI, error) {
+		attempts++
+		if attempts < 3 {
+			return nil, fmt.Errorf("HTTP 403 Forbidden: Telegram login denied (started up too soon)")
+		}
+		return &tgbotapi.BotAPI{
+			Self: tgbotapi.User{ID: 123456, UserName: "testretrybot"},
+		}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.TelegramToken = "mock_token"
+
+	b, err := NewBot(&cfg, nil)
+	if err != nil {
+		t.Fatalf("expected NewBot to succeed after retry, got err: %v", err)
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+	if b.BotUser().UserName != "testretrybot" {
+		t.Errorf("expected bot username 'testretrybot', got %s", b.BotUser().UserName)
+	}
+}
+
+func TestNewBot_LoginRetry_Exhausted(t *testing.T) {
+	origFunc := newBotAPIFunc
+	origDelay := loginRetryDelay
+	origRetries := maxLoginRetries
+	defer func() {
+		newBotAPIFunc = origFunc
+		loginRetryDelay = origDelay
+		maxLoginRetries = origRetries
+	}()
+
+	loginRetryDelay = 1 * time.Millisecond
+	maxLoginRetries = 3
+
+	attempts := 0
+	newBotAPIFunc = func(token string) (*tgbotapi.BotAPI, error) {
+		attempts++
+		return nil, fmt.Errorf("HTTP 401 Unauthorized: token denied")
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.TelegramToken = "mock_token"
+
+	_, err := NewBot(&cfg, nil)
+	if err == nil {
+		t.Fatalf("expected NewBot to fail when all login attempts denied")
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+	if !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Errorf("expected error message to mention 3 attempts, got: %v", err)
+	}
+}
+
+func TestTelegramChatFullInfo_Unmarshal(t *testing.T) {
+	rawJSON := `{
+		"id": 99887766,
+		"type": "private",
+		"username": "spammer_showcase",
+		"first_name": "Spam",
+		"last_name": "ChannelOwner",
+		"bio": "Check out my channel below",
+		"has_private_forwards": true,
+		"personal_chat": {
+			"id": -1001999888,
+			"title": "6折油卡代发专区",
+			"username": "youkaspam_official",
+			"type": "channel"
+		},
+		"business_intro": {
+			"title": "Crypto Card Services",
+			"message": "24/7 automated delivery"
+		}
+	}`
+
+	var fullInfo TelegramChatFullInfo
+	if err := json.Unmarshal([]byte(rawJSON), &fullInfo); err != nil {
+		t.Fatalf("failed to unmarshal ChatFullInfo: %v", err)
+	}
+
+	if fullInfo.ID != 99887766 {
+		t.Errorf("expected ID 99887766, got %d", fullInfo.ID)
+	}
+	if fullInfo.Bio != "Check out my channel below" {
+		t.Errorf("expected bio 'Check out my channel below', got %q", fullInfo.Bio)
+	}
+	if !fullInfo.HasPrivateForwards {
+		t.Errorf("expected has_private_forwards to be true")
+	}
+	if fullInfo.PersonalChat == nil {
+		t.Fatalf("expected personal_chat to not be nil")
+	}
+	if fullInfo.PersonalChat.Title != "6折油卡代发专区" {
+		t.Errorf("expected personal channel title '6折油卡代发专区', got %q", fullInfo.PersonalChat.Title)
+	}
+	if fullInfo.PersonalChat.Username != "youkaspam_official" {
+		t.Errorf("expected personal channel username 'youkaspam_official', got %q", fullInfo.PersonalChat.Username)
+	}
+	if fullInfo.BusinessIntro == nil {
+		t.Fatalf("expected business_intro to not be nil")
+	}
+	if fullInfo.BusinessIntro.Title != "Crypto Card Services" {
+		t.Errorf("expected business intro title 'Crypto Card Services', got %q", fullInfo.BusinessIntro.Title)
+	}
+}
+

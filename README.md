@@ -57,6 +57,12 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
    - Dynamic `/setsuperadmin` and `/setmodgroup` commands automatically persist settings back to `config.yaml`.
    - Full control over bot settings, group monitoring management (`/addgroup`, `/removegroup`, `/listgroups`), and reputation overrides.
 
+8. **Spam Snippet & Bio Detection**:
+   - **Profile Bio Scanning on Join & Message**: Automatically grabs user profile and bio when a user joins a channel/group or sends a message, caching them in `user_profiles`.
+   - **Automatic Spam Bio Kick Rule (`new_user_spam_bio`)**: If a joining or new user's bio matches spam/syndicate keywords, the bot immediately deletes join messages, bans them across monitored groups, penalizes reputation, and alerts the moderation channel.
+   - **`spam_snippets` Database Table**: Stores dynamic spam snippets synced from runtime `config.yaml` or added programmatically.
+   - **CLI & Bot Commands**: Search and inspect suspicious bios or unknown/new accounts via `gogcbot list-unknownusers` (or `list-spambios`) and `/listunknownusers` (rendered as a compact monospace table with CJK visual alignment).
+
 ---
 
 ## 🚀 Installation & Usage
@@ -92,6 +98,23 @@ CGO_ENABLED=0 go build -o gogcbot main.go
 ./gogcbot list-users --config config.yaml
 ./gogcbot list-users --config config.yaml --output user_directory.md
 ./gogcbot list-users --config config.yaml --manual-bans-only
+
+# 6. Backfill user profiles (bios and profile pictures) from Telegram API into user_profiles table
+./gogcbot backfill-profiles --config config.yaml
+./gogcbot backfill-profiles --config config.yaml --force --delay-ms 100
+
+# 7. List or batch-ban unbanned new/unknown users with few messages (with or without bios) and low reputation (<= 20)
+./gogcbot list-unknownusers --config config.yaml
+./gogcbot list-unknownusers --config config.yaml --keyword "沃尔玛" --output unknownusers.md
+./gogcbot list-unknownusers --config config.yaml --max-posts 5
+./gogcbot list-unknownusers --config config.yaml --max-rep 20
+./gogcbot list-unknownusers --config config.yaml --ban
+
+# 8. Dump all known database info and profiles for a user by @tag or numeric ID
+./gogcbot user @spambot --config config.yaml
+./gogcbot user 555666 --config config.yaml
+./gogcbot user @spambot --config config.yaml --json
+./gogcbot user 555666 --config config.yaml --output user_dossier.md
 ```
 
 ### OS System Service Management (Windows Service / Systemd / launchd)
@@ -155,6 +178,11 @@ detector:
     max_reputation: 5                  # Maximum reputation score to apply detection
     max_user_posts: 5                  # Post count window for new user evaluation
     rep_penalty: 20                    # Reputation penalty applied upon detection
+  new_user_spam_bio:
+    enabled: true                      # Kick/ban new users with spam/scam profile bios
+    max_reputation: 5                  # Maximum reputation score to apply detection
+    max_user_posts: 5                  # Post count window for new user evaluation
+    rep_penalty: 20                    # Reputation penalty applied upon detection
 
 shieldy:
   enabled: true                       # Enable Shieldy captcha bot verification
@@ -174,7 +202,9 @@ shieldy:
 | `/status` | Admin/Mod | Bot status, metrics, and database stats |
 | `/checkperms` | Admin/Mod | Verify bot admin rights in current chat |
 | `/flag [reason]` | Admin/Mod | Reply to a message to flag it for moderation review |
-| `/userinfo <user\|@user>` | Admin/Mod | View user reputation, warning count, & post history |
+| `/userinfo <user\|@user>` | Admin/Mod | View user reputation, warning count, profile & post history |
+| `/fetchprofile <user>` | Admin/Mod | Fetch fresh Telegram profile (bio & picture) & cache in DB |
+| `/backfillprofiles [force]` | Admin/Mod | Backfill bios and profile photos for tracked users (marks not-found users to skip repeats) |
 | `/setsuperadmin` | First User / Super Admin | Set self as Super Admin (persists to `config.yaml`) |
 | `/setmodgroup` | Super Admin | Set current group as Private Moderation Group |
 | `/addgroup` | Admin/Mod | Add current group to monitored groups |
@@ -182,10 +212,16 @@ shieldy:
 | `/listgroups` | Admin/Mod | List all monitored groups |
 | `/rep <user> [delta]` | Admin/Mod | Check or adjust user reputation |
 | `/warn <user>` | Admin/Mod | Warn user, delete message, deduct rep |
+| `/resetwarns <user>` | Admin/Mod | Reset warning count for user to 0 |
 | `/mute <user> [hours]` | Admin/Mod | Mute user in group & deduct rep |
 | `/ban <user>` | Admin/Mod | Ban user across all monitored groups |
 | `/unban <user>` | Admin/Mod | Unban user across groups |
+| `/promote <user>` | Admin/Mod | Promote user to Bot Admin & set rep to 100 |
+| `/demote <user>` | Super Admin | Remove Bot Admin privileges and reset rep |
+| `/listusers` | Admin/Mod | List known good/bad users and moderation status |
+| `/listunknownusers [kw] [ban]` | Admin/Mod | Compact monospace table list or batch-ban unbanned new users with few messages (with or without bios) |
 | `/cleanup` | Admin/Mod | Run retention cleanup on demand |
+| `/getdb` | Bot Admin (Direct PM only) | Download a copy of current SQLite3 database |
 
 ---
 

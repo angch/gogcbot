@@ -1,8 +1,11 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +24,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 	isModGroup := b.cfg.ModerationGroupID != 0 && msg.Chat.ID == b.cfg.ModerationGroupID
 	isGroupAdmin := (msg.Chat.IsGroup() || msg.Chat.IsSuperGroup()) && b.IsUserAdminInChat(msg.Chat.ID, user.UserID)
 	isBotAdmin := user.IsAdmin
-	isAuthorized := isSuperAdmin || isModGroup || isGroupAdmin || isBotAdmin
+	isModGroupMember := b.cfg.ModerationGroupID != 0 && b.IsUserInModGroup(user.UserID)
+	isAuthorized := isSuperAdmin || isModGroup || isGroupAdmin || isBotAdmin || isModGroupMember
 
 	// Ignore all commands from non-admin users (log silently and do not reply)
 	// Exception: /setsuperadmin can be executed by the first user if super_admin_id is not yet set (0)
@@ -53,6 +57,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 		b.cmdFlag(msg, args)
 	case "userinfo":
 		b.cmdUserInfo(msg, args)
+	case "fetchprofile", "profile":
+		b.cmdFetchProfile(msg, args, isAuthorized)
+	case "backfillprofiles", "backfillprofile":
+		b.cmdBackfillProfiles(msg, args, isAuthorized)
 	case "rep":
 		b.cmdRep(msg, user, args, isAuthorized)
 	case "warn":
@@ -71,8 +79,12 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 		b.cmdDemote(msg, user, args, isSuperAdmin)
 	case "listusers", "users":
 		b.cmdListUsers(msg, isAuthorized)
+	case "listunknownusers", "unknownusers", "listspambios", "spambios", "listspambiousers", "spambiousers", "spamusers":
+		b.cmdListUnknownUsers(msg, args, isAuthorized)
 	case "cleanup":
 		b.cmdCleanup(msg, isAuthorized)
+	case "getdb", "backup", "db", "dumpdb", "downloaddb":
+		b.cmdGetDB(msg, user)
 	}
 }
 
@@ -129,6 +141,7 @@ func (b *Bot) cmdStatus(msg *tgbotapi.Message) {
 			"🛡️ **Mod Group ID**: `%s`\n\n"+
 			"👥 **Monitored Groups**: `%d`\n"+
 			"👤 **Tracked Users**: `%d`\n"+
+			"🖼️ **Cached User Profiles**: `%d`\n"+
 			"💬 **Logged Messages (7d max)**: `%d`\n"+
 			"🚨 **Pending Flags**: `%d`\n"+
 			"✅ **Resolved Flags**: `%d`\n\n"+
@@ -138,6 +151,7 @@ func (b *Bot) cmdStatus(msg *tgbotapi.Message) {
 		modGroupSet,
 		stats.TotalGroups,
 		stats.TotalUsers,
+		stats.TotalUserProfiles,
 		stats.TotalMessages,
 		stats.PendingFlags,
 		stats.ResolvedFlags,
@@ -302,6 +316,25 @@ func (b *Bot) cmdUserInfo(msg *tgbotapi.Message, args string) {
 		msgsSnippet.WriteString("• No recent logged messages\n")
 	}
 
+	profileSection := "• Bio: *(Not cached - use `/fetchprofile`)*\n• Profile Photo: *(Unknown)*"
+	if p, err := b.db.GetUserProfile(targetUser.UserID); err == nil && p != nil {
+		if p.NotFound {
+			profileSection = fmt.Sprintf("• Profile Status: ⚠️ Not Found on Telegram\n• Last Attempted: `%s`", p.FetchedAt.Format("01-02 15:04"))
+		} else {
+			bioSnippet := p.Bio
+			if bioSnippet == "" {
+				bioSnippet = "*(None)*"
+			} else {
+				bioSnippet = fmt.Sprintf("%q", truncateText(bioSnippet, 50))
+			}
+			photoStr := "❌ No photo"
+			if p.HasPhoto {
+				photoStr = fmt.Sprintf("✅ Yes (%d photos)", p.PhotoCount)
+			}
+			profileSection = fmt.Sprintf("• Bio: %s\n• Profile Photo: %s\n• Profile Fetched: `%s`", bioSnippet, photoStr, p.FetchedAt.Format("01-02 15:04"))
+		}
+	}
+
 	infoText := fmt.Sprintf(
 		"👤 **User Info Card**:\n\n"+
 			"• Name: %s %s (@%s)\n"+
@@ -310,16 +343,126 @@ func (b *Bot) cmdUserInfo(msg *tgbotapi.Message, args string) {
 			"• Warnings: `%d`\n"+
 			"• Banned: %t\n"+
 			"• Total Logged Posts: `%d`\n\n"+
+			"📋 **Profile Info**:\n%s\n\n"+
 			"📝 **Recent Activity**:\n%s",
-		targetUser.FirstName, targetUser.LastName, targetUser.Username,
+		escapeMarkdown(targetUser.FirstName), escapeMarkdown(targetUser.LastName), escapeMarkdown(targetUser.Username),
 		targetUser.UserID,
 		targetUser.Reputation,
 		targetUser.WarnCount,
 		targetUser.IsBanned,
 		msgCount,
+		profileSection,
 		msgsSnippet.String(),
 	)
 	b.replyText(msg, infoText)
+}
+
+func (b *Bot) cmdFetchProfile(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	if !isAuthorized {
+		b.replyText(msg, "❌ Permission denied.")
+		return
+	}
+	targetUser := b.resolveUserFromArgsOrReply(msg, args)
+	if targetUser == nil {
+		b.replyText(msg, "Usage: `/fetchprofile <user_id|@username>` or reply to user message.")
+		return
+	}
+
+	profile, err := b.FetchUserProfile(targetUser.UserID)
+	if err != nil {
+		if profile != nil && profile.NotFound {
+			b.replyText(msg, fmt.Sprintf("⚠️ Profile for user `%d` (@%s) was not found on Telegram.\nMarked as not found in database (attempted: `%s`).", targetUser.UserID, targetUser.Username, profile.FetchedAt.Format("2006-01-02 15:04:05 MST")))
+			return
+		}
+		b.replyText(msg, fmt.Sprintf("❌ Failed to fetch user profile from Telegram: %v", err))
+		return
+	}
+
+	displayName := strings.TrimSpace(profile.FirstName + " " + profile.LastName)
+	if displayName == "" {
+		displayName = targetUser.FirstName + " " + targetUser.LastName
+	}
+	if strings.TrimSpace(displayName) == "" {
+		displayName = fmt.Sprintf("User %d", targetUser.UserID)
+	}
+
+	usernameStr := profile.Username
+	if usernameStr == "" {
+		usernameStr = targetUser.Username
+	}
+	if usernameStr != "" {
+		usernameStr = "@" + usernameStr
+	} else {
+		usernameStr = "none"
+	}
+
+	bioText := profile.Bio
+	if bioText == "" {
+		bioText = "*(None / Not Set)*"
+	} else {
+		bioText = fmt.Sprintf("```\n%s\n```", escapeMarkdown(bioText))
+	}
+
+	photoStatus := "❌ No photo"
+	if profile.HasPhoto {
+		photoStatus = fmt.Sprintf("✅ Available (%d photo(s))", profile.PhotoCount)
+		if profile.PhotoFileID != "" {
+			photoStatus += fmt.Sprintf("\n• Photo File ID: `%s`", profile.PhotoFileID)
+		}
+	}
+
+	cardText := fmt.Sprintf(
+		"👤 **User Profile Card**:\n\n"+
+			"• Name: %s (%s)\n"+
+			"• User ID: `%d`\n"+
+			"• Profile Photo: %s\n"+
+			"• Last Fetched: `%s`\n\n"+
+			"📝 **Bio**:\n%s",
+		escapeMarkdown(displayName),
+		escapeMarkdown(usernameStr),
+		profile.UserID,
+		photoStatus,
+		profile.FetchedAt.Format("2006-01-02 15:04:05 MST"),
+		bioText,
+	)
+	b.replyText(msg, cardText)
+}
+
+func (b *Bot) cmdBackfillProfiles(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	if !isAuthorized {
+		b.replyText(msg, "❌ Permission denied.")
+		return
+	}
+
+	force := strings.Contains(strings.ToLower(args), "force") || strings.Contains(strings.ToLower(args), "all")
+
+	var userCount int
+	if force {
+		all, _ := b.db.GetAllUsers(0)
+		userCount = len(all)
+	} else {
+		missing, _ := b.db.GetUsersWithoutProfile(0)
+		userCount = len(missing)
+	}
+
+	if userCount == 0 {
+		b.replyText(msg, "ℹ️ All tracked users already have profiles saved in `user_profiles`. (Use `/backfillprofiles force` to force re-fetch all).")
+		return
+	}
+
+	b.replyText(msg, fmt.Sprintf("⏳ Starting Telegram profile backfill for `%d` users (Force: `%t`)... Running in background.", userCount, force))
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+
+		success, failed, err := b.BackfillUserProfiles(ctx, 100*time.Millisecond, force, nil)
+		if err != nil && err != context.Canceled {
+			b.replyText(msg, fmt.Sprintf("⚠️ Profile backfill finished with error: %v (Success: `%d`, Failed: `%d`)", err, success, failed))
+			return
+		}
+		b.replyText(msg, fmt.Sprintf("✅ **User Profile Backfill Complete**!\n\n• Successfully Fetched: `%d`\n• Failed / Not Found: `%d`", success, failed))
+	}()
 }
 
 func parseRepArgs(args string, isReply bool) (targetArg string, isAbsolute bool, absVal int, hasDelta bool, deltaVal int) {
@@ -619,6 +762,266 @@ func (b *Bot) cmdListUsers(msg *tgbotapi.Message, isAuthorized bool) {
 	b.replyText(msg, sb.String())
 }
 
+func (b *Bot) cmdListUnknownUsers(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	if !isAuthorized {
+		b.replyText(msg, "❌ Permission denied.")
+		return
+	}
+
+	parts := strings.Fields(args)
+	shouldBan := false
+	var kwParts []string
+	for _, p := range parts {
+		if strings.EqualFold(p, "ban") || strings.EqualFold(p, "--ban") || strings.EqualFold(p, "-b") {
+			shouldBan = true
+		} else {
+			kwParts = append(kwParts, p)
+		}
+	}
+	keyword := strings.TrimSpace(strings.Join(kwParts, " "))
+
+	limit := 30
+	if shouldBan {
+		limit = 100
+	}
+
+	opts := db.UnknownUserOptions{
+		Keyword:            keyword,
+		ConfiguredKeywords: b.cfg.AutoFlag.BlockedKeywords,
+		MaxPosts:           5,
+		MaxReputation:      20,
+		Limit:              limit,
+	}
+
+	items, err := b.db.GetUnbannedUnknownUsers(opts)
+	if err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Error querying unknown users: %v", err))
+		return
+	}
+
+	if len(items) == 0 {
+		filterMsg := ""
+		if keyword != "" {
+			filterMsg = fmt.Sprintf(" matching %q", keyword)
+		}
+		b.replyText(msg, fmt.Sprintf("✅ No unbanned unknown new users found%s.", filterMsg))
+		return
+	}
+
+	if shouldBan {
+		var matchingUsers []db.UnknownUserItem
+		for _, u := range items {
+			if u.IsSpamMatch || len(u.MatchedKeywords) > 0 {
+				matchingUsers = append(matchingUsers, u)
+			}
+		}
+
+		if len(matchingUsers) == 0 {
+			b.replyText(msg, "✅ No unbanned users matching the spam filter to ban.")
+			return
+		}
+
+		// Send immediate confirmation reply
+		b.replyText(msg, fmt.Sprintf("🔨 **Batch Spam Ban Initiated**\nFound `%d` unbanned user(s) matching spam filter. Banning across all monitored groups in background...", len(matchingUsers)))
+
+		// Execute in background
+		go func(senderChatID int64) {
+			var successCount int
+			var failCount int
+			var actionLogs []string
+
+			for i, u := range matchingUsers {
+				displayName := strings.TrimSpace(u.FirstName + " " + u.LastName)
+				if displayName == "" {
+					displayName = "Unknown"
+				}
+				userHandle := ""
+				if u.Username != "" {
+					userHandle = " (@" + escapeMarkdown(u.Username) + ")"
+				}
+				kwStr := truncateText(strings.Join(u.MatchedKeywords, ", "), 40)
+
+				err := b.BanUserAcrossAllGroups(u.UserID, senderChatID)
+				if err != nil {
+					failCount++
+					log.Printf("[BatchBan] Failed to ban user %d across groups: %v", u.UserID, err)
+					actionLogs = append(actionLogs, fmt.Sprintf("%d. ❌ **%s**%s (`%d`) - Failed: `%v`", i+1, escapeMarkdown(displayName), userHandle, u.UserID, err))
+				} else {
+					successCount++
+					log.Printf("[BatchBan] Successfully banned user %d across groups", u.UserID)
+					actionLogs = append(actionLogs, fmt.Sprintf("%d. ✅ **%s**%s (`%d`) - Banned [Matched: `%s`]", i+1, escapeMarkdown(displayName), userHandle, u.UserID, escapeMarkdown(kwStr)))
+				}
+			}
+
+			// Build summary report
+			var sb strings.Builder
+			sb.WriteString("🔨 **Batch Spam Ban Summary Report**\n\n")
+			sb.WriteString(fmt.Sprintf("• **Total Evaluated**: `%d`\n", len(matchingUsers)))
+			sb.WriteString(fmt.Sprintf("• **Successfully Banned**: `%d`\n", successCount))
+			sb.WriteString(fmt.Sprintf("• **Failed Actions**: `%d`\n\n", failCount))
+			sb.WriteString("**Action Details**:\n")
+
+			for _, logLine := range actionLogs {
+				sb.WriteString(logLine + "\n")
+			}
+
+			summaryMsg := sb.String()
+
+			// Send summary back to sender chat
+			b.sendChunkedText(senderChatID, summaryMsg)
+
+			// Send summary to Private Moderation Group if configured and different from sender chat
+			if b.cfg.ModerationGroupID != 0 && b.cfg.ModerationGroupID != senderChatID {
+				b.sendChunkedText(b.cfg.ModerationGroupID, summaryMsg)
+			}
+		}(msg.Chat.ID)
+		return
+	}
+
+	output := formatUnknownUsersTable(items, keyword)
+	b.replyText(msg, output)
+}
+
+// cmdListSpamBios is a backwards-compatible alias for cmdListUnknownUsers.
+func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	b.cmdListUnknownUsers(msg, args, isAuthorized)
+}
+
+// formatUnknownUsersTable formats the slice of UnknownUserItem into a compact monospace table for Telegram output.
+func formatUnknownUsersTable(items []db.UnknownUserItem, keyword string) string {
+	var sb strings.Builder
+	filterHeader := ""
+	if keyword != "" {
+		filterHeader = fmt.Sprintf(" [Filter: `%s`]", escapeMarkdown(keyword))
+	}
+	sb.WriteString(fmt.Sprintf("🚨 **Unbanned Unknown / New Users** (Found: %d)%s:\n\n", len(items), filterHeader))
+
+	sb.WriteString("```\n")
+	sb.WriteString(" # | User ID    | User         | Msgs | Match      | Bio / Profile Snippet\n")
+	sb.WriteString("---+------------+--------------+------+------------+------------------------------\n")
+
+	for i, u := range items {
+		idxStr := fmt.Sprintf("%2d", i+1)
+		idStr := padRightVisual(fmt.Sprintf("%d", u.UserID), 10)
+
+		var userDisplay string
+		if u.Username != "" {
+			userDisplay = "@" + u.Username
+		} else {
+			userDisplay = strings.TrimSpace(u.FirstName + " " + u.LastName)
+			if userDisplay == "" {
+				userDisplay = "Unknown"
+			}
+		}
+		userStr := padRightVisual(truncateVisual(userDisplay, 12), 12)
+		msgsStr := fmt.Sprintf("%4d", u.MessageCount)
+
+		var matchDisplay string
+		if len(u.MatchedKeywords) > 0 {
+			matchDisplay = strings.Join(u.MatchedKeywords, ",")
+		} else if u.IsSpamMatch {
+			matchDisplay = "Spam"
+		} else {
+			matchDisplay = "-"
+		}
+		matchStr := padRightVisual(truncateVisual(matchDisplay, 10), 10)
+
+		// Sanitize bio / snippet: flatten newlines and replace backticks
+		profileText := u.Bio
+		if profileText == "" && u.PersonalChatTitle != "" {
+			profileText = "[Chan] " + u.PersonalChatTitle
+		} else if profileText == "" && u.BusinessIntro != "" {
+			profileText = "[Biz] " + u.BusinessIntro
+		}
+
+		cleanSnippet := strings.ReplaceAll(profileText, "\r\n", " ")
+		cleanSnippet = strings.ReplaceAll(cleanSnippet, "\n", " ")
+		cleanSnippet = strings.ReplaceAll(cleanSnippet, "\r", " ")
+		cleanSnippet = strings.ReplaceAll(cleanSnippet, "\t", " ")
+		cleanSnippet = strings.ReplaceAll(cleanSnippet, "`", "'")
+		cleanSnippet = strings.Join(strings.Fields(cleanSnippet), " ")
+		if cleanSnippet == "" {
+			cleanSnippet = "-"
+		}
+		bioSnippet := truncateVisual(cleanSnippet, 30)
+
+		sb.WriteString(fmt.Sprintf("%s | %s | %s | %s | %s | %s\n", idxStr, idStr, userStr, msgsStr, matchStr, bioSnippet))
+	}
+	sb.WriteString("```\n\n")
+	sb.WriteString("💡 **Actions**: `/listunknownusers ban` to ban all matching • `/ban <id>` to ban individual user")
+
+	return sb.String()
+}
+
+// formatSpamBioTable is an alias for formatUnknownUsersTable for backwards compatibility.
+func formatSpamBioTable(items []db.SpamBioUserItem, keyword string) string {
+	return formatUnknownUsersTable(items, keyword)
+}
+
+func runeVisualWidth(r rune) int {
+	if r == 0 || (r >= 0x00 && r < 0x20) || (r >= 0x7F && r < 0xA0) {
+		return 0
+	}
+	if (r >= 0x1100 && r <= 0x115F) || // Hangul Jamo
+		(r >= 0x2E80 && r <= 0xA4CF && r != 0x303F) || // CJK Radicals, Symbols, Chinese, Japanese, Yi
+		(r >= 0xAC00 && r <= 0xD7A3) || // Hangul Syllables
+		(r >= 0xF900 && r <= 0xFAFF) || // CJK Compatibility Ideographs
+		(r >= 0xFE10 && r <= 0xFE19) || // Vertical forms
+		(r >= 0xFE30 && r <= 0xFE6F) || // CJK Compatibility Forms
+		(r >= 0xFF01 && r <= 0xFF60) || // Fullwidth Forms
+		(r >= 0xFFE0 && r <= 0xFFE6) || // Fullwidth Symbols
+		(r >= 0x1F000 && r <= 0x1FAFF) || // Emojis and Pictographs
+		(r >= 0x20000 && r <= 0x2FFFD) || // CJK Extension B-F
+		(r >= 0x30000 && r <= 0x3FFFD) {
+		return 2
+	}
+	return 1
+}
+
+func visualStringWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeVisualWidth(r)
+	}
+	return w
+}
+
+func padRightVisual(s string, targetWidth int) string {
+	w := visualStringWidth(s)
+	if w >= targetWidth {
+		return s
+	}
+	return s + strings.Repeat(" ", targetWidth-w)
+}
+
+func truncateVisual(s string, maxWidth int) string {
+	s = strings.ToValidUTF8(s, "")
+	curWidth := visualStringWidth(s)
+	if curWidth <= maxWidth {
+		return s
+	}
+
+	limit := maxWidth - 3
+	if limit <= 0 {
+		limit = maxWidth
+	}
+
+	var sb strings.Builder
+	accum := 0
+	for _, r := range s {
+		rw := runeVisualWidth(r)
+		if accum+rw > limit {
+			break
+		}
+		sb.WriteRune(r)
+		accum += rw
+	}
+	if limit < maxWidth {
+		sb.WriteString("...")
+	}
+	return sb.String()
+}
+
 func (b *Bot) cmdCleanup(msg *tgbotapi.Message, isAuthorized bool) {
 	if !isAuthorized {
 		b.replyText(msg, "❌ Permission denied.")
@@ -630,6 +1033,75 @@ func (b *Bot) cmdCleanup(msg *tgbotapi.Message, isAuthorized bool) {
 		return
 	}
 	b.replyText(msg, fmt.Sprintf("🧹 **Manual Retention Cleanup Done**!\n• Old Messages (>7d) Purged: `%d`\n• Excess User Messages (>50/user) Purged: `%d`", oldP, userP))
+}
+
+func (b *Bot) cmdGetDB(msg *tgbotapi.Message, user *db.User) {
+	// Only allow in private direct chats, never in a group/supergroup/channel
+	if !msg.Chat.IsPrivate() {
+		b.replyText(msg, "❌ For security, database copies can only be requested in a direct private message to the bot.")
+		return
+	}
+
+	isSuperAdmin := b.cfg.SuperAdminID != 0 && user.UserID == b.cfg.SuperAdminID
+	isBotAdmin := user.IsAdmin
+	isModGroupMember := b.cfg.ModerationGroupID != 0 && b.IsUserInModGroup(user.UserID)
+
+	if !isSuperAdmin && !isBotAdmin && !isModGroupMember {
+		b.replyText(msg, "❌ Permission denied. You must be a Bot Administrator or member of the Bot Admin group.")
+		return
+	}
+
+	tmpDir, err := os.MkdirTemp("", "gogcbot-db-backup-*")
+	if err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Failed to create temporary directory for database backup: %v", err))
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	backupFilename := fmt.Sprintf("gogcbot-backup-%s.db", time.Now().Format("20060102-150405"))
+	backupFilePath := filepath.Join(tmpDir, backupFilename)
+
+	if err := b.db.BackupTo(backupFilePath); err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Failed to generate database backup: %v", err))
+		return
+	}
+
+	fileInfo, err := os.Stat(backupFilePath)
+	if err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Failed to read database backup file: %v", err))
+		return
+	}
+
+	userDisplayName := user.Username
+	if userDisplayName != "" {
+		userDisplayName = "@" + userDisplayName
+	} else {
+		userDisplayName = strings.TrimSpace(user.FirstName + " " + user.LastName)
+		if userDisplayName == "" {
+			userDisplayName = fmt.Sprintf("User %d", user.UserID)
+		}
+	}
+
+	doc := tgbotapi.NewDocument(msg.Chat.ID, tgbotapi.FilePath(backupFilePath))
+	doc.Caption = fmt.Sprintf("📦 **GoGCBot SQLite3 Database Backup**\n\n"+
+		"🕒 **Generated**: `%s`\n"+
+		"💾 **Size**: `%.2f KB` (`%d` bytes)\n"+
+		"👤 **Recipient**: %s (`%d`)",
+		time.Now().Format("2006-01-02 15:04:05 MST"),
+		float64(fileInfo.Size())/1024.0,
+		fileInfo.Size(),
+		escapeMarkdown(userDisplayName),
+		user.UserID,
+	)
+	doc.ParseMode = tgbotapi.ModeMarkdown
+
+	if _, err := b.Send(doc); err != nil {
+		doc.ParseMode = ""
+		if _, err = b.Send(doc); err != nil {
+			b.replyText(msg, fmt.Sprintf("❌ Failed to send database backup file over Telegram: %v", err))
+			return
+		}
+	}
 }
 
 func (b *Bot) resolveUserFromArgsOrReply(msg *tgbotapi.Message, args string) *db.User {
@@ -699,13 +1171,101 @@ func (b *Bot) IsUserAdminInChat(chatID int64, userID int64) bool {
 	return cm.Status == "administrator" || cm.Status == "creator"
 }
 
+// IsUserInModGroup checks if a given user ID is a member, administrator, or creator in the configured Moderation Group.
+func (b *Bot) IsUserInModGroup(userID int64) bool {
+	if b.cfg.ModerationGroupID == 0 || userID == 0 {
+		return false
+	}
+	cm, err := b.GetChatMember(tgbotapi.GetChatMemberConfig{
+		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+			ChatID: b.cfg.ModerationGroupID,
+			UserID: userID,
+		},
+	})
+	if err != nil {
+		return false
+	}
+	return cm.Status == "administrator" || cm.Status == "creator" || cm.Status == "member"
+}
+
 func (b *Bot) replyText(msg *tgbotapi.Message, text string) {
-	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
-	reply.ReplyToMessageID = msg.MessageID
-	reply.ParseMode = tgbotapi.ModeMarkdown
-	if _, err := b.Send(reply); err != nil {
-		reply.ParseMode = ""
-		_, _ = b.Send(reply)
+	if msg == nil || text == "" {
+		return
+	}
+	text = strings.ToValidUTF8(text, "")
+	runes := []rune(text)
+	const maxRunes = 3800
+	for len(runes) > maxRunes {
+		sub := string(runes[:maxRunes])
+		splitIdx := strings.LastIndex(sub, "\n\n")
+		if splitIdx == -1 {
+			splitIdx = strings.LastIndex(sub, "\n")
+		}
+		var chunk string
+		if splitIdx != -1 {
+			chunk = sub[:splitIdx]
+			runes = runes[len([]rune(chunk))+1:]
+		} else {
+			chunk = sub
+			runes = runes[maxRunes:]
+		}
+
+		reply := tgbotapi.NewMessage(msg.Chat.ID, strings.ToValidUTF8(chunk, ""))
+		reply.ReplyToMessageID = msg.MessageID
+		reply.ParseMode = tgbotapi.ModeMarkdown
+		if _, err := b.Send(reply); err != nil {
+			log.Printf("[Bot] Markdown send failed (%v), retrying as plain text", err)
+			reply.ParseMode = ""
+			_, _ = b.Send(reply)
+		}
+	}
+
+	if len(runes) > 0 {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, strings.ToValidUTF8(string(runes), ""))
+		reply.ReplyToMessageID = msg.MessageID
+		reply.ParseMode = tgbotapi.ModeMarkdown
+		if _, err := b.Send(reply); err != nil {
+			log.Printf("[Bot] Markdown send failed (%v), retrying as plain text", err)
+			reply.ParseMode = ""
+			_, _ = b.Send(reply)
+		}
+	}
+}
+
+func (b *Bot) sendChunkedText(chatID int64, text string) {
+	if chatID == 0 || text == "" {
+		return
+	}
+	text = strings.ToValidUTF8(text, "")
+	runes := []rune(text)
+	const maxRunes = 3800
+	for len(runes) > maxRunes {
+		sub := string(runes[:maxRunes])
+		splitIdx := strings.LastIndex(sub, "\n")
+		var chunk string
+		if splitIdx != -1 {
+			chunk = sub[:splitIdx]
+			runes = runes[len([]rune(chunk))+1:]
+		} else {
+			chunk = sub
+			runes = runes[maxRunes:]
+		}
+
+		msg := tgbotapi.NewMessage(chatID, strings.ToValidUTF8(chunk, ""))
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		if _, err := b.Send(msg); err != nil {
+			msg.ParseMode = ""
+			_, _ = b.Send(msg)
+		}
+	}
+
+	if len(runes) > 0 {
+		msg := tgbotapi.NewMessage(chatID, strings.ToValidUTF8(string(runes), ""))
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		if _, err := b.Send(msg); err != nil {
+			msg.ParseMode = ""
+			_, _ = b.Send(msg)
+		}
 	}
 }
 
@@ -738,5 +1298,9 @@ func getHelpText(isSuperAdmin, isModGroup bool) string {
 		"• `/promote <user|@username>` - Promote user to Group Admin & set rep to 100\n" +
 		"• `/demote <user|@username>` - Remove admin status & reset rep (Super Admin only)\n" +
 		"• `/listusers` - List all known users, reputation scores & admin flags\n" +
-		"• `/cleanup` - Manually run 7-day logs & 50-post-per-user retention cleanup"
+		"• `/listunknownusers [kw] [ban]` - List or batch-ban unbanned new users with few messages (with or without bios)\n" +
+		"• `/cleanup` - Manually run 7-day logs & 50-post-per-user retention cleanup\n" +
+		"• `/getdb` - Download a copy of the current SQLite3 database (Admin direct message only)\n" +
+		"• `/fetchprofile <user|@username>` - Fetch fresh Telegram profile (bio & picture) & cache in DB\n" +
+		"• `/backfillprofiles [force]` - Backfill bios and profile photos for tracked users in background"
 }

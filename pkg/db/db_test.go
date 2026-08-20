@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -603,6 +604,651 @@ func TestExtractTriggerName(t *testing.T) {
 		if out != tc.expected {
 			t.Errorf("extractTriggerName(%q) = %q, expected %q", tc.input, out, tc.expected)
 		}
+	}
+}
+
+func TestDB_BackupTo(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Verify database Path
+	if database.Path() == "" {
+		t.Errorf("expected database path to be non-empty")
+	}
+
+	// Insert test data
+	_, _, err := database.GetOrCreateUser(12345, "testuser", "Test", "User", 100)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	_ = database.SaveGroup(-100112233, "Test Group", "supergroup")
+	_ = database.SaveMessage(&Message{
+		ChatID:    -100112233,
+		MessageID: 1,
+		UserID:    12345,
+		Text:      "Backup test message",
+		CreatedAt: time.Now(),
+	})
+
+	// Create backup destination
+	tmpDir, err := os.MkdirTemp("", "gogcbot_backup_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	backupPath := filepath.Join(tmpDir, "backup.db")
+
+	if err := database.BackupTo(backupPath); err != nil {
+		t.Fatalf("BackupTo failed: %v", err)
+	}
+
+	fileInfo, err := os.Stat(backupPath)
+	if err != nil {
+		t.Fatalf("failed to stat backup file: %v", err)
+	}
+	if fileInfo.Size() == 0 {
+		t.Fatalf("backup file is empty")
+	}
+
+	// Open backup database to verify integrity and content
+	backupDB, err := OpenDB(backupPath)
+	if err != nil {
+		t.Fatalf("failed to open backup db: %v", err)
+	}
+	defer backupDB.Close()
+
+	u, err := backupDB.GetUserByID(12345)
+	if err != nil {
+		t.Fatalf("failed to get user from backup db: %v", err)
+	}
+	if u.Username != "testuser" || u.Reputation != 100 {
+		t.Errorf("unexpected user in backup db: %+v", u)
+	}
+
+	stats, err := backupDB.GetStats()
+	if err != nil {
+		t.Fatalf("failed to get stats from backup db: %v", err)
+	}
+	if stats.TotalUsers != 1 || stats.TotalGroups != 1 || stats.TotalMessages != 1 {
+		t.Errorf("unexpected stats in backup db: %+v", stats)
+	}
+}
+
+func TestUserProfileOperations(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Initial user
+	_, _, err := database.GetOrCreateUser(1001, "alice", "Alice", "Smith", 100)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	_, _, err = database.GetOrCreateUser(1002, "bob", "Bob", "Jones", 80)
+	if err != nil {
+		t.Fatalf("failed to create user 2: %v", err)
+	}
+
+	// 1. Check users without profile
+	missing, err := database.GetUsersWithoutProfile(0)
+	if err != nil {
+		t.Fatalf("failed to get users without profile: %v", err)
+	}
+	if len(missing) != 2 {
+		t.Errorf("expected 2 users without profile, got %d", len(missing))
+	}
+
+	// 2. Save user profile
+	p := &UserProfile{
+		UserID:            1001,
+		Username:          "alice",
+		FirstName:         "Alice",
+		LastName:          "Smith",
+		Bio:               "Golang developer and crypto enthusiast",
+		PhotoFileID:       "big_file_id_123",
+		PhotoFileUniqueID: "big_unique_id_123",
+		PhotoCount:        2,
+		HasPhoto:          true,
+	}
+
+	if err := database.SaveUserProfile(p); err != nil {
+		t.Fatalf("failed to save user profile: %v", err)
+	}
+
+	// 3. Retrieve user profile
+	gotProfile, err := database.GetUserProfile(1001)
+	if err != nil {
+		t.Fatalf("failed to get user profile: %v", err)
+	}
+	if gotProfile.Bio != "Golang developer and crypto enthusiast" || !gotProfile.HasPhoto || gotProfile.PhotoCount != 2 {
+		t.Errorf("unexpected user profile data: %+v", gotProfile)
+	}
+
+	// 4. Update profile (upsert)
+	p.Bio = "Updated bio text"
+	p.PhotoCount = 3
+	if err := database.SaveUserProfile(p); err != nil {
+		t.Fatalf("failed to update user profile: %v", err)
+	}
+
+	updatedProfile, err := database.GetUserProfile(1001)
+	if err != nil {
+		t.Fatalf("failed to get updated profile: %v", err)
+	}
+	if updatedProfile.Bio != "Updated bio text" || updatedProfile.PhotoCount != 3 {
+		t.Errorf("expected updated bio and photo count, got %+v", updatedProfile)
+	}
+
+	// 5. Count and query without profile after insert
+	cnt, err := database.GetUserProfileCount()
+	if err != nil {
+		t.Fatalf("failed to count profiles: %v", err)
+	}
+	if cnt != 1 {
+		t.Errorf("expected profile count 1, got %d", cnt)
+	}
+
+	missingAfter, err := database.GetUsersWithoutProfile(0)
+	if err != nil {
+		t.Fatalf("failed to get users without profile: %v", err)
+	}
+	if len(missingAfter) != 1 || missingAfter[0].UserID != 1002 {
+		t.Errorf("expected only user 1002 in missing, got %+v", missingAfter)
+	}
+
+	// 6. GetAllUserProfiles
+	allProfiles, err := database.GetAllUserProfiles(10)
+	if err != nil {
+		t.Fatalf("failed to get all user profiles: %v", err)
+	}
+	if len(allProfiles) != 1 {
+		t.Errorf("expected 1 user profile in allProfiles, got %d", len(allProfiles))
+	}
+
+	// 7. Save user 1002 as not found
+	notFoundProfile := &UserProfile{
+		UserID:    1002,
+		Username:  "bob",
+		FirstName: "Bob",
+		LastName:  "Jones",
+		NotFound:  true,
+	}
+	if err := database.SaveUserProfile(notFoundProfile); err != nil {
+		t.Fatalf("failed to save not found profile: %v", err)
+	}
+
+	gotNotFound, err := database.GetUserProfile(1002)
+	if err != nil {
+		t.Fatalf("failed to get user 1002 profile: %v", err)
+	}
+	if !gotNotFound.NotFound {
+		t.Errorf("expected user 1002 to have NotFound = true")
+	}
+
+	// 8. Now missing profiles should be 0 because 1002 is marked as not found (has record in user_profiles)
+	missingNone, err := database.GetUsersWithoutProfile(0)
+	if err != nil {
+		t.Fatalf("failed to get users without profile: %v", err)
+	}
+	if len(missingNone) != 0 {
+		t.Errorf("expected 0 users without profile after marking not found, got %d", len(missingNone))
+	}
+
+	cnt2, err := database.GetUserProfileCount()
+	if err != nil || cnt2 != 2 {
+		t.Errorf("expected profile count 2, got %d, err: %v", cnt2, err)
+	}
+}
+
+func TestMatchSpamBio(t *testing.T) {
+	exactBio := "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。天猫、苹果礼品卡、Steam等 联系 @xgshenqing888"
+	matched, kws := MatchSpamBio(exactBio)
+	if !matched {
+		t.Fatalf("expected exact bio to match spam keywords, got false")
+	}
+	if len(kws) == 0 {
+		t.Fatalf("expected matched keywords to be non-empty")
+	}
+
+	cleanBio := "Backend software engineer working with Go and distributed systems."
+	matchedClean, _ := MatchSpamBio(cleanBio)
+	if matchedClean {
+		t.Errorf("expected clean bio to not match spam keywords")
+	}
+
+	matchedEmpty, _ := MatchSpamBio("")
+	if matchedEmpty {
+		t.Errorf("expected empty bio to return false")
+	}
+
+	// Test custom keywords passed dynamically from config
+	customConfigured := []string{
+		"test spam token",
+		"promo campaign sample",
+		"sample spam keyword",
+	}
+	for _, snip := range customConfigured {
+		matchedSnip, kwsSnip := MatchSpamBio(fmt.Sprintf("Bio with snippet %s included", snip), customConfigured...)
+		if !matchedSnip || len(kwsSnip) == 0 {
+			t.Errorf("expected snippet %q to be matched via custom configured keywords, got %t, %v", snip, matchedSnip, kwsSnip)
+		}
+	}
+}
+
+func TestGetUnbannedSpamBioUsers(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Unbanned new user with spam bio (should be matched)
+	_, _, err := database.GetOrCreateUser(2001, "spammer1", "Spam", "One", 0)
+	if err != nil {
+		t.Fatalf("failed to create user 2001: %v", err)
+	}
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     2001,
+		Username:   "spammer1",
+		FirstName:  "Spam",
+		LastName:   "One",
+		Bio:        "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。天猫、苹果礼品卡、Steam等 联系 @xgshenqing888",
+		HasPhoto:   true,
+		PhotoCount: 1,
+	})
+
+	// 2. Banned user with spam bio (should be excluded)
+	_, _, err = database.GetOrCreateUser(2002, "banned_spammer", "Banned", "Spammer", 0)
+	if err != nil {
+		t.Fatalf("failed to create user 2002: %v", err)
+	}
+	_ = database.SetUserBanned(2002, true)
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     2002,
+		Username:   "banned_spammer",
+		FirstName:  "Banned",
+		LastName:   "Spammer",
+		Bio:        "兼职日结 六百一天 沃尔玛 6折油卡 联系 @xgshenqing888",
+		HasPhoto:   false,
+		PhotoCount: 0,
+	})
+
+	// 3. Admin user with matching bio (should be excluded)
+	_, _, err = database.GetOrCreateUser(2003, "adminuser", "Admin", "User", 100)
+	if err != nil {
+		t.Fatalf("failed to create user 2003: %v", err)
+	}
+	_ = database.SetUserAdmin(2003, true)
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     2003,
+		Username:   "adminuser",
+		FirstName:  "Admin",
+		LastName:   "User",
+		Bio:        "Testing steam cards and 6折油卡",
+		HasPhoto:   true,
+		PhotoCount: 1,
+	})
+
+	// 4. Normal unbanned user with high reputation (> 20, should be excluded by default)
+	_, _, err = database.GetOrCreateUser(2004, "normaluser", "Normal", "User", 50)
+	if err != nil {
+		t.Fatalf("failed to create user 2004: %v", err)
+	}
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     2004,
+		Username:   "normaluser",
+		FirstName:  "Normal",
+		LastName:   "User",
+		Bio:        "Just a normal crypto chat member with custom_promo_keyword and developer",
+		HasPhoto:   true,
+		PhotoCount: 1,
+	})
+
+	// 5. Unbanned user without profile / bio (new unknown user, rep 0, should be included)
+	_, _, err = database.GetOrCreateUser(2005, "nobio_user", "No", "Bio", 0)
+	if err != nil {
+		t.Fatalf("failed to create user 2005: %v", err)
+	}
+
+	// 6. Unbanned new user with low reputation (rep 15 <= 20, should be matched)
+	_, _, err = database.GetOrCreateUser(2006, "lowrep_user", "Low", "Rep", 15)
+	if err != nil {
+		t.Fatalf("failed to create user 2006: %v", err)
+	}
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     2006,
+		Username:   "lowrep_user",
+		FirstName:  "Low",
+		LastName:   "Rep",
+		Bio:        "Member with custom_promo_keyword",
+		HasPhoto:   true,
+		PhotoCount: 1,
+	})
+
+	// 7. Query without filters (matches all unbanned non-admin users with rep <= 20 and <= 5 posts)
+	// User 2004 (rep 50) is excluded because rep > 20. Users 2001 (rep 0), 2005 (rep 0), 2006 (rep 15) are included.
+	items, err := database.GetUnbannedUnknownUsers(UnknownUserOptions{
+		ConfiguredKeywords: []string{"custom_promo_keyword", "test_promo_phrase"},
+	})
+	if err != nil {
+		t.Fatalf("GetUnbannedUnknownUsers failed: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected 3 unbanned users (2001, 2005, 2006), got %d", len(items))
+	}
+
+	// Verify user 2004 (rep 50) was excluded, while user 2006 (rep 15) was included and matched keyword
+	var user2004Found bool
+	var user2006 *UnknownUserItem
+	var user2005 *UnknownUserItem
+	for i := range items {
+		if items[i].UserID == 2004 {
+			user2004Found = true
+		}
+		if items[i].UserID == 2006 {
+			user2006 = &items[i]
+		}
+		if items[i].UserID == 2005 {
+			user2005 = &items[i]
+		}
+	}
+	if user2004Found {
+		t.Errorf("expected user 2004 (rep 50 > 20) to be excluded from unknown users list")
+	}
+	if user2006 == nil || len(user2006.MatchedKeywords) == 0 || user2006.MatchedKeywords[0] != "custom_promo_keyword" {
+		t.Errorf("expected user 2006 to match configured keyword 'custom_promo_keyword', got: %+v", user2006)
+	}
+	if user2005 == nil || user2005.Bio != "" {
+		t.Errorf("expected user 2005 to be listed with empty bio, got: %+v", user2005)
+	}
+
+	// 8. Query with custom MaxReputation (MaxReputation: 50 or -1 includes user 2004)
+	highRepItems, err := database.GetUnbannedUnknownUsers(UnknownUserOptions{MaxReputation: 50})
+	if err != nil {
+		t.Fatalf("GetUnbannedUnknownUsers with MaxReputation 50 failed: %v", err)
+	}
+	if len(highRepItems) != 4 {
+		t.Fatalf("expected 4 unbanned users with MaxReputation: 50, got %d", len(highRepItems))
+	}
+
+	// 9. Query with lower MaxReputation (MaxReputation: 10 excludes user 2006 with rep 15 and user 2004 with rep 50)
+	lowRepItems, err := database.GetUnbannedUnknownUsers(UnknownUserOptions{MaxReputation: 10})
+	if err != nil {
+		t.Fatalf("GetUnbannedUnknownUsers with MaxReputation 10 failed: %v", err)
+	}
+	if len(lowRepItems) != 2 {
+		t.Fatalf("expected 2 unbanned users with MaxReputation: 10 (2001, 2005), got %d", len(lowRepItems))
+	}
+
+	// 10. Query with keyword filter
+	filteredItems, err := database.GetUnbannedUnknownUsers(UnknownUserOptions{Keyword: "沃尔玛"})
+	if err != nil {
+		t.Fatalf("GetUnbannedUnknownUsers with keyword failed: %v", err)
+	}
+	if len(filteredItems) != 1 || filteredItems[0].UserID != 2001 {
+		t.Fatalf("expected 1 user (2001) matching keyword '沃尔玛', got %+v", filteredItems)
+	}
+
+	// 11. Generate Markdown report
+	md := GenerateUnknownUsersMarkdown(filteredItems, UnknownUserOptions{Keyword: "沃尔玛", DatabaseName: "test.db"})
+	if md == "" {
+		t.Errorf("expected non-empty Markdown report")
+	}
+	if !strings.Contains(md, "2001") || !strings.Contains(md, "@spammer1") {
+		t.Errorf("expected markdown report to contain user 2001 info, got: %s", md)
+	}
+	if !strings.Contains(md, "Spam Match") {
+		t.Errorf("expected 'Spam Match' column in markdown report")
+	}
+	if !strings.Contains(md, "⚠️ YES") {
+		t.Errorf("expected '⚠️ YES' in markdown report for spam user")
+	}
+	if !strings.Contains(md, "- **Max Reputation**: `20`") {
+		t.Errorf("expected Max Reputation in markdown header, got: %s", md)
+	}
+}
+
+func TestSpamSnippetsTable(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Sync spam snippets
+	testSnippets := []string{"sample snippet 1", "sample snippet 2"}
+	if err := database.SyncSpamSnippets(testSnippets); err != nil {
+		t.Fatalf("failed to sync spam snippets: %v", err)
+	}
+
+	snippets, err := database.GetAllSpamSnippets()
+	if err != nil {
+		t.Fatalf("failed to get all spam snippets: %v", err)
+	}
+	if len(snippets) != 2 {
+		t.Errorf("expected 2 snippets synced, got %d", len(snippets))
+	}
+
+	snippetStrings, err := database.GetSpamSnippetStrings()
+	if err != nil {
+		t.Fatalf("failed to get snippet strings: %v", err)
+	}
+	for _, expected := range testSnippets {
+		found := false
+		for _, actual := range snippetStrings {
+			if actual == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected snippet %q in database", expected)
+		}
+	}
+
+	// 2. Add custom snippet
+	err = database.AddSpamSnippet("free tokens now", "promo")
+	if err != nil {
+		t.Fatalf("failed to add spam snippet: %v", err)
+	}
+
+	// 3. Duplicate snippet should update without error
+	err = database.AddSpamSnippet("free tokens now", "updated_promo")
+	if err != nil {
+		t.Fatalf("failed to update duplicate snippet: %v", err)
+	}
+
+	// 4. Remove snippet
+	err = database.RemoveSpamSnippet("free tokens now")
+	if err != nil {
+		t.Fatalf("failed to remove snippet: %v", err)
+	}
+}
+
+func TestGetUserFullDump(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	userID := int64(888777)
+	_, _, err := database.GetOrCreateUser(userID, "testdumpuser", "Test", "Dump", 50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:     userID,
+		Username:   "testdumpuser",
+		FirstName:  "Test",
+		LastName:   "Dump",
+		Bio:        "油卡 礼品卡 沃尔玛 永辉 6折联系",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	_ = database.SaveMessage(&Message{
+		ChatID:    -1001,
+		MessageID: 10,
+		UserID:    userID,
+		Text:      "Test logged message",
+		CreatedAt: time.Now(),
+	})
+
+	_, _ = database.AdjustReputation(userID, -20, "Spam detected", 0)
+	fp, _ := database.CreateFlaggedPost(-1001, 10, userID, "Spam message")
+	_ = database.ResolveFlaggedPost(fp.ID, "banned", 0)
+
+	// 1. Search by @username
+	dump1, err := database.GetUserFullDump("@testdumpuser", 1001)
+	if err != nil {
+		t.Fatalf("failed to get full dump by @username: %v", err)
+	}
+	if dump1.User.UserID != userID {
+		t.Errorf("expected user ID %d, got %d", userID, dump1.User.UserID)
+	}
+	if dump1.Profile == nil || dump1.Profile.Bio == "" {
+		t.Errorf("expected profile with bio in dump")
+	}
+	if !dump1.IsSpamBioMatch {
+		t.Errorf("expected spam bio match to be true")
+	}
+	if len(dump1.RecentMessages) != 1 {
+		t.Errorf("expected 1 recent message, got %d", len(dump1.RecentMessages))
+	}
+	if len(dump1.ReputationLogs) != 1 {
+		t.Errorf("expected 1 rep log, got %d", len(dump1.ReputationLogs))
+	}
+	if len(dump1.FlaggedPosts) != 1 {
+		t.Errorf("expected 1 flagged post, got %d", len(dump1.FlaggedPosts))
+	}
+
+	// 2. Search by numeric user ID
+	dump2, err := database.GetUserFullDump(fmt.Sprintf("%d", userID), 1001)
+	if err != nil {
+		t.Fatalf("failed to get full dump by ID: %v", err)
+	}
+	if dump2.User.Username != "testdumpuser" {
+		t.Errorf("expected username 'testdumpuser', got %s", dump2.User.Username)
+	}
+
+	// 3. Format dump as Markdown
+	formatted := FormatUserDump(dump1)
+	if !strings.Contains(formatted, "# 👤 Telegram User Dossier: @testdumpuser") {
+		t.Errorf("expected header in formatted dump")
+	}
+	if !strings.Contains(formatted, "Test logged message") {
+		t.Errorf("expected message in formatted dump")
+	}
+	if !strings.Contains(formatted, "Spam detected") {
+		t.Errorf("expected reason in formatted dump")
+	}
+}
+
+func TestMatchSpamBioProfile_And_ExtendedSignals(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Test MatchSpamBioProfile with personal channel title
+	p1 := &UserProfile{
+		UserID:            1001,
+		Bio:               "Regular innocent bio",
+		PersonalChatTitle: "6折油卡代发专区",
+	}
+	isSpam, matched := MatchSpamBioProfile(p1)
+	if !isSpam || len(matched) == 0 {
+		t.Errorf("expected spam match on personal chat title, got isSpam=%v, matched=%v", isSpam, matched)
+	}
+
+	// 2. Test MatchSpamBioProfile with business intro
+	p2 := &UserProfile{
+		UserID:        1002,
+		Bio:           "",
+		BusinessIntro: "招兼职日结，每天200-500，加微信咨询",
+	}
+	isSpam2, matched2 := MatchSpamBioProfile(p2)
+	if !isSpam2 || len(matched2) == 0 {
+		t.Errorf("expected spam match on business intro, got isSpam=%v, matched=%v", isSpam2, matched2)
+	}
+
+	// 3. Test saving and retrieving extended signals in DB
+	userID := int64(999888)
+	_, _, err := database.GetOrCreateUser(userID, "signaluser", "Signal", "Tester", 100)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	err = database.UpdateUserMetadata(userID, "zh-hans", true)
+	if err != nil {
+		t.Fatalf("failed to update user metadata: %v", err)
+	}
+
+	u, err := database.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to get user: %v", err)
+	}
+	if u.LanguageCode != "zh-hans" {
+		t.Errorf("expected language code 'zh-hans', got %q", u.LanguageCode)
+	}
+	if !u.IsPremium {
+		t.Errorf("expected is_premium to be true")
+	}
+
+	err = database.SaveUserProfile(&UserProfile{
+		UserID:               userID,
+		Username:             "signaluser",
+		FirstName:            "Signal",
+		LastName:             "Tester",
+		LanguageCode:         "zh-hans",
+		IsPremium:            true,
+		Bio:                  "Innocent bio",
+		HasPrivateForwards:   true,
+		PersonalChatTitle:    "Official Crypto Channel",
+		PersonalChatUsername: "cryptochannel",
+		BusinessIntro:        "Welcome to our crypto shop",
+		HasPhoto:             true,
+		PhotoCount:           2,
+		FetchedAt:            time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("failed to save user profile: %v", err)
+	}
+
+	prof, err := database.GetUserProfile(userID)
+	if err != nil {
+		t.Fatalf("failed to get user profile: %v", err)
+	}
+	if !prof.HasPrivateForwards {
+		t.Errorf("expected has_private_forwards to be true")
+	}
+	if prof.PersonalChatTitle != "Official Crypto Channel" {
+		t.Errorf("expected personal_chat_title 'Official Crypto Channel', got %q", prof.PersonalChatTitle)
+	}
+	if prof.BusinessIntro != "Welcome to our crypto shop" {
+		t.Errorf("expected business_intro 'Welcome to our crypto shop', got %q", prof.BusinessIntro)
+	}
+
+	dump, err := database.GetUserFullDump(fmt.Sprintf("%d", userID), 0)
+	if err != nil {
+		t.Fatalf("failed to get full dump: %v", err)
+	}
+	formatted := FormatUserDump(dump)
+	if !strings.Contains(formatted, "zh-hans") {
+		t.Errorf("expected language code in dump output")
+	}
+	if !strings.Contains(formatted, "Telegram Premium") {
+		t.Errorf("expected Premium in dump output")
+	}
+	if !strings.Contains(formatted, "Official Crypto Channel") {
+		t.Errorf("expected personal channel in dump output")
+	}
+
+	// 4. Verify empty bio does not render - **Bio**:
+	pNoBio := &UserProfile{
+		UserID:    2002,
+		Bio:       "",
+		FetchedAt: time.Now(),
+	}
+	dumpNoBio := &UserFullDump{
+		User:    &User{UserID: 2002, Username: "nobiouser", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		Profile: pNoBio,
+	}
+	formattedNoBio := FormatUserDump(dumpNoBio)
+	if strings.Contains(formattedNoBio, "- **Bio**:") {
+		t.Errorf("expected empty bio to NOT render - **Bio**: section, got: %s", formattedNoBio)
 	}
 }
 
