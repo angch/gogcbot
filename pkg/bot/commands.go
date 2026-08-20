@@ -770,9 +770,10 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 
 	keyword := strings.TrimSpace(args)
 	opts := db.SpamBioOptions{
-		Keyword:  keyword,
-		MaxPosts: 5,
-		Limit:    30,
+		Keyword:            keyword,
+		ConfiguredKeywords: b.cfg.AutoFlag.BlockedKeywords,
+		MaxPosts:           5,
+		Limit:              30,
 	}
 
 	items, err := b.db.GetUnbannedSpamBioUsers(opts)

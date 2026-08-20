@@ -41,11 +41,16 @@ Use --keyword / -k to filter by specific keywords or phrases (e.g. 锦鲤代发,
 		}
 		defer database.Close()
 
+		if len(cfg.AutoFlag.BlockedKeywords) > 0 {
+			_ = database.SyncSpamSnippets(cfg.AutoFlag.BlockedKeywords)
+		}
+
 		opts := db.SpamBioOptions{
-			Keyword:      listSpamBiosKeyword,
-			MaxPosts:     listSpamBiosMaxPosts,
-			Limit:        listSpamBiosLimit,
-			DatabaseName: cfg.DBPath,
+			Keyword:            listSpamBiosKeyword,
+			ConfiguredKeywords: cfg.AutoFlag.BlockedKeywords,
+			MaxPosts:           listSpamBiosMaxPosts,
+			Limit:              listSpamBiosLimit,
+			DatabaseName:       cfg.DBPath,
 		}
 
 		items, err := database.GetUnbannedSpamBioUsers(opts)

@@ -305,12 +305,23 @@ func (b *Bot) checkAutoFlagRules(msg *tgbotapi.Message, dbMsg *db.Message, user 
 		reasons = append(reasons, fmt.Sprintf("New user (%d <= %d posts) with link", userMsgCount, b.cfg.AutoFlag.NewUserMinPosts))
 	}
 
-	// Rule 3: Blocked Keywords
+	// Rule 3: Blocked Keywords & DB Spam Snippets
 	lowerText := strings.ToLower(dbMsg.Text)
+	matchedKw := false
 	for _, kw := range b.cfg.AutoFlag.BlockedKeywords {
 		if kw != "" && strings.Contains(lowerText, strings.ToLower(kw)) {
 			reasons = append(reasons, fmt.Sprintf("Contains keyword: '%s'", kw))
+			matchedKw = true
 			break
+		}
+	}
+	if !matchedKw {
+		dbSnippets, _ := b.db.GetSpamSnippetStrings()
+		for _, snip := range dbSnippets {
+			if snip != "" && strings.Contains(lowerText, strings.ToLower(snip)) {
+				reasons = append(reasons, fmt.Sprintf("Contains spam snippet: '%s'", snip))
+				break
+			}
 		}
 	}
 

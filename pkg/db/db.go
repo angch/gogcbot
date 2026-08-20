@@ -91,6 +91,13 @@ type UserProfile struct {
 	UpdatedAt              time.Time `json:"updated_at"`
 }
 
+type SpamSnippet struct {
+	ID        int64     `json:"id"`
+	Snippet   string    `json:"snippet"`
+	Category  string    `json:"category"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 func OpenDB(dbPath string) (*DB, error) {
 	dir := filepath.Dir(dbPath)
 	if dir != "" && dir != "." {
@@ -183,6 +190,13 @@ func (d *DB) AutoMigrate() error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_user_profiles_updated ON user_profiles(updated_at);`,
 		`ALTER TABLE user_profiles ADD COLUMN not_found BOOLEAN NOT NULL DEFAULT 0;`,
+		`CREATE TABLE IF NOT EXISTS spam_snippets (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			snippet TEXT NOT NULL UNIQUE,
+			category TEXT NOT NULL DEFAULT 'spam',
+			created_at DATETIME NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_spam_snippets_snippet ON spam_snippets(snippet);`,
 	}
 
 	for _, stmt := range migrations {
@@ -274,6 +288,15 @@ func (d *DB) InitSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_user_profiles_updated ON user_profiles(updated_at);
+
+	CREATE TABLE IF NOT EXISTS spam_snippets (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		snippet TEXT NOT NULL UNIQUE,
+		category TEXT NOT NULL DEFAULT 'spam',
+		created_at DATETIME NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_spam_snippets_snippet ON spam_snippets(snippet);
 	`
 	_, err := d.Exec(schema)
 	if err != nil {
@@ -1578,9 +1601,9 @@ func MatchSpamBio(bio string, customKeywords ...string) (bool, []string) {
 		kw = strings.TrimSpace(kw)
 		if kw != "" {
 			hasCustom = true
-			if strings.Contains(bioLower, strings.ToLower(kw)) && !seen[kw] {
+			if strings.Contains(bioLower, strings.ToLower(kw)) && !seen[strings.ToLower(kw)] {
 				matched = append(matched, kw)
-				seen[kw] = true
+				seen[strings.ToLower(kw)] = true
 			}
 		}
 	}
@@ -1590,9 +1613,9 @@ func MatchSpamBio(bio string, customKeywords ...string) (bool, []string) {
 
 	// Match against default spam keywords
 	for _, kw := range SpamBioKeywords {
-		if strings.Contains(bioLower, strings.ToLower(kw)) && !seen[kw] {
+		if strings.Contains(bioLower, strings.ToLower(kw)) && !seen[strings.ToLower(kw)] {
 			matched = append(matched, kw)
-			seen[kw] = true
+			seen[strings.ToLower(kw)] = true
 		}
 	}
 
@@ -1618,10 +1641,11 @@ type SpamBioUserItem struct {
 
 // SpamBioOptions configures filtering for GetUnbannedSpamBioUsers.
 type SpamBioOptions struct {
-	Keyword      string `json:"keyword"`
-	MaxPosts     int    `json:"max_posts"`
-	Limit        int    `json:"limit"`
-	DatabaseName string `json:"database_name"`
+	Keyword            string   `json:"keyword"`
+	ConfiguredKeywords []string `json:"configured_keywords"`
+	MaxPosts           int      `json:"max_posts"`
+	Limit              int      `json:"limit"`
+	DatabaseName       string   `json:"database_name"`
 }
 
 // GetUnbannedSpamBioUsers retrieves unbanned users whose profile bio matches spam keywords or custom filters.
@@ -1679,8 +1703,12 @@ func (d *DB) GetUnbannedSpamBioUsers(opts SpamBioOptions) ([]SpamBioUserItem, er
 			}
 			item.MatchedKeywords = []string{kw}
 		} else {
-			// Match everything, and check for any recognized spam keywords if present
-			_, matched := MatchSpamBio(item.Bio)
+			// Match everything, and check for any recognized spam keywords from hardcoded base + DB table + config
+			dbSnippets, _ := d.GetSpamSnippetStrings()
+			allKws := append([]string{}, SpamBioKeywords...)
+			allKws = append(allKws, dbSnippets...)
+			allKws = append(allKws, opts.ConfiguredKeywords...)
+			_, matched := MatchSpamBio(item.Bio, allKws...)
 			item.MatchedKeywords = matched
 		}
 
@@ -1757,5 +1785,88 @@ func truncateString(s string, maxLen int) string {
 		return string(runes[:maxLen]) + "..."
 	}
 	return s
+}
+
+// AddSpamSnippet inserts a spam snippet into the spam_snippets table.
+func (d *DB) AddSpamSnippet(snippet string, category string) error {
+	snippet = strings.TrimSpace(snippet)
+	if snippet == "" {
+		return fmt.Errorf("snippet cannot be empty")
+	}
+	if category == "" {
+		category = "spam"
+	}
+	now := time.Now()
+	_, err := d.Exec(`
+		INSERT INTO spam_snippets (snippet, category, created_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(snippet) DO UPDATE SET category = excluded.category;
+	`, snippet, category, now)
+	if err != nil {
+		return fmt.Errorf("failed to add spam snippet '%s': %w", snippet, err)
+	}
+	return nil
+}
+
+// RemoveSpamSnippet deletes a snippet by exact text or ID string.
+func (d *DB) RemoveSpamSnippet(snippet string) error {
+	snippet = strings.TrimSpace(snippet)
+	if snippet == "" {
+		return fmt.Errorf("snippet cannot be empty")
+	}
+	_, err := d.Exec(`DELETE FROM spam_snippets WHERE snippet = ? OR id = ?;`, snippet, snippet)
+	if err != nil {
+		return fmt.Errorf("failed to remove spam snippet '%s': %w", snippet, err)
+	}
+	return nil
+}
+
+// GetAllSpamSnippets returns all snippets stored in the spam_snippets table.
+func (d *DB) GetAllSpamSnippets() ([]SpamSnippet, error) {
+	rows, err := d.Query(`SELECT id, snippet, category, created_at FROM spam_snippets ORDER BY id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query spam snippets: %w", err)
+	}
+	defer rows.Close()
+
+	var snippets []SpamSnippet
+	for rows.Next() {
+		var s SpamSnippet
+		var rawCreatedAt any
+		if err := rows.Scan(&s.ID, &s.Snippet, &s.Category, &rawCreatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan spam snippet: %w", err)
+		}
+		s.CreatedAt = parseTime(rawCreatedAt)
+		snippets = append(snippets, s)
+	}
+	return snippets, nil
+}
+
+// GetSpamSnippetStrings returns a slice of all snippet strings in the database.
+func (d *DB) GetSpamSnippetStrings() ([]string, error) {
+	snippets, err := d.GetAllSpamSnippets()
+	if err != nil {
+		return nil, err
+	}
+	var res []string
+	for _, s := range snippets {
+		if strings.TrimSpace(s.Snippet) != "" {
+			res = append(res, s.Snippet)
+		}
+	}
+	return res, nil
+}
+
+// SyncSpamSnippets syncs and populates a slice of snippet strings into the spam_snippets table.
+func (d *DB) SyncSpamSnippets(snippets []string) error {
+	for _, snip := range snippets {
+		snip = strings.TrimSpace(snip)
+		if snip != "" {
+			if err := d.AddSpamSnippet(snip, "spam"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 

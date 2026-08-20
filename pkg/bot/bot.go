@@ -64,6 +64,10 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 		}
 	}
 
+	if database != nil && len(cfg.AutoFlag.BlockedKeywords) > 0 {
+		_ = database.SyncSpamSnippets(cfg.AutoFlag.BlockedKeywords)
+	}
+
 	b := &Bot{
 		cfg:      cfg,
 		cfgPath:  "config.yaml",

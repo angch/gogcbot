@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -821,10 +822,17 @@ func TestMatchSpamBio(t *testing.T) {
 		t.Errorf("expected empty bio to return false")
 	}
 
-	// Test custom keyword
-	matchedCustom, customKws := MatchSpamBio("Crypto trader and investor", "crypto")
-	if !matchedCustom || len(customKws) != 1 || customKws[0] != "crypto" {
-		t.Errorf("expected custom keyword match for 'crypto', got %t, %v", matchedCustom, customKws)
+	// Test custom keywords passed dynamically from config
+	customConfigured := []string{
+		"test spam token",
+		"promo campaign sample",
+		"sample spam keyword",
+	}
+	for _, snip := range customConfigured {
+		matchedSnip, kwsSnip := MatchSpamBio(fmt.Sprintf("Bio with snippet %s included", snip), customConfigured...)
+		if !matchedSnip || len(kwsSnip) == 0 {
+			t.Errorf("expected snippet %q to be matched via custom configured keywords, got %t, %v", snip, matchedSnip, kwsSnip)
+		}
 	}
 }
 
@@ -879,7 +887,7 @@ func TestGetUnbannedSpamBioUsers(t *testing.T) {
 		PhotoCount: 1,
 	})
 
-	// 4. Normal unbanned user with clean bio (should be excluded)
+	// 4. Normal unbanned user with clean bio
 	_, _, err = database.GetOrCreateUser(2004, "normaluser", "Normal", "User", 50)
 	if err != nil {
 		t.Fatalf("failed to create user 2004: %v", err)
@@ -889,18 +897,31 @@ func TestGetUnbannedSpamBioUsers(t *testing.T) {
 		Username:   "normaluser",
 		FirstName:  "Normal",
 		LastName:   "User",
-		Bio:        "Just a normal crypto chat member and developer",
+		Bio:        "Just a normal crypto chat member with custom_promo_keyword and developer",
 		HasPhoto:   true,
 		PhotoCount: 1,
 	})
 
-	// 5. Query without filters (empty keyword matches everything by default)
-	items, err := database.GetUnbannedSpamBioUsers(SpamBioOptions{})
+	// 5. Query without filters (empty keyword matches everything by default, and populates matched from SpamBioKeywords + ConfiguredKeywords)
+	items, err := database.GetUnbannedSpamBioUsers(SpamBioOptions{
+		ConfiguredKeywords: []string{"custom_promo_keyword", "test_promo_phrase"},
+	})
 	if err != nil {
 		t.Fatalf("GetUnbannedSpamBioUsers failed: %v", err)
 	}
 	if len(items) != 2 {
 		t.Fatalf("expected 2 unbanned users with bios (both 2001 and 2004), got %d", len(items))
+	}
+
+	// Verify user 2004 matched the configured keyword "custom_promo_keyword"
+	var user2004 *SpamBioUserItem
+	for i := range items {
+		if items[i].UserID == 2004 {
+			user2004 = &items[i]
+		}
+	}
+	if user2004 == nil || len(user2004.MatchedKeywords) == 0 || user2004.MatchedKeywords[0] != "custom_promo_keyword" {
+		t.Errorf("expected user 2004 to match configured keyword 'custom_promo_keyword', got: %+v", user2004)
 	}
 
 	// 6. Query with keyword filter
@@ -919,6 +940,60 @@ func TestGetUnbannedSpamBioUsers(t *testing.T) {
 	}
 	if !strings.Contains(md, "2001") || !strings.Contains(md, "@spammer1") {
 		t.Errorf("expected markdown report to contain user 2001 info, got: %s", md)
+	}
+}
+
+func TestSpamSnippetsTable(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Sync spam snippets
+	testSnippets := []string{"sample snippet 1", "sample snippet 2"}
+	if err := database.SyncSpamSnippets(testSnippets); err != nil {
+		t.Fatalf("failed to sync spam snippets: %v", err)
+	}
+
+	snippets, err := database.GetAllSpamSnippets()
+	if err != nil {
+		t.Fatalf("failed to get all spam snippets: %v", err)
+	}
+	if len(snippets) != 2 {
+		t.Errorf("expected 2 snippets synced, got %d", len(snippets))
+	}
+
+	snippetStrings, err := database.GetSpamSnippetStrings()
+	if err != nil {
+		t.Fatalf("failed to get snippet strings: %v", err)
+	}
+	for _, expected := range testSnippets {
+		found := false
+		for _, actual := range snippetStrings {
+			if actual == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected snippet %q in database", expected)
+		}
+	}
+
+	// 2. Add custom snippet
+	err = database.AddSpamSnippet("free tokens now", "promo")
+	if err != nil {
+		t.Fatalf("failed to add spam snippet: %v", err)
+	}
+
+	// 3. Duplicate snippet should update without error
+	err = database.AddSpamSnippet("free tokens now", "updated_promo")
+	if err != nil {
+		t.Fatalf("failed to update duplicate snippet: %v", err)
+	}
+
+	// 4. Remove snippet
+	err = database.RemoveSpamSnippet("free tokens now")
+	if err != nil {
+		t.Fatalf("failed to remove snippet: %v", err)
 	}
 }
 
