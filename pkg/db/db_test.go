@@ -941,6 +941,12 @@ func TestGetUnbannedSpamBioUsers(t *testing.T) {
 	if !strings.Contains(md, "2001") || !strings.Contains(md, "@spammer1") {
 		t.Errorf("expected markdown report to contain user 2001 info, got: %s", md)
 	}
+	if !strings.Contains(md, "Spam Match") {
+		t.Errorf("expected 'Spam Match' column in markdown report")
+	}
+	if !strings.Contains(md, "⚠️ YES") {
+		t.Errorf("expected '⚠️ YES' in markdown report for spam user")
+	}
 }
 
 func TestSpamSnippetsTable(t *testing.T) {

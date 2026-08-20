@@ -1637,6 +1637,7 @@ type SpamBioUserItem struct {
 	CreatedAt       time.Time `json:"created_at"`
 	FetchedAt       time.Time `json:"fetched_at"`
 	MatchedKeywords []string  `json:"matched_keywords"`
+	IsSpamMatch     bool      `json:"is_spam_match"`
 }
 
 // SpamBioOptions configures filtering for GetUnbannedSpamBioUsers.
@@ -1711,6 +1712,7 @@ func (d *DB) GetUnbannedSpamBioUsers(opts SpamBioOptions) ([]SpamBioUserItem, er
 			_, matched := MatchSpamBio(item.Bio, allKws...)
 			item.MatchedKeywords = matched
 		}
+		item.IsSpamMatch = len(item.MatchedKeywords) > 0
 
 		results = append(results, item)
 		if opts.Limit > 0 && len(results) >= opts.Limit {
@@ -1748,8 +1750,8 @@ func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) strin
 		return sb.String()
 	}
 
-	sb.WriteString("| # | User ID | Username | Display Name | Rep | Posts | Matched Keywords | Bio Snippet | Action |\n")
-	sb.WriteString("|---|---|---|---|---|---|---|---|---|\n")
+	sb.WriteString("| # | User ID | Username | Display Name | Rep | Posts | Spam Match | Matched Keywords | Bio Snippet | Action |\n")
+	sb.WriteString("|---|---|---|---|---|---|---|---|---|---|\n")
 
 	for i, u := range items {
 		username := "-"
@@ -1764,12 +1766,16 @@ func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) strin
 		if len(u.MatchedKeywords) > 0 {
 			kwStr = strings.Join(u.MatchedKeywords, ", ")
 		}
+		spamMatchStr := "No"
+		if u.IsSpamMatch || len(u.MatchedKeywords) > 0 {
+			spamMatchStr = "⚠️ YES"
+		}
 		bioSnippet := escapeMarkdownCell(truncateString(u.Bio, 60))
 
 		sb.WriteString(fmt.Sprintf(
-			"| %d | `%d` | %s | %s | %d | %d | `%s` | %s | `/ban %d` |\n",
+			"| %d | `%d` | %s | %s | %d | %d | %s | `%s` | %s | `/ban %d` |\n",
 			i+1, u.UserID, username, escapeMarkdownCell(name), u.Reputation, u.MessageCount,
-			escapeMarkdownCell(kwStr), bioSnippet, u.UserID,
+			spamMatchStr, escapeMarkdownCell(kwStr), bioSnippet, u.UserID,
 		))
 	}
 

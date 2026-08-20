@@ -818,15 +818,25 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 			bioSnippet = bioSnippet[:117] + "..."
 		}
 
+		matchBadge := "🟢 Clean"
+		if u.IsSpamMatch || len(u.MatchedKeywords) > 0 {
+			matchBadge = "🚨 Spam Match"
+		}
+
+		matchedLine := ""
+		if len(u.MatchedKeywords) > 0 {
+			matchedLine = fmt.Sprintf("   • Matched: `%s`\n", escapeMarkdown(matchedStr))
+		}
+
 		sb.WriteString(fmt.Sprintf(
 			"%d. **%s**%s\n"+
-				"   • ID: `%d` | Rep: `%d` | Posts: `%d`\n"+
-				"   • Matched: `%s`\n"+
+				"   • ID: `%d` | Rep: `%d` | Posts: `%d` | Filter: **%s**\n"+
+				"%s"+
 				"   • Bio: ```\n%s\n```\n"+
 				"   • Action: `/ban %d`\n\n",
 			i+1, escapeMarkdown(name), userHandle,
-			u.UserID, u.Reputation, u.MessageCount,
-			escapeMarkdown(matchedStr),
+			u.UserID, u.Reputation, u.MessageCount, matchBadge,
+			matchedLine,
 			escapeMarkdown(bioSnippet),
 			u.UserID,
 		))

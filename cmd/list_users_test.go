@@ -187,5 +187,11 @@ func TestListSpamBiosCmd(t *testing.T) {
 		if !strings.Contains(content, "5001") {
 			t.Errorf("expected user ID 5001 in generated file")
 		}
+		if !strings.Contains(content, "Spam Match") {
+			t.Errorf("expected 'Spam Match' header in generated file")
+		}
+		if !strings.Contains(content, "⚠️ YES") {
+			t.Errorf("expected '⚠️ YES' in generated file for spam user")
+		}
 	})
 }
