@@ -79,13 +79,27 @@ func (t *NewUserSpamBioTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, e
 		return &TriggerResult{Triggered: false}, nil
 	}
 
-	// Condition 3: Check user bio
-	bio := strings.TrimSpace(ctx.UserBio)
-	if bio == "" {
+	// Condition 3: Check user bio, personal channel title/username, and business intro
+	var profileTexts []string
+	if strings.TrimSpace(ctx.UserBio) != "" {
+		profileTexts = append(profileTexts, ctx.UserBio)
+	}
+	if strings.TrimSpace(ctx.PersonalChatTitle) != "" {
+		profileTexts = append(profileTexts, ctx.PersonalChatTitle)
+	}
+	if strings.TrimSpace(ctx.PersonalChatUsername) != "" {
+		profileTexts = append(profileTexts, ctx.PersonalChatUsername)
+	}
+	if strings.TrimSpace(ctx.BusinessIntro) != "" {
+		profileTexts = append(profileTexts, ctx.BusinessIntro)
+	}
+
+	if len(profileTexts) == 0 {
 		return &TriggerResult{Triggered: false}, nil
 	}
 
-	isSpam, matched := db.MatchSpamBioAll(bio, t.customKeywords...)
+	combinedProfileText := strings.Join(profileTexts, " | ")
+	isSpam, matched := db.MatchSpamBioAll(combinedProfileText, t.customKeywords...)
 	if !isSpam && len(matched) == 0 {
 		return &TriggerResult{Triggered: false}, nil
 	}
@@ -99,7 +113,7 @@ func (t *NewUserSpamBioTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, e
 	if matchedStr == "" {
 		matchedStr = "spam keyword match"
 	}
-	reason := fmt.Sprintf("Detection trigger (new_user_spam_bio): New user profile bio matched spam keywords [%s]", matchedStr)
+	reason := fmt.Sprintf("Detection trigger (new_user_spam_bio): New user profile signals matched spam keywords [%s]", matchedStr)
 
 	actions := []Action{
 		{

@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -694,6 +695,93 @@ func TestHandleMessage_SpamBioMessage_TriggersBan(t *testing.T) {
 	}
 }
 
+func TestHandleUserJoined_PersonalChannelSpam_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(888444)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	// Pre-seed profile where Bio is innocent, but PersonalChatTitle contains spam keyword
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:            userID,
+		Username:          "channel_spammer",
+		FirstName:         "Channel",
+		LastName:          "Spam",
+		Bio:               "Welcome to my channel!",
+		PersonalChatTitle: "6折油卡代发专区",
+		HasPhoto:          true,
+		PhotoCount:        1,
+		FetchedAt:         time.Now(),
+	})
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "channel_spammer", FirstName: "Channel", LastName: "Spam", LanguageCode: "zh-hans"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "channel_spammer", FirstName: "Channel", LastName: "Spam", LanguageCode: "zh-hans"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned on join due to spam personal channel title", userID)
+	}
+	if u.LanguageCode != "zh-hans" {
+		t.Errorf("expected user language code 'zh-hans', got %q", u.LanguageCode)
+	}
+}
+
+func TestHandleMessage_UserLanguageMetadataRecorded(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(888555)
+	chatID := int64(-100123)
+
+	msg := &tgbotapi.Message{
+		MessageID: 105,
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{
+			ID:           userID,
+			UserName:     "lang_user",
+			FirstName:    "Lang",
+			LastName:     "User",
+			LanguageCode: "zh-cn",
+		},
+		Text: "Hello general conversation",
+	}
+
+	b.handleMessage(msg)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if u.LanguageCode != "zh-cn" {
+		t.Errorf("expected user language code 'zh-cn', got %q", u.LanguageCode)
+	}
+}
+
 func TestNewBot_LoginRetry_Success(t *testing.T) {
 	origFunc := newBotAPIFunc
 	origDelay := loginRetryDelay
@@ -764,6 +852,58 @@ func TestNewBot_LoginRetry_Exhausted(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "after 3 attempts") {
 		t.Errorf("expected error message to mention 3 attempts, got: %v", err)
+	}
+}
+
+func TestTelegramChatFullInfo_Unmarshal(t *testing.T) {
+	rawJSON := `{
+		"id": 99887766,
+		"type": "private",
+		"username": "spammer_showcase",
+		"first_name": "Spam",
+		"last_name": "ChannelOwner",
+		"bio": "Check out my channel below",
+		"has_private_forwards": true,
+		"personal_chat": {
+			"id": -1001999888,
+			"title": "6折油卡代发专区",
+			"username": "youkaspam_official",
+			"type": "channel"
+		},
+		"business_intro": {
+			"title": "Crypto Card Services",
+			"message": "24/7 automated delivery"
+		}
+	}`
+
+	var fullInfo TelegramChatFullInfo
+	if err := json.Unmarshal([]byte(rawJSON), &fullInfo); err != nil {
+		t.Fatalf("failed to unmarshal ChatFullInfo: %v", err)
+	}
+
+	if fullInfo.ID != 99887766 {
+		t.Errorf("expected ID 99887766, got %d", fullInfo.ID)
+	}
+	if fullInfo.Bio != "Check out my channel below" {
+		t.Errorf("expected bio 'Check out my channel below', got %q", fullInfo.Bio)
+	}
+	if !fullInfo.HasPrivateForwards {
+		t.Errorf("expected has_private_forwards to be true")
+	}
+	if fullInfo.PersonalChat == nil {
+		t.Fatalf("expected personal_chat to not be nil")
+	}
+	if fullInfo.PersonalChat.Title != "6折油卡代发专区" {
+		t.Errorf("expected personal channel title '6折油卡代发专区', got %q", fullInfo.PersonalChat.Title)
+	}
+	if fullInfo.PersonalChat.Username != "youkaspam_official" {
+		t.Errorf("expected personal channel username 'youkaspam_official', got %q", fullInfo.PersonalChat.Username)
+	}
+	if fullInfo.BusinessIntro == nil {
+		t.Fatalf("expected business_intro to not be nil")
+	}
+	if fullInfo.BusinessIntro.Title != "Crypto Card Services" {
+		t.Errorf("expected business intro title 'Crypto Card Services', got %q", fullInfo.BusinessIntro.Title)
 	}
 }
 

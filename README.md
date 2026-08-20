@@ -61,7 +61,7 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
    - **Profile Bio Scanning on Join & Message**: Automatically grabs user profile and bio when a user joins a channel/group or sends a message, caching them in `user_profiles`.
    - **Automatic Spam Bio Kick Rule (`new_user_spam_bio`)**: If a joining or new user's bio matches spam/syndicate keywords, the bot immediately deletes join messages, bans them across monitored groups, penalizes reputation, and alerts the moderation channel.
    - **`spam_snippets` Database Table**: Stores dynamic spam snippets synced from runtime `config.yaml` or added programmatically.
-   - **CLI & Bot Commands**: Search and inspect suspicious bios via `gogcbot list-spambios` and `/listspambios` (rendered as a compact monospace table with CJK visual alignment).
+   - **CLI & Bot Commands**: Search and inspect suspicious bios or unknown/new accounts via `gogcbot list-unknownusers` (or `list-spambios`) and `/listunknownusers` (rendered as a compact monospace table with CJK visual alignment).
 
 ---
 
@@ -103,10 +103,12 @@ CGO_ENABLED=0 go build -o gogcbot main.go
 ./gogcbot backfill-profiles --config config.yaml
 ./gogcbot backfill-profiles --config config.yaml --force --delay-ms 100
 
-# 7. List or batch-ban unbanned new users with suspicious or spam bios
-./gogcbot list-spambios --config config.yaml
-./gogcbot list-spambios --config config.yaml --keyword "沃尔玛" --output spambios.md
-./gogcbot list-spambios --config config.yaml --ban
+# 7. List or batch-ban unbanned new/unknown users with few messages (with or without bios) and low reputation (<= 20)
+./gogcbot list-unknownusers --config config.yaml
+./gogcbot list-unknownusers --config config.yaml --keyword "沃尔玛" --output unknownusers.md
+./gogcbot list-unknownusers --config config.yaml --max-posts 5
+./gogcbot list-unknownusers --config config.yaml --max-rep 20
+./gogcbot list-unknownusers --config config.yaml --ban
 
 # 8. Dump all known database info and profiles for a user by @tag or numeric ID
 ./gogcbot user @spambot --config config.yaml
@@ -217,7 +219,7 @@ shieldy:
 | `/promote <user>` | Admin/Mod | Promote user to Bot Admin & set rep to 100 |
 | `/demote <user>` | Super Admin | Remove Bot Admin privileges and reset rep |
 | `/listusers` | Admin/Mod | List known good/bad users and moderation status |
-| `/listspambios [kw] [ban]` | Admin/Mod | Compact monospace table list or batch-ban unbanned new users with suspicious or syndicate spam bios |
+| `/listunknownusers [kw] [ban]` | Admin/Mod | Compact monospace table list or batch-ban unbanned new users with few messages (with or without bios) |
 | `/cleanup` | Admin/Mod | Run retention cleanup on demand |
 | `/getdb` | Bot Admin (Direct PM only) | Download a copy of current SQLite3 database |
 

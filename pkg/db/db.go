@@ -1,7 +1,9 @@
 package db
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -20,16 +22,18 @@ type DB struct {
 }
 
 type User struct {
-	UserID     int64     `json:"user_id"`
-	Username   string    `json:"username"`
-	FirstName  string    `json:"first_name"`
-	LastName   string    `json:"last_name"`
-	Reputation int       `json:"reputation"`
-	WarnCount  int       `json:"warn_count"`
-	IsBanned   bool      `json:"is_banned"`
-	IsAdmin    bool      `json:"is_admin"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	UserID       int64     `json:"user_id"`
+	Username     string    `json:"username"`
+	FirstName    string    `json:"first_name"`
+	LastName     string    `json:"last_name"`
+	LanguageCode string    `json:"language_code,omitempty"`
+	IsPremium    bool      `json:"is_premium,omitempty"`
+	Reputation   int       `json:"reputation"`
+	WarnCount    int       `json:"warn_count"`
+	IsBanned     bool      `json:"is_banned"`
+	IsAdmin      bool      `json:"is_admin"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type Group struct {
@@ -79,7 +83,13 @@ type UserProfile struct {
 	Username               string    `json:"username"`
 	FirstName              string    `json:"first_name"`
 	LastName               string    `json:"last_name"`
+	LanguageCode           string    `json:"language_code,omitempty"`
+	IsPremium              bool      `json:"is_premium,omitempty"`
 	Bio                    string    `json:"bio"`
+	HasPrivateForwards     bool      `json:"has_private_forwards,omitempty"`
+	PersonalChatTitle      string    `json:"personal_chat_title,omitempty"`
+	PersonalChatUsername   string    `json:"personal_chat_username,omitempty"`
+	BusinessIntro          string    `json:"business_intro,omitempty"`
 	PhotoFileID            string    `json:"photo_file_id"`
 	PhotoFileUniqueID      string    `json:"photo_file_unique_id"`
 	PhotoSmallFileID       string    `json:"photo_small_file_id"`
@@ -172,12 +182,20 @@ func (d *DB) AutoMigrate() error {
 	// Schema evolution migrations
 	migrations := []string{
 		`ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0;`,
+		`ALTER TABLE users ADD COLUMN language_code TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE users ADD COLUMN is_premium BOOLEAN NOT NULL DEFAULT 0;`,
 		`CREATE TABLE IF NOT EXISTS user_profiles (
 			user_id INTEGER PRIMARY KEY,
 			username TEXT NOT NULL DEFAULT '',
 			first_name TEXT NOT NULL DEFAULT '',
 			last_name TEXT NOT NULL DEFAULT '',
+			language_code TEXT NOT NULL DEFAULT '',
+			is_premium BOOLEAN NOT NULL DEFAULT 0,
 			bio TEXT NOT NULL DEFAULT '',
+			has_private_forwards BOOLEAN NOT NULL DEFAULT 0,
+			personal_chat_title TEXT NOT NULL DEFAULT '',
+			personal_chat_username TEXT NOT NULL DEFAULT '',
+			business_intro TEXT NOT NULL DEFAULT '',
 			photo_file_id TEXT NOT NULL DEFAULT '',
 			photo_file_unique_id TEXT NOT NULL DEFAULT '',
 			photo_small_file_id TEXT NOT NULL DEFAULT '',
@@ -191,6 +209,12 @@ func (d *DB) AutoMigrate() error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_user_profiles_updated ON user_profiles(updated_at);`,
 		`ALTER TABLE user_profiles ADD COLUMN not_found BOOLEAN NOT NULL DEFAULT 0;`,
+		`ALTER TABLE user_profiles ADD COLUMN language_code TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE user_profiles ADD COLUMN is_premium BOOLEAN NOT NULL DEFAULT 0;`,
+		`ALTER TABLE user_profiles ADD COLUMN has_private_forwards BOOLEAN NOT NULL DEFAULT 0;`,
+		`ALTER TABLE user_profiles ADD COLUMN personal_chat_title TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE user_profiles ADD COLUMN personal_chat_username TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE user_profiles ADD COLUMN business_intro TEXT NOT NULL DEFAULT '';`,
 		`CREATE TABLE IF NOT EXISTS spam_snippets (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			snippet TEXT NOT NULL UNIQUE,
@@ -213,6 +237,8 @@ func (d *DB) InitSchema() error {
 		username TEXT NOT NULL DEFAULT '',
 		first_name TEXT NOT NULL DEFAULT '',
 		last_name TEXT NOT NULL DEFAULT '',
+		language_code TEXT NOT NULL DEFAULT '',
+		is_premium BOOLEAN NOT NULL DEFAULT 0,
 		reputation INTEGER NOT NULL DEFAULT 100,
 		warn_count INTEGER NOT NULL DEFAULT 0,
 		is_banned BOOLEAN NOT NULL DEFAULT 0,
@@ -275,7 +301,13 @@ func (d *DB) InitSchema() error {
 		username TEXT NOT NULL DEFAULT '',
 		first_name TEXT NOT NULL DEFAULT '',
 		last_name TEXT NOT NULL DEFAULT '',
+		language_code TEXT NOT NULL DEFAULT '',
+		is_premium BOOLEAN NOT NULL DEFAULT 0,
 		bio TEXT NOT NULL DEFAULT '',
+		has_private_forwards BOOLEAN NOT NULL DEFAULT 0,
+		personal_chat_title TEXT NOT NULL DEFAULT '',
+		personal_chat_username TEXT NOT NULL DEFAULT '',
+		business_intro TEXT NOT NULL DEFAULT '',
 		photo_file_id TEXT NOT NULL DEFAULT '',
 		photo_file_unique_id TEXT NOT NULL DEFAULT '',
 		photo_small_file_id TEXT NOT NULL DEFAULT '',
@@ -304,8 +336,10 @@ func (d *DB) InitSchema() error {
 		return err
 	}
 
-	// Auto-migration: ensure is_admin column exists for pre-existing databases
+	// Auto-migration: ensure columns exist for pre-existing databases
 	_, _ = d.Exec(`ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0;`)
+	_, _ = d.Exec(`ALTER TABLE users ADD COLUMN language_code TEXT NOT NULL DEFAULT '';`)
+	_, _ = d.Exec(`ALTER TABLE users ADD COLUMN is_premium BOOLEAN NOT NULL DEFAULT 0;`)
 	return nil
 }
 
@@ -315,27 +349,29 @@ func (d *DB) GetOrCreateUser(userID int64, username, firstName, lastName string,
 	now := time.Now()
 	var user User
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
 		FROM users WHERE user_id = ?
-	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
+	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.LanguageCode, &user.IsPremium, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		user = User{
-			UserID:     userID,
-			Username:   username,
-			FirstName:  firstName,
-			LastName:   lastName,
-			Reputation: defaultRep,
-			WarnCount:  0,
-			IsBanned:   false,
-			IsAdmin:    false,
-			CreatedAt:  now,
-			UpdatedAt:  now,
+			UserID:       userID,
+			Username:     username,
+			FirstName:    firstName,
+			LastName:     lastName,
+			LanguageCode: "",
+			IsPremium:    false,
+			Reputation:   defaultRep,
+			WarnCount:    0,
+			IsBanned:     false,
+			IsAdmin:      false,
+			CreatedAt:    now,
+			UpdatedAt:    now,
 		}
 		_, err := d.Exec(`
-			INSERT INTO users (user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, user.UserID, user.Username, user.FirstName, user.LastName, user.Reputation, user.WarnCount, user.IsBanned, user.IsAdmin, user.CreatedAt, user.UpdatedAt)
+			INSERT INTO users (user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, user.UserID, user.Username, user.FirstName, user.LastName, user.LanguageCode, user.IsPremium, user.Reputation, user.WarnCount, user.IsBanned, user.IsAdmin, user.CreatedAt, user.UpdatedAt)
 		if err != nil {
 			return nil, false, err
 		}
@@ -357,12 +393,25 @@ func (d *DB) GetOrCreateUser(userID int64, username, firstName, lastName string,
 	return &user, false, nil
 }
 
+// UpdateUserMetadata updates the user's client app language code and Telegram Premium status.
+func (d *DB) UpdateUserMetadata(userID int64, lang string, isPremium bool) error {
+	now := time.Now()
+	_, err := d.Exec(`
+		UPDATE users 
+		SET language_code = CASE WHEN ? != '' THEN ? ELSE language_code END,
+		    is_premium = CASE WHEN ? = 1 THEN 1 ELSE is_premium END,
+		    updated_at = ?
+		WHERE user_id = ?
+	`, lang, lang, isPremium, now, userID)
+	return err
+}
+
 func (d *DB) GetUserByID(userID int64) (*User, error) {
 	var user User
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
 		FROM users WHERE user_id = ?
-	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
+	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.LanguageCode, &user.IsPremium, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -379,9 +428,9 @@ func (d *DB) GetUserByUsername(username string) (*User, error) {
 
 	var user User
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
 		FROM users WHERE LOWER(TRIM(username, '@ ')) = LOWER(?)
-	`, username).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
+	`, username).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.LanguageCode, &user.IsPremium, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +442,7 @@ func (d *DB) GetAllUsers(limit int) ([]User, error) {
 		limit = 100
 	}
 	rows, err := d.Query(`
-		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
 		FROM users
 		ORDER BY reputation DESC, created_at DESC
 		LIMIT ?
@@ -406,7 +455,7 @@ func (d *DB) GetAllUsers(limit int) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -823,15 +872,22 @@ func (d *DB) SaveUserProfile(p *UserProfile) error {
 
 	_, err := d.Exec(`
 		INSERT INTO user_profiles (
-			user_id, username, first_name, last_name, bio,
+			user_id, username, first_name, last_name, language_code, is_premium, bio,
+			has_private_forwards, personal_chat_title, personal_chat_username, business_intro,
 			photo_file_id, photo_file_unique_id, photo_small_file_id, photo_small_file_unique_id,
 			photo_count, has_photo, not_found, raw_json, fetched_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id) DO UPDATE SET
 			username = excluded.username,
 			first_name = excluded.first_name,
 			last_name = excluded.last_name,
+			language_code = CASE WHEN excluded.language_code != '' THEN excluded.language_code ELSE user_profiles.language_code END,
+			is_premium = CASE WHEN excluded.is_premium = 1 THEN 1 ELSE user_profiles.is_premium END,
 			bio = excluded.bio,
+			has_private_forwards = excluded.has_private_forwards,
+			personal_chat_title = excluded.personal_chat_title,
+			personal_chat_username = excluded.personal_chat_username,
+			business_intro = excluded.business_intro,
 			photo_file_id = excluded.photo_file_id,
 			photo_file_unique_id = excluded.photo_file_unique_id,
 			photo_small_file_id = excluded.photo_small_file_id,
@@ -842,7 +898,8 @@ func (d *DB) SaveUserProfile(p *UserProfile) error {
 			raw_json = excluded.raw_json,
 			fetched_at = excluded.fetched_at,
 			updated_at = excluded.updated_at
-	`, p.UserID, p.Username, p.FirstName, p.LastName, p.Bio,
+	`, p.UserID, p.Username, p.FirstName, p.LastName, p.LanguageCode, p.IsPremium, p.Bio,
+		p.HasPrivateForwards, p.PersonalChatTitle, p.PersonalChatUsername, p.BusinessIntro,
 		p.PhotoFileID, p.PhotoFileUniqueID, p.PhotoSmallFileID, p.PhotoSmallFileUniqueID,
 		p.PhotoCount, p.HasPhoto, p.NotFound, p.RawJSON, p.FetchedAt, p.UpdatedAt)
 	return err
@@ -851,12 +908,14 @@ func (d *DB) SaveUserProfile(p *UserProfile) error {
 func (d *DB) GetUserProfile(userID int64) (*UserProfile, error) {
 	var p UserProfile
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, bio,
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, bio,
+		       has_private_forwards, personal_chat_title, personal_chat_username, business_intro,
 		       photo_file_id, photo_file_unique_id, photo_small_file_id, photo_small_file_unique_id,
 		       photo_count, has_photo, not_found, raw_json, fetched_at, updated_at
 		FROM user_profiles WHERE user_id = ?
 	`, userID).Scan(
-		&p.UserID, &p.Username, &p.FirstName, &p.LastName, &p.Bio,
+		&p.UserID, &p.Username, &p.FirstName, &p.LastName, &p.LanguageCode, &p.IsPremium, &p.Bio,
+		&p.HasPrivateForwards, &p.PersonalChatTitle, &p.PersonalChatUsername, &p.BusinessIntro,
 		&p.PhotoFileID, &p.PhotoFileUniqueID, &p.PhotoSmallFileID, &p.PhotoSmallFileUniqueID,
 		&p.PhotoCount, &p.HasPhoto, &p.NotFound, &p.RawJSON, &p.FetchedAt, &p.UpdatedAt,
 	)
@@ -874,13 +933,15 @@ func (d *DB) GetUserProfileByUsername(username string) (*UserProfile, error) {
 	}
 	var p UserProfile
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, bio,
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, bio,
+		       has_private_forwards, personal_chat_title, personal_chat_username, business_intro,
 		       photo_file_id, photo_file_unique_id, photo_small_file_id, photo_small_file_unique_id,
 		       photo_count, has_photo, not_found, raw_json, fetched_at, updated_at
 		FROM user_profiles WHERE LOWER(username) = LOWER(?)
 		ORDER BY updated_at DESC LIMIT 1
 	`, username).Scan(
-		&p.UserID, &p.Username, &p.FirstName, &p.LastName, &p.Bio,
+		&p.UserID, &p.Username, &p.FirstName, &p.LastName, &p.LanguageCode, &p.IsPremium, &p.Bio,
+		&p.HasPrivateForwards, &p.PersonalChatTitle, &p.PersonalChatUsername, &p.BusinessIntro,
 		&p.PhotoFileID, &p.PhotoFileUniqueID, &p.PhotoSmallFileID, &p.PhotoSmallFileUniqueID,
 		&p.PhotoCount, &p.HasPhoto, &p.NotFound, &p.RawJSON, &p.FetchedAt, &p.UpdatedAt,
 	)
@@ -1055,11 +1116,11 @@ func (d *DB) GetUserFullDump(identifier string, superAdminID int64, extraKeyword
 
 	var isSpamMatch bool
 	var matchedKws []string
-	if profile != nil && strings.TrimSpace(profile.Bio) != "" {
+	if profile != nil {
 		dbSnippets, _ := d.GetSpamSnippetStrings()
 		allKws := append([]string{}, extraKeywords...)
 		allKws = append(allKws, dbSnippets...)
-		isSpamMatch, matchedKws = MatchSpamBioAll(profile.Bio, allKws...)
+		isSpamMatch, matchedKws = MatchSpamBioProfile(profile, allKws...)
 	}
 
 	isSuperAdmin := (superAdminID != 0 && targetID == superAdminID)
@@ -1075,6 +1136,31 @@ func (d *DB) GetUserFullDump(identifier string, superAdminID int64, extraKeyword
 		MatchedBioKws:  matchedKws,
 		IsSuperAdmin:   isSuperAdmin,
 	}, nil
+}
+
+// MatchSpamBioProfile checks all text fields of a user profile (bio, personal channel title/username, business intro) for spam keywords.
+func MatchSpamBioProfile(p *UserProfile, additionalKeywords ...string) (bool, []string) {
+	if p == nil {
+		return false, nil
+	}
+	var texts []string
+	if strings.TrimSpace(p.Bio) != "" {
+		texts = append(texts, p.Bio)
+	}
+	if strings.TrimSpace(p.PersonalChatTitle) != "" {
+		texts = append(texts, p.PersonalChatTitle)
+	}
+	if strings.TrimSpace(p.PersonalChatUsername) != "" {
+		texts = append(texts, p.PersonalChatUsername)
+	}
+	if strings.TrimSpace(p.BusinessIntro) != "" {
+		texts = append(texts, p.BusinessIntro)
+	}
+	if len(texts) == 0 {
+		return false, nil
+	}
+	combined := strings.Join(texts, " | ")
+	return MatchSpamBioAll(combined, additionalKeywords...)
 }
 
 // FormatUserDump formats a UserFullDump into a detailed Markdown report.
@@ -1107,6 +1193,15 @@ func FormatUserDump(dump *UserFullDump) string {
 		status = "🚫 Banned"
 	}
 
+	langStr := "-"
+	if u.LanguageCode != "" {
+		langStr = fmt.Sprintf("`%s`", u.LanguageCode)
+	}
+	premiumStr := "❌ No"
+	if u.IsPremium {
+		premiumStr = "⭐ Yes (Telegram Premium)"
+	}
+
 	sb.WriteString(fmt.Sprintf("# 👤 Telegram User Dossier: %s (ID: `%d`)\n\n", handleStr, u.UserID))
 
 	sb.WriteString("## 📌 Account Overview\n")
@@ -1115,6 +1210,8 @@ func FormatUserDump(dump *UserFullDump) string {
 	sb.WriteString(fmt.Sprintf("- **Display Name**: %s\n", fullName))
 	sb.WriteString(fmt.Sprintf("- **Reputation**: `%d`\n", u.Reputation))
 	sb.WriteString(fmt.Sprintf("- **Warnings**: `%d`\n", u.WarnCount))
+	sb.WriteString(fmt.Sprintf("- **Language Code**: %s\n", langStr))
+	sb.WriteString(fmt.Sprintf("- **Telegram Premium**: %s\n", premiumStr))
 	sb.WriteString(fmt.Sprintf("- **Role**: %s\n", role))
 	sb.WriteString(fmt.Sprintf("- **Status**: %s\n", status))
 	sb.WriteString(fmt.Sprintf("- **First Seen (Created At)**: %s\n", u.CreatedAt.Format("2006-01-02 15:04:05 MST")))
@@ -1140,21 +1237,49 @@ func FormatUserDump(dump *UserFullDump) string {
 		if p.PhotoSmallFileID != "" {
 			sb.WriteString(fmt.Sprintf("- **Photo File ID (Small)**: `%s`\n", p.PhotoSmallFileID))
 		}
+		if p.HasPrivateForwards {
+			sb.WriteString("- **Private Forwards**: 🔒 Restricted by user\n")
+		}
+		if p.PersonalChatTitle != "" || p.PersonalChatUsername != "" {
+			chatTitle := p.PersonalChatTitle
+			if chatTitle == "" {
+				chatTitle = "Personal Channel"
+			}
+			chatHandle := ""
+			if p.PersonalChatUsername != "" {
+				chatHandle = fmt.Sprintf(" (@%s)", p.PersonalChatUsername)
+			}
+			sb.WriteString(fmt.Sprintf("- **Personal Channel**: `%s`%s\n", chatTitle, chatHandle))
+		}
+		if p.BusinessIntro != "" {
+			sb.WriteString(fmt.Sprintf("- **Business Intro**: `%s`\n", escapeMarkdownCell(p.BusinessIntro)))
+		}
 		sb.WriteString(fmt.Sprintf("- **Last Fetched**: %s\n", p.FetchedAt.Format("2006-01-02 15:04:05 MST")))
 
 		spamFilterStr := "🟢 Clean"
 		if dump.IsSpamBioMatch || len(dump.MatchedBioKws) > 0 {
 			spamFilterStr = fmt.Sprintf("🚨 Spam Match [Matched: `%s`]", strings.Join(dump.MatchedBioKws, ", "))
 		}
-		sb.WriteString(fmt.Sprintf("- **Spam Bio Filter**: %s\n", spamFilterStr))
+		sb.WriteString(fmt.Sprintf("- **Spam Profile Filter**: %s\n", spamFilterStr))
 
-		bioText := p.Bio
-		if strings.TrimSpace(bioText) == "" {
-			bioText = "*(None)*"
+		if strings.TrimSpace(p.Bio) != "" {
+			sb.WriteString("- **Bio**:\n```\n")
+			sb.WriteString(p.Bio)
+			sb.WriteString("\n```\n\n")
 		}
-		sb.WriteString("- **Bio**:\n```\n")
-		sb.WriteString(bioText)
-		sb.WriteString("\n```\n\n")
+
+		if strings.TrimSpace(p.RawJSON) != "" {
+			var prettyJSON bytes.Buffer
+			if err := json.Indent(&prettyJSON, []byte(p.RawJSON), "", "  "); err == nil {
+				sb.WriteString("- **Raw Telegram Profile JSON**:\n```json\n")
+				sb.WriteString(prettyJSON.String())
+				sb.WriteString("\n```\n\n")
+			} else {
+				sb.WriteString("- **Raw Telegram Profile JSON**:\n```json\n")
+				sb.WriteString(p.RawJSON)
+				sb.WriteString("\n```\n\n")
+			}
+		}
 	}
 
 	// Messages
@@ -1229,7 +1354,7 @@ func FormatUserDump(dump *UserFullDump) string {
 
 func (d *DB) GetUsersWithoutProfile(limit int) ([]User, error) {
 	query := `
-		SELECT u.user_id, u.username, u.first_name, u.last_name, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
+		SELECT u.user_id, u.username, u.first_name, u.last_name, u.language_code, u.is_premium, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
 		FROM users u
 		LEFT JOIN user_profiles p ON u.user_id = p.user_id
 		WHERE p.user_id IS NULL
@@ -1248,7 +1373,7 @@ func (d *DB) GetUsersWithoutProfile(limit int) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -1258,7 +1383,8 @@ func (d *DB) GetUsersWithoutProfile(limit int) ([]User, error) {
 
 func (d *DB) GetAllUserProfiles(limit int) ([]UserProfile, error) {
 	query := `
-		SELECT user_id, username, first_name, last_name, bio,
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, bio,
+		       has_private_forwards, personal_chat_title, personal_chat_username, business_intro,
 		       photo_file_id, photo_file_unique_id, photo_small_file_id, photo_small_file_unique_id,
 		       photo_count, has_photo, not_found, raw_json, fetched_at, updated_at
 		FROM user_profiles
@@ -1278,7 +1404,8 @@ func (d *DB) GetAllUserProfiles(limit int) ([]UserProfile, error) {
 	for rows.Next() {
 		var p UserProfile
 		if err := rows.Scan(
-			&p.UserID, &p.Username, &p.FirstName, &p.LastName, &p.Bio,
+			&p.UserID, &p.Username, &p.FirstName, &p.LastName, &p.LanguageCode, &p.IsPremium, &p.Bio,
+			&p.HasPrivateForwards, &p.PersonalChatTitle, &p.PersonalChatUsername, &p.BusinessIntro,
 			&p.PhotoFileID, &p.PhotoFileUniqueID, &p.PhotoSmallFileID, &p.PhotoSmallFileUniqueID,
 			&p.PhotoCount, &p.HasPhoto, &p.NotFound, &p.RawJSON, &p.FetchedAt, &p.UpdatedAt,
 		); err != nil {
@@ -1991,69 +2118,97 @@ func MatchSpamBioAll(bio string, additionalKeywords ...string) (bool, []string) 
 	return MatchSpamBio(bio, allKws...)
 }
 
-// SpamBioUserItem holds metadata for an unbanned user with a matching spam bio.
-type SpamBioUserItem struct {
-	UserID          int64     `json:"user_id"`
-	Username        string    `json:"username"`
-	FirstName       string    `json:"first_name"`
-	LastName        string    `json:"last_name"`
-	Reputation      int       `json:"reputation"`
-	WarnCount       int       `json:"warn_count"`
-	MessageCount    int       `json:"message_count"`
-	Bio             string    `json:"bio"`
-	HasPhoto        bool      `json:"has_photo"`
-	PhotoCount      int       `json:"photo_count"`
-	CreatedAt       time.Time `json:"created_at"`
-	FetchedAt       time.Time `json:"fetched_at"`
-	MatchedKeywords []string  `json:"matched_keywords"`
-	IsSpamMatch     bool      `json:"is_spam_match"`
+// UnknownUserItem holds metadata for an unbanned new/unknown user with or without a bio.
+type UnknownUserItem struct {
+	UserID               int64     `json:"user_id"`
+	Username             string    `json:"username"`
+	FirstName            string    `json:"first_name"`
+	LastName             string    `json:"last_name"`
+	LanguageCode         string    `json:"language_code,omitempty"`
+	IsPremium            bool      `json:"is_premium,omitempty"`
+	Reputation           int       `json:"reputation"`
+	WarnCount            int       `json:"warn_count"`
+	MessageCount         int       `json:"message_count"`
+	Bio                  string    `json:"bio"`
+	PersonalChatTitle    string    `json:"personal_chat_title,omitempty"`
+	PersonalChatUsername string    `json:"personal_chat_username,omitempty"`
+	BusinessIntro        string    `json:"business_intro,omitempty"`
+	HasPhoto             bool      `json:"has_photo"`
+	PhotoCount           int       `json:"photo_count"`
+	CreatedAt            time.Time `json:"created_at"`
+	FetchedAt            time.Time `json:"fetched_at"`
+	MatchedKeywords      []string  `json:"matched_keywords"`
+	IsSpamMatch          bool      `json:"is_spam_match"`
 }
 
-// SpamBioOptions configures filtering for GetUnbannedSpamBioUsers.
-type SpamBioOptions struct {
+// SpamBioUserItem is an alias for UnknownUserItem for backwards compatibility.
+type SpamBioUserItem = UnknownUserItem
+
+// DefaultUnknownUserMaxReputation defines the default maximum reputation score (<= 20) for unknown/new users.
+const DefaultUnknownUserMaxReputation = 20
+
+// UnknownUserOptions configures filtering for GetUnbannedUnknownUsers.
+type UnknownUserOptions struct {
 	Keyword            string   `json:"keyword"`
 	ConfiguredKeywords []string `json:"configured_keywords"`
 	MaxPosts           int      `json:"max_posts"`
+	MaxReputation      int      `json:"max_reputation"`
 	Limit              int      `json:"limit"`
 	DatabaseName       string   `json:"database_name"`
 }
 
-// GetUnbannedSpamBioUsers retrieves unbanned users whose profile bio matches spam keywords or custom filters.
-func (d *DB) GetUnbannedSpamBioUsers(opts SpamBioOptions) ([]SpamBioUserItem, error) {
+// SpamBioOptions is an alias for UnknownUserOptions for backwards compatibility.
+type SpamBioOptions = UnknownUserOptions
+
+// GetUnbannedUnknownUsers retrieves unbanned new users (with few or no messages, with or without bios) matching filters.
+func (d *DB) GetUnbannedUnknownUsers(opts UnknownUserOptions) ([]UnknownUserItem, error) {
 	query := `
-		SELECT u.user_id, u.username, u.first_name, u.last_name, u.reputation, u.warn_count, u.is_admin, u.created_at,
-		       p.bio, p.has_photo, p.photo_count, p.fetched_at,
+		SELECT u.user_id, u.username, u.first_name, u.last_name, u.language_code, u.is_premium,
+		       u.reputation, u.warn_count, u.is_admin, u.created_at,
+		       COALESCE(p.bio, ''), COALESCE(p.has_photo, 0), COALESCE(p.photo_count, 0),
+		       COALESCE(p.fetched_at, u.created_at),
+		       COALESCE(p.personal_chat_title, ''), COALESCE(p.personal_chat_username, ''),
+		       COALESCE(p.business_intro, ''),
 		       (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.user_id) AS msg_count
 		FROM users u
-		JOIN user_profiles p ON u.user_id = p.user_id
+		LEFT JOIN user_profiles p ON u.user_id = p.user_id
 		WHERE u.is_banned = 0
-		  AND p.bio != ''
-		  AND p.not_found = 0
 		ORDER BY u.created_at DESC
 	`
 
 	rows, err := d.Query(query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query users with bios: %w", err)
+		return nil, fmt.Errorf("failed to query unknown users: %w", err)
 	}
 	defer rows.Close()
 
-	var results []SpamBioUserItem
+	var results []UnknownUserItem
 	for rows.Next() {
-		var item SpamBioUserItem
+		var item UnknownUserItem
 		var rawCreatedAt, rawFetchedAt any
 		var isAdmin bool
 
 		if err := rows.Scan(
 			&item.UserID, &item.Username, &item.FirstName, &item.LastName,
+			&item.LanguageCode, &item.IsPremium,
 			&item.Reputation, &item.WarnCount, &isAdmin, &rawCreatedAt,
 			&item.Bio, &item.HasPhoto, &item.PhotoCount, &rawFetchedAt,
+			&item.PersonalChatTitle, &item.PersonalChatUsername, &item.BusinessIntro,
 			&item.MessageCount,
 		); err != nil {
-			return nil, fmt.Errorf("failed to scan user spam bio item: %w", err)
+			return nil, fmt.Errorf("failed to scan unknown user item: %w", err)
 		}
 
 		if isAdmin {
+			continue
+		}
+
+		// Filter by reputation (exclude users with high reputation > 20 by default)
+		maxRep := opts.MaxReputation
+		if maxRep == 0 {
+			maxRep = DefaultUnknownUserMaxReputation
+		}
+		if maxRep > 0 && item.Reputation > maxRep {
 			continue
 		}
 
@@ -2065,20 +2220,54 @@ func (d *DB) GetUnbannedSpamBioUsers(opts SpamBioOptions) ([]SpamBioUserItem, er
 		item.CreatedAt = parseTime(rawCreatedAt)
 		item.FetchedAt = parseTime(rawFetchedAt)
 
-		// Check keyword matches: empty keyword matches everything by default
+		// Profile context for spam keyword evaluation
+		prof := &UserProfile{
+			UserID:               item.UserID,
+			Username:             item.Username,
+			FirstName:            item.FirstName,
+			LastName:             item.LastName,
+			Bio:                  item.Bio,
+			PersonalChatTitle:    item.PersonalChatTitle,
+			PersonalChatUsername: item.PersonalChatUsername,
+			BusinessIntro:        item.BusinessIntro,
+		}
+
 		kw := strings.TrimSpace(opts.Keyword)
 		if kw != "" {
-			if !strings.Contains(strings.ToLower(item.Bio), strings.ToLower(kw)) {
+			kwLower := strings.ToLower(kw)
+			var targetTexts []string
+			if item.Bio != "" {
+				targetTexts = append(targetTexts, item.Bio)
+			}
+			if item.PersonalChatTitle != "" {
+				targetTexts = append(targetTexts, item.PersonalChatTitle)
+			}
+			if item.PersonalChatUsername != "" {
+				targetTexts = append(targetTexts, item.PersonalChatUsername)
+			}
+			if item.BusinessIntro != "" {
+				targetTexts = append(targetTexts, item.BusinessIntro)
+			}
+			if item.Username != "" {
+				targetTexts = append(targetTexts, item.Username)
+			}
+			name := strings.TrimSpace(item.FirstName + " " + item.LastName)
+			if name != "" {
+				targetTexts = append(targetTexts, name)
+			}
+
+			combined := strings.ToLower(strings.Join(targetTexts, " | "))
+			if !strings.Contains(combined, kwLower) {
 				continue
 			}
 			item.MatchedKeywords = []string{kw}
 		} else {
-			// Match everything, and check for any recognized spam keywords from hardcoded base + DB table + config
+			// Check against spam keywords
 			dbSnippets, _ := d.GetSpamSnippetStrings()
 			allKws := append([]string{}, SpamBioKeywords...)
 			allKws = append(allKws, dbSnippets...)
 			allKws = append(allKws, opts.ConfiguredKeywords...)
-			_, matched := MatchSpamBio(item.Bio, allKws...)
+			_, matched := MatchSpamBioProfile(prof, allKws...)
 			item.MatchedKeywords = matched
 		}
 		item.IsSpamMatch = len(item.MatchedKeywords) > 0
@@ -2092,8 +2281,13 @@ func (d *DB) GetUnbannedSpamBioUsers(opts SpamBioOptions) ([]SpamBioUserItem, er
 	return results, nil
 }
 
-// GenerateSpamBioMarkdown formats the list of unbanned users with spam bios into GitHub Flavored Markdown.
-func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) string {
+// GetUnbannedSpamBioUsers is an alias for GetUnbannedUnknownUsers for backwards compatibility.
+func (d *DB) GetUnbannedSpamBioUsers(opts SpamBioOptions) ([]SpamBioUserItem, error) {
+	return d.GetUnbannedUnknownUsers(opts)
+}
+
+// GenerateUnknownUsersMarkdown formats the list of unbanned unknown users into GitHub Flavored Markdown.
+func GenerateUnknownUsersMarkdown(items []UnknownUserItem, opts UnknownUserOptions) string {
 	var sb strings.Builder
 
 	dbName := opts.DatabaseName
@@ -2101,25 +2295,32 @@ func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) strin
 		dbName = "SQLite Database"
 	}
 
-	sb.WriteString("# 📋 Unbanned New Users with Profile Bios\n\n")
+	sb.WriteString("# 📋 Unbanned Unknown & New Users\n\n")
 	sb.WriteString(fmt.Sprintf("- **Generated At**: %s\n", time.Now().Format("2006-01-02 15:04:05 MST")))
 	sb.WriteString(fmt.Sprintf("- **Database**: `%s`\n", dbName))
 	if opts.Keyword != "" {
 		sb.WriteString(fmt.Sprintf("- **Keyword Filter**: `%s`\n", opts.Keyword))
 	} else {
-		sb.WriteString("- **Keyword Filter**: *(none - matched all bios)*\n")
+		sb.WriteString("- **Keyword Filter**: *(none - matched all unknown/new users)*\n")
 	}
 	if opts.MaxPosts > 0 {
 		sb.WriteString(fmt.Sprintf("- **Max Logged Posts**: `%d`\n", opts.MaxPosts))
 	}
+	maxRep := opts.MaxReputation
+	if maxRep == 0 {
+		maxRep = DefaultUnknownUserMaxReputation
+	}
+	if maxRep > 0 {
+		sb.WriteString(fmt.Sprintf("- **Max Reputation**: `%d`\n", maxRep))
+	}
 	sb.WriteString(fmt.Sprintf("- **Total Matched Users**: %d\n\n", len(items)))
 
 	if len(items) == 0 {
-		sb.WriteString("*No unbanned users with matching profile bios found.*\n")
+		sb.WriteString("*No unbanned unknown users matching the criteria found.*\n")
 		return sb.String()
 	}
 
-	sb.WriteString("| # | User ID | Username | Display Name | Rep | Posts | Spam Match | Matched Keywords | Bio Snippet | Action |\n")
+	sb.WriteString("| # | User ID | Username | Display Name | Rep | Posts | Spam Match | Matched Keywords | Bio / Profile Snippet | Action |\n")
 	sb.WriteString("|---|---|---|---|---|---|---|---|---|---|\n")
 
 	for i, u := range items {
@@ -2139,7 +2340,17 @@ func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) strin
 		if u.IsSpamMatch || len(u.MatchedKeywords) > 0 {
 			spamMatchStr = "⚠️ YES"
 		}
-		bioSnippet := escapeMarkdownCell(truncateString(u.Bio, 60))
+
+		profileSnippet := u.Bio
+		if profileSnippet == "" && u.PersonalChatTitle != "" {
+			profileSnippet = "[Chan] " + u.PersonalChatTitle
+		} else if profileSnippet == "" && u.BusinessIntro != "" {
+			profileSnippet = "[Biz] " + u.BusinessIntro
+		}
+		if profileSnippet == "" {
+			profileSnippet = "-"
+		}
+		bioSnippet := escapeMarkdownCell(truncateString(profileSnippet, 60))
 
 		sb.WriteString(fmt.Sprintf(
 			"| %d | `%d` | %s | %s | %d | %d | %s | `%s` | %s | `/ban %d` |\n",
@@ -2149,6 +2360,11 @@ func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) strin
 	}
 
 	return sb.String()
+}
+
+// GenerateSpamBioMarkdown is an alias for GenerateUnknownUsersMarkdown for backwards compatibility.
+func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) string {
+	return GenerateUnknownUsersMarkdown(items, opts)
 }
 
 func truncateString(s string, maxLen int) string {

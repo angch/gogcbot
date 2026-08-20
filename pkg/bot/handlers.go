@@ -229,26 +229,58 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			}
 		}
 
+		if msg.From.LanguageCode != "" {
+			_ = b.db.UpdateUserMetadata(user.UserID, msg.From.LanguageCode, false)
+			user.LanguageCode = msg.From.LanguageCode
+		}
+
 		userBio := ""
+		hasPrivateForwards := false
+		personalChatTitle := ""
+		personalChatUsername := ""
+		businessIntro := ""
+		hasPhoto := false
+		photoCount := 0
+
 		if prof, err := b.db.GetUserProfile(user.UserID); err == nil && prof != nil {
 			userBio = prof.Bio
+			hasPrivateForwards = prof.HasPrivateForwards
+			personalChatTitle = prof.PersonalChatTitle
+			personalChatUsername = prof.PersonalChatUsername
+			businessIntro = prof.BusinessIntro
+			hasPhoto = prof.HasPhoto
+			photoCount = prof.PhotoCount
 		} else if isNewUser || userMsgCount <= 1 {
 			if prof, err := b.FetchUserProfile(user.UserID); err == nil && prof != nil {
 				userBio = prof.Bio
+				hasPrivateForwards = prof.HasPrivateForwards
+				personalChatTitle = prof.PersonalChatTitle
+				personalChatUsername = prof.PersonalChatUsername
+				businessIntro = prof.BusinessIntro
+				hasPhoto = prof.HasPhoto
+				photoCount = prof.PhotoCount
 			}
 		}
 
 		tCtx := &detector.TriggerContext{
-			Message:           dbMsg,
-			RawMessage:        msg,
-			Text:              text,
-			User:              user,
-			UserBio:           userBio,
-			IsNewUser:         isNewUser,
-			UserMessageCount:  userMsgCount,
-			ChatID:            chat.ID,
-			GroupTitle:        chat.Title,
-			HasVerifiedNotBot: hasVerified,
+			Message:              dbMsg,
+			RawMessage:           msg,
+			Text:                 text,
+			User:                 user,
+			UserBio:              userBio,
+			LanguageCode:         msg.From.LanguageCode,
+			IsPremium:            user.IsPremium,
+			HasPrivateForwards:   hasPrivateForwards,
+			PersonalChatTitle:    personalChatTitle,
+			PersonalChatUsername: personalChatUsername,
+			BusinessIntro:        businessIntro,
+			HasPhoto:             hasPhoto,
+			PhotoCount:           photoCount,
+			IsNewUser:            isNewUser,
+			UserMessageCount:     userMsgCount,
+			ChatID:               chat.ID,
+			GroupTitle:           chat.Title,
+			HasVerifiedNotBot:    hasVerified,
 		}
 
 		if b.detector != nil {
@@ -523,21 +555,25 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 		return
 	}
 
+	if tgUser.LanguageCode != "" {
+		_ = b.db.UpdateUserMetadata(user.UserID, tgUser.LanguageCode, false)
+		user.LanguageCode = tgUser.LanguageCode
+	}
+
 	// 1. Grab user profile and bio from Telegram API
 	profile, err := b.FetchUserProfile(user.UserID)
 	if err != nil {
 		log.Printf("[User Joined] Could not fetch profile for user %d (@%s): %v", user.UserID, user.Username, err)
 	}
 
-	bio := ""
-	if profile != nil {
-		bio = profile.Bio
-	} else if cachedProf, err := b.db.GetUserProfile(user.UserID); err == nil && cachedProf != nil {
-		bio = cachedProf.Bio
+	if profile == nil {
+		if cachedProf, err := b.db.GetUserProfile(user.UserID); err == nil && cachedProf != nil {
+			profile = cachedProf
+		}
 	}
 
-	if strings.TrimSpace(bio) == "" {
-		// User has no bio, nothing to spam-match
+	if profile == nil {
+		// User has no profile cached, nothing to spam-match
 		return
 	}
 
@@ -556,25 +592,26 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 		return
 	}
 
-	// 3. Match bio against spam keywords
+	// 3. Match bio, personal channel, business intro against spam keywords
 	var customKeywords []string
 	customKeywords = append(customKeywords, b.cfg.AutoFlag.BlockedKeywords...)
 	customKeywords = append(customKeywords, b.cfg.Detector.NewUserSpamBio.CustomKeywords...)
 	dbSnippets, _ := b.db.GetSpamSnippetStrings()
 	customKeywords = append(customKeywords, dbSnippets...)
 
-	isSpam, matchedKeywords := db.MatchSpamBioAll(bio, customKeywords...)
+	isSpam, matchedKeywords := db.MatchSpamBioProfile(profile, customKeywords...)
 	if !isSpam && len(matchedKeywords) == 0 {
 		return
 	}
 
-	// 4. User matched spam bio filter! Kick/ban them like CJK users.
+	// 4. User matched spam profile filter! Kick/ban them like CJK users.
 	matchedStr := strings.Join(matchedKeywords, ", ")
 	if matchedStr == "" {
 		matchedStr = "spam keyword match"
 	}
-	reason := fmt.Sprintf("Detection trigger (new_user_spam_bio): Joining user profile bio matched spam keywords [%s]", matchedStr)
-	log.Printf("[Bot Trigger] Rule 'new_user_spam_bio' fired for user %d in chat %d: %s (Bio: %q)", user.UserID, chatID, reason, bio)
+	reason := fmt.Sprintf("Detection trigger (new_user_spam_bio): Joining user profile signals matched spam keywords [%s]", matchedStr)
+	log.Printf("[Bot Trigger] Rule 'new_user_spam_bio' fired for user %d in chat %d: %s (Bio: %q, Channel: %q, Intro: %q)",
+		user.UserID, chatID, reason, profile.Bio, profile.PersonalChatTitle, profile.BusinessIntro)
 
 	// Delete join service message if present
 	if joinMsg != nil {
@@ -595,16 +632,24 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 		user.Reputation = newRep
 	}
 
-	// Construct dummy message for alert snippet showing user's bio
+	// Construct dummy message for alert snippet showing user's bio/profile info
 	msgID := 0
 	if joinMsg != nil {
 		msgID = joinMsg.MessageID
 	}
+	snippetText := fmt.Sprintf("[Bio]: %s", profile.Bio)
+	if profile.PersonalChatTitle != "" || profile.PersonalChatUsername != "" {
+		snippetText += fmt.Sprintf("\n[Personal Channel]: %s (@%s)", profile.PersonalChatTitle, profile.PersonalChatUsername)
+	}
+	if profile.BusinessIntro != "" {
+		snippetText += fmt.Sprintf("\n[Business Intro]: %s", profile.BusinessIntro)
+	}
+
 	alertMsg := &db.Message{
 		ChatID:    chatID,
 		MessageID: msgID,
 		UserID:    user.UserID,
-		Text:      fmt.Sprintf("[Bio]: %s", bio),
+		Text:      snippetText,
 		CreatedAt: time.Now(),
 	}
 

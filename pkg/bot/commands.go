@@ -79,8 +79,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 		b.cmdDemote(msg, user, args, isSuperAdmin)
 	case "listusers", "users":
 		b.cmdListUsers(msg, isAuthorized)
-	case "listspambios", "spambios", "listspambiousers", "spambiousers", "spamusers":
-		b.cmdListSpamBios(msg, args, isAuthorized)
+	case "listunknownusers", "unknownusers", "listspambios", "spambios", "listspambiousers", "spambiousers", "spamusers":
+		b.cmdListUnknownUsers(msg, args, isAuthorized)
 	case "cleanup":
 		b.cmdCleanup(msg, isAuthorized)
 	case "getdb", "backup", "db", "dumpdb", "downloaddb":
@@ -762,7 +762,7 @@ func (b *Bot) cmdListUsers(msg *tgbotapi.Message, isAuthorized bool) {
 	b.replyText(msg, sb.String())
 }
 
-func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized bool) {
+func (b *Bot) cmdListUnknownUsers(msg *tgbotapi.Message, args string, isAuthorized bool) {
 	if !isAuthorized {
 		b.replyText(msg, "❌ Permission denied.")
 		return
@@ -785,16 +785,17 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 		limit = 100
 	}
 
-	opts := db.SpamBioOptions{
+	opts := db.UnknownUserOptions{
 		Keyword:            keyword,
 		ConfiguredKeywords: b.cfg.AutoFlag.BlockedKeywords,
 		MaxPosts:           5,
+		MaxReputation:      20,
 		Limit:              limit,
 	}
 
-	items, err := b.db.GetUnbannedSpamBioUsers(opts)
+	items, err := b.db.GetUnbannedUnknownUsers(opts)
 	if err != nil {
-		b.replyText(msg, fmt.Sprintf("❌ Error querying users with spam bios: %v", err))
+		b.replyText(msg, fmt.Sprintf("❌ Error querying unknown users: %v", err))
 		return
 	}
 
@@ -803,12 +804,12 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 		if keyword != "" {
 			filterMsg = fmt.Sprintf(" matching %q", keyword)
 		}
-		b.replyText(msg, fmt.Sprintf("✅ No unbanned new users with suspicious spam bios found%s.", filterMsg))
+		b.replyText(msg, fmt.Sprintf("✅ No unbanned unknown new users found%s.", filterMsg))
 		return
 	}
 
 	if shouldBan {
-		var matchingUsers []db.SpamBioUserItem
+		var matchingUsers []db.UnknownUserItem
 		for _, u := range items {
 			if u.IsSpamMatch || len(u.MatchedKeywords) > 0 {
 				matchingUsers = append(matchingUsers, u)
@@ -877,22 +878,27 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 		return
 	}
 
-	output := formatSpamBioTable(items, keyword)
+	output := formatUnknownUsersTable(items, keyword)
 	b.replyText(msg, output)
 }
 
-// formatSpamBioTable formats the slice of SpamBioUserItem into a compact monospace table for Telegram output.
-func formatSpamBioTable(items []db.SpamBioUserItem, keyword string) string {
+// cmdListSpamBios is a backwards-compatible alias for cmdListUnknownUsers.
+func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	b.cmdListUnknownUsers(msg, args, isAuthorized)
+}
+
+// formatUnknownUsersTable formats the slice of UnknownUserItem into a compact monospace table for Telegram output.
+func formatUnknownUsersTable(items []db.UnknownUserItem, keyword string) string {
 	var sb strings.Builder
 	filterHeader := ""
 	if keyword != "" {
 		filterHeader = fmt.Sprintf(" [Filter: `%s`]", escapeMarkdown(keyword))
 	}
-	sb.WriteString(fmt.Sprintf("🚨 **Unbanned Users with Spam Bios** (Found: %d)%s:\n\n", len(items), filterHeader))
+	sb.WriteString(fmt.Sprintf("🚨 **Unbanned Unknown / New Users** (Found: %d)%s:\n\n", len(items), filterHeader))
 
 	sb.WriteString("```\n")
-	sb.WriteString(" # | User ID    | User         | Match      | Bio Snippet\n")
-	sb.WriteString("---+------------+--------------+------------+------------------------------\n")
+	sb.WriteString(" # | User ID    | User         | Msgs | Match      | Bio / Profile Snippet\n")
+	sb.WriteString("---+------------+--------------+------+------------+------------------------------\n")
 
 	for i, u := range items {
 		idxStr := fmt.Sprintf("%2d", i+1)
@@ -908,6 +914,7 @@ func formatSpamBioTable(items []db.SpamBioUserItem, keyword string) string {
 			}
 		}
 		userStr := padRightVisual(truncateVisual(userDisplay, 12), 12)
+		msgsStr := fmt.Sprintf("%4d", u.MessageCount)
 
 		var matchDisplay string
 		if len(u.MatchedKeywords) > 0 {
@@ -919,24 +926,36 @@ func formatSpamBioTable(items []db.SpamBioUserItem, keyword string) string {
 		}
 		matchStr := padRightVisual(truncateVisual(matchDisplay, 10), 10)
 
-		// Sanitize bio: flatten newlines and replace backticks
-		cleanBio := strings.ReplaceAll(u.Bio, "\r\n", " ")
-		cleanBio = strings.ReplaceAll(cleanBio, "\n", " ")
-		cleanBio = strings.ReplaceAll(cleanBio, "\r", " ")
-		cleanBio = strings.ReplaceAll(cleanBio, "\t", " ")
-		cleanBio = strings.ReplaceAll(cleanBio, "`", "'")
-		cleanBio = strings.Join(strings.Fields(cleanBio), " ")
-		if cleanBio == "" {
-			cleanBio = "-"
+		// Sanitize bio / snippet: flatten newlines and replace backticks
+		profileText := u.Bio
+		if profileText == "" && u.PersonalChatTitle != "" {
+			profileText = "[Chan] " + u.PersonalChatTitle
+		} else if profileText == "" && u.BusinessIntro != "" {
+			profileText = "[Biz] " + u.BusinessIntro
 		}
-		bioSnippet := truncateVisual(cleanBio, 30)
 
-		sb.WriteString(fmt.Sprintf("%s | %s | %s | %s | %s\n", idxStr, idStr, userStr, matchStr, bioSnippet))
+		cleanSnippet := strings.ReplaceAll(profileText, "\r\n", " ")
+		cleanSnippet = strings.ReplaceAll(cleanSnippet, "\n", " ")
+		cleanSnippet = strings.ReplaceAll(cleanSnippet, "\r", " ")
+		cleanSnippet = strings.ReplaceAll(cleanSnippet, "\t", " ")
+		cleanSnippet = strings.ReplaceAll(cleanSnippet, "`", "'")
+		cleanSnippet = strings.Join(strings.Fields(cleanSnippet), " ")
+		if cleanSnippet == "" {
+			cleanSnippet = "-"
+		}
+		bioSnippet := truncateVisual(cleanSnippet, 30)
+
+		sb.WriteString(fmt.Sprintf("%s | %s | %s | %s | %s | %s\n", idxStr, idStr, userStr, msgsStr, matchStr, bioSnippet))
 	}
 	sb.WriteString("```\n\n")
-	sb.WriteString("💡 **Actions**: `/listspambios ban` to ban all matching • `/ban <id>` to ban individual user")
+	sb.WriteString("💡 **Actions**: `/listunknownusers ban` to ban all matching • `/ban <id>` to ban individual user")
 
 	return sb.String()
+}
+
+// formatSpamBioTable is an alias for formatUnknownUsersTable for backwards compatibility.
+func formatSpamBioTable(items []db.SpamBioUserItem, keyword string) string {
+	return formatUnknownUsersTable(items, keyword)
 }
 
 func runeVisualWidth(r rune) int {
@@ -1279,7 +1298,7 @@ func getHelpText(isSuperAdmin, isModGroup bool) string {
 		"• `/promote <user|@username>` - Promote user to Group Admin & set rep to 100\n" +
 		"• `/demote <user|@username>` - Remove admin status & reset rep (Super Admin only)\n" +
 		"• `/listusers` - List all known users, reputation scores & admin flags\n" +
-		"• `/listspambios [kw] [ban]` - List or batch-ban unbanned new users with suspicious or syndicate spam bios\n" +
+		"• `/listunknownusers [kw] [ban]` - List or batch-ban unbanned new users with few messages (with or without bios)\n" +
 		"• `/cleanup` - Manually run 7-day logs & 50-post-per-user retention cleanup\n" +
 		"• `/getdb` - Download a copy of the current SQLite3 database (Admin direct message only)\n" +
 		"• `/fetchprofile <user|@username>` - Fetch fresh Telegram profile (bio & picture) & cache in DB\n" +

@@ -26,12 +26,15 @@ func TestNewUserSpamBioTrigger_Evaluate(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		user          *db.User
-		userMsgCount  int
-		bio           string
-		wantTriggered bool
-		wantKeyword   string
+		name                 string
+		user                 *db.User
+		userMsgCount         int
+		bio                  string
+		personalChatTitle    string
+		personalChatUsername string
+		businessIntro        string
+		wantTriggered        bool
+		wantKeyword          string
 	}{
 		{
 			name: "New user with default spam keyword in bio (e.g. 沃尔玛)",
@@ -54,6 +57,31 @@ func TestNewUserSpamBioTrigger_Evaluate(t *testing.T) {
 			bio:           "Check this out: custom_scam_keyword here",
 			wantTriggered: true,
 			wantKeyword:   "custom_scam_keyword",
+		},
+		{
+			name: "New user with spam keyword in personal channel title",
+			user: &db.User{
+				UserID:     333111,
+				Reputation: 0,
+			},
+			userMsgCount:         0,
+			bio:                  "",
+			personalChatTitle:    "6折油卡代发专区",
+			personalChatUsername: "youkaspam",
+			wantTriggered:        true,
+			wantKeyword:          "油卡",
+		},
+		{
+			name: "New user with spam keyword in business intro",
+			user: &db.User{
+				UserID:     333222,
+				Reputation: 0,
+			},
+			userMsgCount:  0,
+			bio:           "",
+			businessIntro: "招兼职日结，每天200-500，加微信咨询",
+			wantTriggered: true,
+			wantKeyword:   "兼职",
 		},
 		{
 			name: "Clean bio user",
@@ -100,9 +128,12 @@ func TestNewUserSpamBioTrigger_Evaluate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := &TriggerContext{
-				User:             tc.user,
-				UserBio:          tc.bio,
-				UserMessageCount: tc.userMsgCount,
+				User:                 tc.user,
+				UserBio:              tc.bio,
+				PersonalChatTitle:    tc.personalChatTitle,
+				PersonalChatUsername: tc.personalChatUsername,
+				BusinessIntro:        tc.businessIntro,
+				UserMessageCount:     tc.userMsgCount,
 			}
 
 			res, err := trig.Evaluate(ctx)

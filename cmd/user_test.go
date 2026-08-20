@@ -39,6 +39,7 @@ func TestUserCmd(t *testing.T) {
 		FirstName:  "Spam",
 		LastName:   "Account",
 		Bio:        "联系 @xgshenqing888 6折油卡 沃尔玛 永辉",
+		RawJSON:    `{"id":555666,"username":"spambot","personal_chat":{"title":"6折卡"}}`,
 		HasPhoto:   true,
 		PhotoCount: 1,
 		FetchedAt:  time.Now(),
@@ -97,6 +98,9 @@ func TestUserCmd(t *testing.T) {
 		if !strings.Contains(out, "Reputation Audit Trail") {
 			t.Errorf("expected reputation logs in output, got: %s", out)
 		}
+		if !strings.Contains(out, "Raw Telegram Profile JSON") {
+			t.Errorf("expected Raw Telegram Profile JSON section in output, got: %s", out)
+		}
 	})
 
 	t.Run("Query user by numeric ID", func(t *testing.T) {
@@ -137,6 +141,9 @@ func TestUserCmd(t *testing.T) {
 		}
 		if !strings.Contains(out, `"is_spam_bio_match": true`) {
 			t.Errorf("expected JSON is_spam_bio_match field, got: %s", out)
+		}
+		if !strings.Contains(out, `"raw_json"`) {
+			t.Errorf("expected JSON raw_json field, got: %s", out)
 		}
 	})
 

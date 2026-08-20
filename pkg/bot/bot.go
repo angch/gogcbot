@@ -3,6 +3,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -244,6 +245,84 @@ func (b *Bot) GetChat(config tgbotapi.ChatInfoConfig) (tgbotapi.Chat, error) {
 	return chat, err
 }
 
+// TelegramChatFullInfo represents the Telegram Bot API 7.0+ ChatFullInfo response object.
+type TelegramChatFullInfo struct {
+	ID                 int64  `json:"id"`
+	Type               string `json:"type"`
+	Title              string `json:"title,omitempty"`
+	Username           string `json:"username,omitempty"`
+	FirstName          string `json:"first_name,omitempty"`
+	LastName           string `json:"last_name,omitempty"`
+	Bio                string `json:"bio,omitempty"`
+	Description        string `json:"description,omitempty"`
+	HasPrivateForwards bool   `json:"has_private_forwards,omitempty"`
+	PersonalChat       *struct {
+		ID       int64  `json:"id"`
+		Title    string `json:"title"`
+		Username string `json:"username"`
+		Type     string `json:"type"`
+	} `json:"personal_chat,omitempty"`
+	BusinessIntro *struct {
+		Title   string `json:"title"`
+		Message string `json:"message"`
+	} `json:"business_intro,omitempty"`
+	Photo *struct {
+		SmallFileID       string `json:"small_file_id"`
+		SmallFileUniqueID string `json:"small_file_unique_id"`
+		BigFileID         string `json:"big_file_id"`
+		BigFileUniqueID   string `json:"big_file_unique_id"`
+	} `json:"photo,omitempty"`
+}
+
+// GetChatFullInfo queries Telegram's getChat API for a user's private chat and returns the full ChatFullInfo including personal_chat.
+func (b *Bot) GetChatFullInfo(userID int64) (*TelegramChatFullInfo, string, error) {
+	log.Printf("[Telegram API Call] GetChatFullInfo (getChat) -> UserID: %d", userID)
+	if b.api == nil {
+		// Mock handling for unit testing
+		chat, err := b.GetChat(tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{ChatID: userID}})
+		if err != nil {
+			return nil, "", err
+		}
+		info := &TelegramChatFullInfo{
+			ID:                 chat.ID,
+			Type:               chat.Type,
+			Username:           chat.UserName,
+			FirstName:          chat.FirstName,
+			LastName:           chat.LastName,
+			Bio:                chat.Bio,
+			Description:        chat.Description,
+			HasPrivateForwards: chat.HasPrivateForwards,
+		}
+		return info, "", nil
+	}
+
+	resp, err := b.api.Request(tgbotapi.ChatInfoConfig{
+		ChatConfig: tgbotapi.ChatConfig{
+			ChatID: userID,
+		},
+	})
+	if err != nil {
+		log.Printf("[Telegram API Error] getChat failed for %d: %v", userID, err)
+		return nil, "", err
+	}
+	if !resp.Ok {
+		log.Printf("[Telegram API Error] getChat not ok for %d: %s (code %d)", userID, resp.Description, resp.ErrorCode)
+		return nil, "", fmt.Errorf("telegram API error %d: %s", resp.ErrorCode, resp.Description)
+	}
+
+	rawJSON := string(resp.Result)
+	var fullInfo TelegramChatFullInfo
+	if err := json.Unmarshal(resp.Result, &fullInfo); err != nil {
+		log.Printf("[Telegram API Error] Failed to unmarshal ChatFullInfo for %d: %v", userID, err)
+		return nil, rawJSON, err
+	}
+
+	log.Printf("[Telegram API Response] getChat success -> ID: %d, UserName: @%s, Bio: %q, PersonalChat: %+v",
+		fullInfo.ID, fullInfo.Username, fullInfo.Bio, fullInfo.PersonalChat)
+
+	return &fullInfo, rawJSON, nil
+}
+
 // GetUserProfilePhotos wraps b.api.GetUserProfilePhotos to echo query calls to standard logs for debugging.
 func (b *Bot) GetUserProfilePhotos(config tgbotapi.UserProfilePhotosConfig) (tgbotapi.UserProfilePhotos, error) {
 	log.Printf("[Telegram API Call] GetUserProfilePhotos -> UserID: %d, Offset: %d, Limit: %d", config.UserID, config.Offset, config.Limit)
@@ -270,7 +349,7 @@ func (b *Bot) GetUserProfilePhotos(config tgbotapi.UserProfilePhotosConfig) (tgb
 	return photos, err
 }
 
-// FetchUserProfile retrieves the latest profile (bio, profile picture) for a user from Telegram API and saves it to user_profiles table.
+// FetchUserProfile retrieves the latest profile (bio, personal_chat channel, profile picture) for a user from Telegram API and saves it to user_profiles table.
 // If the profile cannot be found on Telegram, it is saved with NotFound = true so subsequent backfills skip it.
 func (b *Bot) FetchUserProfile(userID int64) (*db.UserProfile, error) {
 	if userID == 0 {
@@ -282,26 +361,43 @@ func (b *Bot) FetchUserProfile(userID int64) (*db.UserProfile, error) {
 		FetchedAt: time.Now(),
 	}
 
-	// 1. Fetch Chat Info (for Bio and ChatPhoto)
-	chat, errChat := b.GetChat(tgbotapi.ChatInfoConfig{
-		ChatConfig: tgbotapi.ChatConfig{
-			ChatID: userID,
-		},
-	})
-	if errChat == nil {
-		profile.Username = chat.UserName
-		profile.FirstName = chat.FirstName
-		profile.LastName = chat.LastName
-		profile.Bio = chat.Bio
-		if chat.Photo != nil {
+	// 1. Fetch Chat Info (using getChat on the user's private chat ID to retrieve ChatFullInfo)
+	fullInfo, rawJSON, errChat := b.GetChatFullInfo(userID)
+	if errChat == nil && fullInfo != nil {
+		profile.Username = fullInfo.Username
+		profile.FirstName = fullInfo.FirstName
+		profile.LastName = fullInfo.LastName
+		profile.Bio = fullInfo.Bio
+		profile.HasPrivateForwards = fullInfo.HasPrivateForwards
+		profile.RawJSON = rawJSON
+
+		if fullInfo.Description != "" && profile.Bio == "" {
+			profile.Bio = fullInfo.Description
+		}
+		if fullInfo.PersonalChat != nil {
+			profile.PersonalChatTitle = fullInfo.PersonalChat.Title
+			profile.PersonalChatUsername = fullInfo.PersonalChat.Username
+		}
+		if fullInfo.BusinessIntro != nil {
+			intro := fullInfo.BusinessIntro.Title
+			if fullInfo.BusinessIntro.Message != "" {
+				if intro != "" {
+					intro += " - " + fullInfo.BusinessIntro.Message
+				} else {
+					intro = fullInfo.BusinessIntro.Message
+				}
+			}
+			profile.BusinessIntro = intro
+		}
+		if fullInfo.Photo != nil {
 			profile.HasPhoto = true
-			profile.PhotoSmallFileID = chat.Photo.SmallFileID
-			profile.PhotoSmallFileUniqueID = chat.Photo.SmallFileUniqueID
-			profile.PhotoFileID = chat.Photo.BigFileID
-			profile.PhotoFileUniqueID = chat.Photo.BigFileUniqueID
+			profile.PhotoSmallFileID = fullInfo.Photo.SmallFileID
+			profile.PhotoSmallFileUniqueID = fullInfo.Photo.SmallFileUniqueID
+			profile.PhotoFileID = fullInfo.Photo.BigFileID
+			profile.PhotoFileUniqueID = fullInfo.Photo.BigFileUniqueID
 		}
 	} else {
-		log.Printf("[Bot] Warning: GetChat failed for user %d: %v", userID, errChat)
+		log.Printf("[Bot] Warning: GetChatFullInfo failed for user %d: %v", userID, errChat)
 	}
 
 	// 2. Fetch User Profile Photos (for full photo count & highest resolution file_id)
@@ -329,24 +425,51 @@ func (b *Bot) FetchUserProfile(userID int64) (*db.UserProfile, error) {
 		log.Printf("[Bot] Warning: GetUserProfilePhotos failed for user %d: %v", userID, errPhotos)
 	}
 
-	// Fallback names/username from DB user record if Telegram GetChat didn't return them
-	if profile.Username == "" || (profile.FirstName == "" && profile.LastName == "") {
-		if dbUser, err := b.db.GetUserByID(userID); err == nil && dbUser != nil {
-			if profile.Username == "" {
-				profile.Username = dbUser.Username
-			}
-			if profile.FirstName == "" {
-				profile.FirstName = dbUser.FirstName
-			}
-			if profile.LastName == "" {
-				profile.LastName = dbUser.LastName
-			}
+	// Fallback names/username/language from DB user record if Telegram GetChat didn't return them
+	if dbUser, err := b.db.GetUserByID(userID); err == nil && dbUser != nil {
+		if profile.Username == "" {
+			profile.Username = dbUser.Username
+		}
+		if profile.FirstName == "" {
+			profile.FirstName = dbUser.FirstName
+		}
+		if profile.LastName == "" {
+			profile.LastName = dbUser.LastName
+		}
+		if profile.LanguageCode == "" {
+			profile.LanguageCode = dbUser.LanguageCode
+		}
+		profile.IsPremium = dbUser.IsPremium
+	}
+
+	// Fallback to existing cached profile in DB for fields not present in Telegram response
+	if existing, err := b.db.GetUserProfile(userID); err == nil && existing != nil {
+		if profile.Bio == "" {
+			profile.Bio = existing.Bio
+		}
+		if profile.PersonalChatTitle == "" {
+			profile.PersonalChatTitle = existing.PersonalChatTitle
+		}
+		if profile.PersonalChatUsername == "" {
+			profile.PersonalChatUsername = existing.PersonalChatUsername
+		}
+		if profile.BusinessIntro == "" {
+			profile.BusinessIntro = existing.BusinessIntro
+		}
+		if profile.LanguageCode == "" {
+			profile.LanguageCode = existing.LanguageCode
+		}
+		if !profile.IsPremium {
+			profile.IsPremium = existing.IsPremium
+		}
+		if !profile.HasPrivateForwards {
+			profile.HasPrivateForwards = existing.HasPrivateForwards
 		}
 	}
 
 	if errChat != nil && errPhotos != nil {
 		// If we already have a cached profile in DB with bio/photo, return it rather than overwriting with empty
-		if existing, err := b.db.GetUserProfile(userID); err == nil && existing != nil && existing.Bio != "" {
+		if existing, err := b.db.GetUserProfile(userID); err == nil && existing != nil && (existing.Bio != "" || existing.PersonalChatTitle != "") {
 			return existing, fmt.Errorf("user profile not found on Telegram: returning cached profile (chat err: %v, photos err: %v)", errChat, errPhotos)
 		}
 		profile.NotFound = true

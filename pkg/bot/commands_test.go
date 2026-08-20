@@ -736,9 +736,9 @@ func TestCmdListSpamBios(t *testing.T) {
 			ID:   superAdminID,
 			Type: "private",
 		},
-		Text: "/listspambios",
+		Text: "/listunknownusers",
 		Entities: []tgbotapi.MessageEntity{
-			{Type: "bot_command", Offset: 0, Length: 13},
+			{Type: "bot_command", Offset: 0, Length: 17},
 		},
 	}
 
@@ -757,15 +757,15 @@ func TestCmdListSpamBios(t *testing.T) {
 			ID:   superAdminID,
 			Type: "private",
 		},
-		Text: "/spambios 沃尔玛",
+		Text: "/listunknownusers 沃尔玛",
 		Entities: []tgbotapi.MessageEntity{
-			{Type: "bot_command", Offset: 0, Length: 9},
+			{Type: "bot_command", Offset: 0, Length: 17},
 		},
 	}
 
 	b.handleCommand(msgFilter, adminUser)
 
-	// Test batch ban with /listspambios ban
+	// Test batch ban with /listunknownusers ban
 	b.cfg.ModerationGroupID = -100998877
 	msgBan := &tgbotapi.Message{
 		MessageID: 62,
@@ -779,9 +779,9 @@ func TestCmdListSpamBios(t *testing.T) {
 			ID:   superAdminID,
 			Type: "private",
 		},
-		Text: "/listspambios ban",
+		Text: "/listunknownusers ban",
 		Entities: []tgbotapi.MessageEntity{
-			{Type: "bot_command", Offset: 0, Length: 13},
+			{Type: "bot_command", Offset: 0, Length: 17},
 		},
 	}
 
@@ -796,12 +796,12 @@ func TestCmdListSpamBios(t *testing.T) {
 		t.Fatalf("failed to query user 888999: %v", err)
 	}
 	if !u.IsBanned {
-		t.Errorf("expected user 888999 to be banned after /listspambios ban")
+		t.Errorf("expected user 888999 to be banned after /listunknownusers ban")
 	}
 }
 
 func TestFormatSpamBioTable(t *testing.T) {
-	items := []db.SpamBioUserItem{
+	items := []db.UnknownUserItem{
 		{
 			UserID:          888999,
 			Username:        "spambot",
@@ -848,15 +848,15 @@ func TestFormatSpamBioTable(t *testing.T) {
 		},
 	}
 
-	table := formatSpamBioTable(items, "沃尔玛")
+	table := formatUnknownUsersTable(items, "沃尔玛")
 
-	if !strings.Contains(table, "🚨 **Unbanned Users with Spam Bios** (Found: 4) [Filter: `沃尔玛`]:") {
+	if !strings.Contains(table, "🚨 **Unbanned Unknown / New Users** (Found: 4) [Filter: `沃尔玛`]:") {
 		t.Errorf("expected header with filter in table output:\n%s", table)
 	}
-	if !strings.Contains(table, " # | User ID    | User         | Match      | Bio Snippet") {
+	if !strings.Contains(table, " # | User ID    | User         | Msgs | Match      | Bio / Profile Snippet") {
 		t.Errorf("expected column headers in table output:\n%s", table)
 	}
-	if !strings.Contains(table, "---+------------+--------------+------------+------------------------------") {
+	if !strings.Contains(table, "---+------------+--------------+------+------------+------------------------------") {
 		t.Errorf("expected divider in table output:\n%s", table)
 	}
 	if !strings.Contains(table, "888999") || !strings.Contains(table, "@spambot") || !strings.Contains(table, "沃尔玛") {
@@ -874,7 +874,7 @@ func TestFormatSpamBioTable(t *testing.T) {
 		t.Errorf("expected Unknown fallback for user 9003")
 	}
 	// Check quick actions footer
-	if !strings.Contains(table, "💡 **Actions**: `/listspambios ban`") {
+	if !strings.Contains(table, "💡 **Actions**: `/listunknownusers ban`") {
 		t.Errorf("expected actions footer in table output:\n%s", table)
 	}
 }
