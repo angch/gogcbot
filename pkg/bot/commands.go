@@ -907,6 +907,8 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 			matchedLine = fmt.Sprintf("   • Matched: `%s`\n", escapeMarkdown(matchedStr))
 		}
 
+		cleanBio := strings.ReplaceAll(bioSnippet, "```", "'''")
+
 		sb.WriteString(fmt.Sprintf(
 			"%d. **%s**%s\n"+
 				"   • ID: `%d` | Rep: `%d` | Posts: `%d` | Filter: **%s**\n"+
@@ -916,7 +918,7 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 			i+1, escapeMarkdown(name), userHandle,
 			u.UserID, u.Reputation, u.MessageCount, matchBadge,
 			matchedLine,
-			escapeMarkdown(bioSnippet),
+			cleanBio,
 			u.UserID,
 		))
 	}
@@ -1091,13 +1093,46 @@ func (b *Bot) IsUserInModGroup(userID int64) bool {
 }
 
 func (b *Bot) replyText(msg *tgbotapi.Message, text string) {
+	if msg == nil || text == "" {
+		return
+	}
 	text = strings.ToValidUTF8(text, "")
-	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
-	reply.ReplyToMessageID = msg.MessageID
-	reply.ParseMode = tgbotapi.ModeMarkdown
-	if _, err := b.Send(reply); err != nil {
-		reply.ParseMode = ""
-		_, _ = b.Send(reply)
+	runes := []rune(text)
+	const maxRunes = 3800
+	for len(runes) > maxRunes {
+		sub := string(runes[:maxRunes])
+		splitIdx := strings.LastIndex(sub, "\n\n")
+		if splitIdx == -1 {
+			splitIdx = strings.LastIndex(sub, "\n")
+		}
+		var chunk string
+		if splitIdx != -1 {
+			chunk = sub[:splitIdx]
+			runes = runes[len([]rune(chunk))+1:]
+		} else {
+			chunk = sub
+			runes = runes[maxRunes:]
+		}
+
+		reply := tgbotapi.NewMessage(msg.Chat.ID, strings.ToValidUTF8(chunk, ""))
+		reply.ReplyToMessageID = msg.MessageID
+		reply.ParseMode = tgbotapi.ModeMarkdown
+		if _, err := b.Send(reply); err != nil {
+			log.Printf("[Bot] Markdown send failed (%v), retrying as plain text", err)
+			reply.ParseMode = ""
+			_, _ = b.Send(reply)
+		}
+	}
+
+	if len(runes) > 0 {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, strings.ToValidUTF8(string(runes), ""))
+		reply.ReplyToMessageID = msg.MessageID
+		reply.ParseMode = tgbotapi.ModeMarkdown
+		if _, err := b.Send(reply); err != nil {
+			log.Printf("[Bot] Markdown send failed (%v), retrying as plain text", err)
+			reply.ParseMode = ""
+			_, _ = b.Send(reply)
+		}
 	}
 }
 

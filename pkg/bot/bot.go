@@ -83,24 +83,46 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 	return b, nil
 }
 
-func sanitizeChattable(c tgbotapi.Chattable) {
+func sanitizeChattable(c tgbotapi.Chattable) tgbotapi.Chattable {
 	switch v := c.(type) {
+	case tgbotapi.MessageConfig:
+		v.Text = strings.ToValidUTF8(v.Text, "")
+		return v
 	case *tgbotapi.MessageConfig:
 		v.Text = strings.ToValidUTF8(v.Text, "")
+		return v
+	case tgbotapi.EditMessageTextConfig:
+		v.Text = strings.ToValidUTF8(v.Text, "")
+		return v
 	case *tgbotapi.EditMessageTextConfig:
 		v.Text = strings.ToValidUTF8(v.Text, "")
+		return v
+	case tgbotapi.EditMessageCaptionConfig:
+		v.Caption = strings.ToValidUTF8(v.Caption, "")
+		return v
 	case *tgbotapi.EditMessageCaptionConfig:
 		v.Caption = strings.ToValidUTF8(v.Caption, "")
+		return v
+	case tgbotapi.PhotoConfig:
+		v.Caption = strings.ToValidUTF8(v.Caption, "")
+		return v
 	case *tgbotapi.PhotoConfig:
 		v.Caption = strings.ToValidUTF8(v.Caption, "")
+		return v
+	case tgbotapi.DocumentConfig:
+		v.Caption = strings.ToValidUTF8(v.Caption, "")
+		return v
 	case *tgbotapi.DocumentConfig:
 		v.Caption = strings.ToValidUTF8(v.Caption, "")
+		return v
+	default:
+		return c
 	}
 }
 
 // Send wraps b.api.Send to echo all outgoing Telegram API message calls to standard logs for debugging.
 func (b *Bot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
-	sanitizeChattable(c)
+	c = sanitizeChattable(c)
 	log.Printf("[Telegram API Call] Send -> Payload: %#v", c)
 	if b.api == nil {
 		return tgbotapi.Message{}, nil
@@ -116,7 +138,7 @@ func (b *Bot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 
 // Request wraps b.api.Request to echo all outgoing Telegram API request calls to standard logs for debugging.
 func (b *Bot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
-	sanitizeChattable(c)
+	c = sanitizeChattable(c)
 	log.Printf("[Telegram API Call] Request -> Payload: %#v", c)
 	if b.api == nil {
 		return &tgbotapi.APIResponse{Ok: true}, nil
