@@ -64,6 +64,9 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 		if cfg.Detector.UsernameAnomaly.Enabled {
 			det.RegisterTrigger(detector.NewUsernameAnomalyTrigger(cfg.Detector.UsernameAnomaly))
 		}
+		if cfg.Detector.ProfileNameKeywordBan.Enabled {
+			det.RegisterTrigger(detector.NewProfileNameKeywordBanTrigger(cfg.Detector.ProfileNameKeywordBan))
+		}
 	}
 
 	b := &Bot{

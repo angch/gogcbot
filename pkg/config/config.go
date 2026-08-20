@@ -36,10 +36,11 @@ type ShieldyConfig struct {
 
 // DetectorConfig defines settings for modular detection triggers.
 type DetectorConfig struct {
-	Enabled         bool                                  `mapstructure:"enabled" yaml:"enabled"`
-	NewUserCJK      detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
-	NewUserChinese  detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
-	UsernameAnomaly detector.UsernameAnomalyTriggerConfig `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
+	Enabled               bool                                  `mapstructure:"enabled" yaml:"enabled"`
+	NewUserCJK            detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
+	NewUserChinese        detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
+	UsernameAnomaly       detector.UsernameAnomalyTriggerConfig `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
+	ProfileNameKeywordBan detector.ProfileNameKeywordBanConfig  `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -111,6 +112,16 @@ func DefaultConfig() Config {
 				FlagOnly:      true,
 				RepPenalty:    20,
 			},
+			ProfileNameKeywordBan: detector.ProfileNameKeywordBanConfig{
+				Enabled:         true,
+				MinHighUserID:   1000000000,
+				MaxReputation:   5,
+				MaxUserPosts:    5,
+				MinScore:        3,
+				FlagOnly:        true,
+				RepPenalty:      20,
+				BlockedKeywords: []string{"0壹天", "每日", "吴压", "吾思", "兼织"},
+			},
 		},
 		Shieldy: ShieldyConfig{
 			Enabled:             true,
@@ -171,6 +182,15 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.username_anomaly.min_score", 3)
 	v.SetDefault("detector.username_anomaly.flag_only", true)
 	v.SetDefault("detector.username_anomaly.rep_penalty", 20)
+
+	v.SetDefault("detector.profile_name_keyword_ban.enabled", true)
+	v.SetDefault("detector.profile_name_keyword_ban.min_high_user_id", int64(1000000000))
+	v.SetDefault("detector.profile_name_keyword_ban.max_reputation", 5)
+	v.SetDefault("detector.profile_name_keyword_ban.max_user_posts", 5)
+	v.SetDefault("detector.profile_name_keyword_ban.min_score", 3)
+	v.SetDefault("detector.profile_name_keyword_ban.flag_only", true)
+	v.SetDefault("detector.profile_name_keyword_ban.rep_penalty", 20)
+	v.SetDefault("detector.profile_name_keyword_ban.blocked_keywords", []string{"0壹天", "每日", "吴压", "吾思", "兼织"})
 
 	v.SetDefault("shieldy.enabled", true)
 	v.SetDefault("shieldy.rep_bonus", 5)
