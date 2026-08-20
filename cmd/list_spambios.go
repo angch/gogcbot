@@ -20,9 +20,10 @@ var (
 var listSpamBiosCmd = &cobra.Command{
 	Use:     "list-spambios",
 	Aliases: []string{"spambios", "listspambios", "spam-bios", "spammers"},
-	Short:   "List unbanned new users with suspicious or spam bios in Markdown format",
-	Long: `Scan cached user profiles for unbanned new users whose bios contain
-promotional, discount card, gift card, or syndicate scam patterns (e.g. 锦鲤代发, 油卡, E卡, 沃尔玛, 联系 @...).`,
+	Short:   "List unbanned new users with profile bios (matches all by default, or filtered by keyword)",
+	Long: `Scan cached user profiles for unbanned new users with non-empty bios.
+By default (empty keyword), matches all unbanned users with bios.
+Use --keyword / -k to filter by specific keywords or phrases (e.g. 锦鲤代发, 油卡, E卡, 沃尔玛, 联系 @...).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.LoadConfig(cfgFile)
 		if err != nil {
@@ -69,7 +70,7 @@ promotional, discount card, gift card, or syndicate scam patterns (e.g. 锦鲤�
 
 func init() {
 	listSpamBiosCmd.Flags().StringVarP(&listSpamBiosOutputFile, "output", "o", "", "Write Markdown output to a file instead of stdout")
-	listSpamBiosCmd.Flags().StringVarP(&listSpamBiosKeyword, "keyword", "k", "", "Filter by specific keyword or phrase in bio")
+	listSpamBiosCmd.Flags().StringVarP(&listSpamBiosKeyword, "keyword", "k", "", "Filter by specific keyword or phrase in bio (empty matches all)")
 	listSpamBiosCmd.Flags().IntVarP(&listSpamBiosMaxPosts, "max-posts", "m", 5, "Filter users with at most N logged posts (0 for any post count)")
 	listSpamBiosCmd.Flags().IntVarP(&listSpamBiosLimit, "limit", "l", 0, "Limit number of users displayed (0 for unlimited)")
 	rootCmd.AddCommand(listSpamBiosCmd)

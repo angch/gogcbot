@@ -178,7 +178,7 @@ func TestListSpamBiosCmd(t *testing.T) {
 			t.Fatalf("failed to read output markdown file: %v", err)
 		}
 		content := string(data)
-		if !strings.Contains(content, "# 🚨 Unbanned New Users with Suspicious/Spam Bios") {
+		if !strings.Contains(content, "# 📋 Unbanned New Users with Profile Bios") {
 			t.Errorf("expected header in generated file")
 		}
 		if !strings.Contains(content, "@spammer_new") {

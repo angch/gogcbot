@@ -894,23 +894,26 @@ func TestGetUnbannedSpamBioUsers(t *testing.T) {
 		PhotoCount: 1,
 	})
 
-	// 5. Query without filters
+	// 5. Query without filters (empty keyword matches everything by default)
 	items, err := database.GetUnbannedSpamBioUsers(SpamBioOptions{})
 	if err != nil {
 		t.Fatalf("GetUnbannedSpamBioUsers failed: %v", err)
 	}
-	if len(items) != 1 {
-		t.Fatalf("expected exactly 1 unbanned spam bio user, got %d", len(items))
-	}
-	if items[0].UserID != 2001 {
-		t.Errorf("expected user ID 2001, got %d", items[0].UserID)
-	}
-	if len(items[0].MatchedKeywords) == 0 {
-		t.Errorf("expected matched keywords for user 2001")
+	if len(items) != 2 {
+		t.Fatalf("expected 2 unbanned users with bios (both 2001 and 2004), got %d", len(items))
 	}
 
-	// 6. Generate Markdown report
-	md := GenerateSpamBioMarkdown(items, SpamBioOptions{DatabaseName: "test.db"})
+	// 6. Query with keyword filter
+	filteredItems, err := database.GetUnbannedSpamBioUsers(SpamBioOptions{Keyword: "沃尔玛"})
+	if err != nil {
+		t.Fatalf("GetUnbannedSpamBioUsers with keyword failed: %v", err)
+	}
+	if len(filteredItems) != 1 || filteredItems[0].UserID != 2001 {
+		t.Fatalf("expected 1 user (2001) matching keyword '沃尔玛', got %+v", filteredItems)
+	}
+
+	// 7. Generate Markdown report
+	md := GenerateSpamBioMarkdown(filteredItems, SpamBioOptions{Keyword: "沃尔玛", DatabaseName: "test.db"})
 	if md == "" {
 		t.Errorf("expected non-empty Markdown report")
 	}

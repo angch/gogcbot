@@ -1671,16 +1671,18 @@ func (d *DB) GetUnbannedSpamBioUsers(opts SpamBioOptions) ([]SpamBioUserItem, er
 		item.CreatedAt = parseTime(rawCreatedAt)
 		item.FetchedAt = parseTime(rawFetchedAt)
 
-		// Check keyword matches
-		var custom []string
-		if opts.Keyword != "" {
-			custom = []string{opts.Keyword}
+		// Check keyword matches: empty keyword matches everything by default
+		kw := strings.TrimSpace(opts.Keyword)
+		if kw != "" {
+			if !strings.Contains(strings.ToLower(item.Bio), strings.ToLower(kw)) {
+				continue
+			}
+			item.MatchedKeywords = []string{kw}
+		} else {
+			// Match everything, and check for any recognized spam keywords if present
+			_, matched := MatchSpamBio(item.Bio)
+			item.MatchedKeywords = matched
 		}
-		isMatch, matched := MatchSpamBio(item.Bio, custom...)
-		if !isMatch {
-			continue
-		}
-		item.MatchedKeywords = matched
 
 		results = append(results, item)
 		if opts.Limit > 0 && len(results) >= opts.Limit {
@@ -1700,11 +1702,13 @@ func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) strin
 		dbName = "SQLite Database"
 	}
 
-	sb.WriteString("# 🚨 Unbanned New Users with Suspicious/Spam Bios\n\n")
+	sb.WriteString("# 📋 Unbanned New Users with Profile Bios\n\n")
 	sb.WriteString(fmt.Sprintf("- **Generated At**: %s\n", time.Now().Format("2006-01-02 15:04:05 MST")))
 	sb.WriteString(fmt.Sprintf("- **Database**: `%s`\n", dbName))
 	if opts.Keyword != "" {
 		sb.WriteString(fmt.Sprintf("- **Keyword Filter**: `%s`\n", opts.Keyword))
+	} else {
+		sb.WriteString("- **Keyword Filter**: *(none - matched all bios)*\n")
 	}
 	if opts.MaxPosts > 0 {
 		sb.WriteString(fmt.Sprintf("- **Max Logged Posts**: `%d`\n", opts.MaxPosts))
@@ -1712,7 +1716,7 @@ func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) strin
 	sb.WriteString(fmt.Sprintf("- **Total Matched Users**: %d\n\n", len(items)))
 
 	if len(items) == 0 {
-		sb.WriteString("*No unbanned users with matching spam bios found.*\n")
+		sb.WriteString("*No unbanned users with matching profile bios found.*\n")
 		return sb.String()
 	}
 
@@ -1728,9 +1732,9 @@ func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) strin
 		if name == "" {
 			name = "-"
 		}
-		kwStr := strings.Join(u.MatchedKeywords, ", ")
-		if kwStr == "" {
-			kwStr = "-"
+		kwStr := "-"
+		if len(u.MatchedKeywords) > 0 {
+			kwStr = strings.Join(u.MatchedKeywords, ", ")
 		}
 		bioSnippet := escapeMarkdownCell(truncateString(u.Bio, 60))
 
