@@ -58,7 +58,8 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
    - Full control over bot settings, group monitoring management (`/addgroup`, `/removegroup`, `/listgroups`), and reputation overrides.
 
 8. **Spam Snippet & Bio Detection**:
-   - **Profile Bio Scanning**: Identifies unbanned new users whose profiles contain spam promotions, gift card scams, or syndicate marketing.
+   - **Profile Bio Scanning on Join & Message**: Automatically grabs user profile and bio when a user joins a channel/group or sends a message, caching them in `user_profiles`.
+   - **Automatic Spam Bio Kick Rule (`new_user_spam_bio`)**: If a joining or new user's bio matches spam/syndicate keywords, the bot immediately deletes join messages, bans them across monitored groups, penalizes reputation, and alerts the moderation channel.
    - **`spam_snippets` Database Table**: Stores dynamic spam snippets synced from runtime `config.yaml` or added programmatically.
    - **CLI & Bot Commands**: Search and inspect suspicious bios via `gogcbot list-spambios` and `/listspambios` (rendered as a compact monospace table with CJK visual alignment).
 
@@ -166,6 +167,11 @@ detector:
   new_user_cjk:
     enabled: true
     min_high_user_id: 1000000000       # User ID threshold for newly generated accounts
+    max_reputation: 5                  # Maximum reputation score to apply detection
+    max_user_posts: 5                  # Post count window for new user evaluation
+    rep_penalty: 20                    # Reputation penalty applied upon detection
+  new_user_spam_bio:
+    enabled: true                      # Kick/ban new users with spam/scam profile bios
     max_reputation: 5                  # Maximum reputation score to apply detection
     max_user_posts: 5                  # Post count window for new user evaluation
     rep_penalty: 20                    # Reputation penalty applied upon detection

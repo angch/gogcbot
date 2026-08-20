@@ -63,6 +63,16 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 			}
 			det.RegisterTrigger(detector.NewNewUserCJKTrigger(cjkCfg))
 		}
+		if cfg.Detector.NewUserSpamBio.Enabled {
+			spamBioCfg := cfg.Detector.NewUserSpamBio
+			var kws []string
+			kws = append(kws, cfg.AutoFlag.BlockedKeywords...)
+			if database != nil {
+				dbKws, _ := database.GetSpamSnippetStrings()
+				kws = append(kws, dbKws...)
+			}
+			det.RegisterTrigger(detector.NewNewUserSpamBioTriggerWithKeywords(spamBioCfg, kws...))
+		}
 	}
 
 	if database != nil && len(cfg.AutoFlag.BlockedKeywords) > 0 {
@@ -174,13 +184,33 @@ func (b *Bot) GetChat(config tgbotapi.ChatInfoConfig) (tgbotapi.Chat, error) {
 		if config.ChatID < 0 || config.ChatID == 404 || config.ChatID == 999999 {
 			return tgbotapi.Chat{}, fmt.Errorf("Bad Request: chat not found")
 		}
+		mockBio := "Mock bio description"
+		mockUsername := "mockuser"
+		mockFirstName := "Mock"
+		mockLastName := "User"
+		if b.db != nil {
+			if existing, err := b.db.GetUserProfile(config.ChatID); err == nil && existing != nil {
+				if existing.Bio != "" {
+					mockBio = existing.Bio
+				}
+				if existing.Username != "" {
+					mockUsername = existing.Username
+				}
+				if existing.FirstName != "" {
+					mockFirstName = existing.FirstName
+				}
+				if existing.LastName != "" {
+					mockLastName = existing.LastName
+				}
+			}
+		}
 		return tgbotapi.Chat{
 			ID:        config.ChatID,
 			Type:      "private",
-			FirstName: "Mock",
-			LastName:  "User",
-			UserName:  "mockuser",
-			Bio:       "Mock bio description",
+			FirstName: mockFirstName,
+			LastName:  mockLastName,
+			UserName:  mockUsername,
+			Bio:       mockBio,
 		}, nil
 	}
 	chat, err := b.api.GetChat(config)
@@ -293,6 +323,10 @@ func (b *Bot) FetchUserProfile(userID int64) (*db.UserProfile, error) {
 	}
 
 	if errChat != nil && errPhotos != nil {
+		// If we already have a cached profile in DB with bio/photo, return it rather than overwriting with empty
+		if existing, err := b.db.GetUserProfile(userID); err == nil && existing != nil && existing.Bio != "" {
+			return existing, fmt.Errorf("user profile not found on Telegram: returning cached profile (chat err: %v, photos err: %v)", errChat, errPhotos)
+		}
 		profile.NotFound = true
 		if saveErr := b.db.SaveUserProfile(profile); saveErr != nil {
 			log.Printf("[Bot] Warning: failed to save not_found user profile for %d: %v", userID, saveErr)

@@ -11,8 +11,9 @@ type TriggerContext struct {
 	RawMessage        *tgbotapi.Message
 	Text              string
 	User              *db.User
-	IsNewUser         bool // True if user was newly created in DB for this message
-	UserMessageCount  int  // Total posts by user in DB
+	UserBio           string // Profile bio if available
+	IsNewUser         bool   // True if user was newly created in DB for this message
+	UserMessageCount  int    // Total posts by user in DB
 	ChatID            int64
 	GroupTitle        string
 	HasVerifiedNotBot bool // True if user verified with "I am not a bot"

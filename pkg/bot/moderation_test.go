@@ -486,3 +486,210 @@ func TestUTF8SanitizationAndTruncation(t *testing.T) {
 		t.Errorf("expected invalid surrogate sequence to be sanitized from message config")
 	}
 }
+
+func TestHandleChatMemberUpdate_UserJoin_SpamBio(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(888111)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	// Pre-seed mock user profile with spam bio so FetchUserProfile returns it
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "spammer_join",
+		FirstName:  "Spam",
+		LastName:   "Joiner",
+		Bio:        "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。联系 @xgshenqing888",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "spammer_join", FirstName: "Spam", LastName: "Joiner"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "spammer_join", FirstName: "Spam", LastName: "Joiner"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	// User should be banned in DB and reputation adjusted
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after joining with spam bio", userID)
+	}
+	if u.Reputation >= 0 {
+		t.Errorf("expected user %d reputation to be penalized (< 0), got %d", userID, u.Reputation)
+	}
+}
+
+func TestHandleMessage_NewChatMembers_SpamBio(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(888222)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "spammer_join_msg",
+		FirstName:  "Spam",
+		LastName:   "Joiner2",
+		Bio:        "招兼职 日赚300-500 沃尔玛 永辉 礼品卡联系",
+		HasPhoto:   false,
+		PhotoCount: 0,
+		FetchedAt:  time.Now(),
+	})
+
+	joinMsg := &tgbotapi.Message{
+		MessageID: 555,
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "spammer_join_msg",
+			FirstName: "Spam",
+			LastName:  "Joiner2",
+		},
+		NewChatMembers: []tgbotapi.User{
+			{
+				ID:        userID,
+				UserName:  "spammer_join_msg",
+				FirstName: "Spam",
+				LastName:  "Joiner2",
+			},
+		},
+	}
+
+	b.handleMessage(joinMsg)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after joining via NewChatMembers with spam bio", userID)
+	}
+}
+
+func TestHandleChatMemberUpdate_UserJoin_CleanBio(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(777333)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "clean_joiner",
+		FirstName:  "Clean",
+		LastName:   "User",
+		Bio:        "Hello everyone! I'm a software developer from Singapore.",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "clean_joiner", FirstName: "Clean", LastName: "User"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "clean_joiner", FirstName: "Clean", LastName: "User"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if u.IsBanned {
+		t.Errorf("clean user %d should NOT be banned", userID)
+	}
+}
+
+func TestHandleMessage_SpamBioMessage_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(888333)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	// Register detector triggers
+	b.detector = detector.NewDetector(
+		detector.NewNewUserSpamBioTrigger(b.cfg.Detector.NewUserSpamBio),
+	)
+
+	// Pre-seed profile with spam bio
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "spammer_msg",
+		FirstName:  "Spam",
+		LastName:   "Poster",
+		Bio:        "油卡 礼品卡 沃尔玛 6折联系",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	msg := &tgbotapi.Message{
+		MessageID: 100,
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "spammer_msg",
+			FirstName: "Spam",
+			LastName:  "Poster",
+		},
+		Text: "Hello world this is my first message",
+	}
+
+	b.handleMessage(msg)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after sending message with spam bio", userID)
+	}
+}
+

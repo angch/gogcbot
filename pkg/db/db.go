@@ -1622,6 +1622,13 @@ func MatchSpamBio(bio string, customKeywords ...string) (bool, []string) {
 	return len(matched) > 0, matched
 }
 
+// MatchSpamBioAll checks if a user bio matches SpamBioKeywords, DB spam snippets, or any additional keywords.
+func MatchSpamBioAll(bio string, additionalKeywords ...string) (bool, []string) {
+	allKws := append([]string{}, SpamBioKeywords...)
+	allKws = append(allKws, additionalKeywords...)
+	return MatchSpamBio(bio, allKws...)
+}
+
 // SpamBioUserItem holds metadata for an unbanned user with a matching spam bio.
 type SpamBioUserItem struct {
 	UserID          int64     `json:"user_id"`

@@ -36,6 +36,11 @@ detector:
     max_reputation: 5
     max_user_posts: 5
     rep_penalty: 20
+  new_user_spam_bio:
+    enabled: true
+    max_reputation: 5
+    max_user_posts: 5
+    rep_penalty: 20
 
 shieldy:
   enabled: true

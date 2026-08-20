@@ -36,9 +36,10 @@ type ShieldyConfig struct {
 
 // DetectorConfig defines settings for modular detection triggers.
 type DetectorConfig struct {
-	Enabled        bool                             `mapstructure:"enabled" yaml:"enabled"`
-	NewUserCJK     detector.NewUserCJKTriggerConfig `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
-	NewUserChinese detector.NewUserCJKTriggerConfig `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
+	Enabled        bool                                `mapstructure:"enabled" yaml:"enabled"`
+	NewUserCJK     detector.NewUserCJKTriggerConfig    `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
+	NewUserChinese detector.NewUserCJKTriggerConfig    `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
+	NewUserSpamBio detector.NewUserSpamBioTriggerConfig `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -101,6 +102,12 @@ func DefaultConfig() Config {
 				MaxUserPosts:  5,
 				RepPenalty:    20,
 			},
+			NewUserSpamBio: detector.NewUserSpamBioTriggerConfig{
+				Enabled:       true,
+				MaxReputation: 5,
+				MaxUserPosts:  5,
+				RepPenalty:    20,
+			},
 		},
 		Shieldy: ShieldyConfig{
 			Enabled:             true,
@@ -153,6 +160,11 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.new_user_chinese.max_reputation", 5)
 	v.SetDefault("detector.new_user_chinese.max_user_posts", 5)
 	v.SetDefault("detector.new_user_chinese.rep_penalty", 20)
+
+	v.SetDefault("detector.new_user_spam_bio.enabled", true)
+	v.SetDefault("detector.new_user_spam_bio.max_reputation", 5)
+	v.SetDefault("detector.new_user_spam_bio.max_user_posts", 5)
+	v.SetDefault("detector.new_user_spam_bio.rep_penalty", 20)
 
 	v.SetDefault("shieldy.enabled", true)
 	v.SetDefault("shieldy.rep_bonus", 5)
