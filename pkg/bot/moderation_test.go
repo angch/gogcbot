@@ -458,3 +458,31 @@ func TestIsServiceMessage(t *testing.T) {
 		t.Errorf("expected normal text message not to be service message")
 	}
 }
+
+func TestUTF8SanitizationAndTruncation(t *testing.T) {
+	// 1. Truncating Chinese text should not split multi-byte characters
+	cjkText := "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。天猫、苹果礼品卡、Steam等"
+	truncated := truncateText(cjkText, 10)
+	if !strings.HasSuffix(truncated, "...") {
+		t.Errorf("expected ellipsis suffix, got: %s", truncated)
+	}
+	if []rune(truncated)[10] != '.' {
+		t.Errorf("expected truncation at exactly 10 runes, got %d runes", len([]rune(truncated)))
+	}
+
+	// 2. Escape Markdown on invalid UTF-8 byte sequences
+	invalidByteString := "hello \xff\xfe world"
+	escaped := escapeMarkdown(invalidByteString)
+	if strings.Contains(escaped, "\xff") || strings.Contains(escaped, "\xfe") {
+		t.Errorf("expected invalid UTF-8 bytes to be removed or replaced")
+	}
+
+	// 3. Chattable sanitization
+	msgConfig := &tgbotapi.MessageConfig{
+		Text: "Spam message with invalid \xed\xa0\x80 surrogate",
+	}
+	sanitizeChattable(msgConfig)
+	if strings.Contains(msgConfig.Text, "\xed\xa0\x80") {
+		t.Errorf("expected invalid surrogate sequence to be sanitized from message config")
+	}
+}

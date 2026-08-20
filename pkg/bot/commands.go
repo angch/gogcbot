@@ -838,10 +838,7 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 				if u.Username != "" {
 					userHandle = " (@" + escapeMarkdown(u.Username) + ")"
 				}
-				kwStr := strings.Join(u.MatchedKeywords, ", ")
-				if len(kwStr) > 40 {
-					kwStr = kwStr[:37] + "..."
-				}
+				kwStr := truncateText(strings.Join(u.MatchedKeywords, ", "), 40)
 
 				err := b.BanUserAcrossAllGroups(u.UserID, senderChatID)
 				if err != nil {
@@ -897,15 +894,8 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 			name = "Unknown"
 		}
 
-		matchedStr := strings.Join(u.MatchedKeywords, ", ")
-		if len(matchedStr) > 40 {
-			matchedStr = matchedStr[:37] + "..."
-		}
-
-		bioSnippet := u.Bio
-		if len(bioSnippet) > 120 {
-			bioSnippet = bioSnippet[:117] + "..."
-		}
+		matchedStr := truncateText(strings.Join(u.MatchedKeywords, ", "), 40)
+		bioSnippet := truncateText(u.Bio, 120)
 
 		matchBadge := "🟢 Clean"
 		if u.IsSpamMatch || len(u.MatchedKeywords) > 0 {
@@ -1101,6 +1091,7 @@ func (b *Bot) IsUserInModGroup(userID int64) bool {
 }
 
 func (b *Bot) replyText(msg *tgbotapi.Message, text string) {
+	text = strings.ToValidUTF8(text, "")
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
 	reply.ReplyToMessageID = msg.MessageID
 	reply.ParseMode = tgbotapi.ModeMarkdown
@@ -1114,16 +1105,22 @@ func (b *Bot) sendChunkedText(chatID int64, text string) {
 	if chatID == 0 || text == "" {
 		return
 	}
-	const maxLen = 3800
-	for len(text) > maxLen {
-		splitIdx := strings.LastIndex(text[:maxLen], "\n")
-		if splitIdx == -1 {
-			splitIdx = maxLen
+	text = strings.ToValidUTF8(text, "")
+	runes := []rune(text)
+	const maxRunes = 3800
+	for len(runes) > maxRunes {
+		sub := string(runes[:maxRunes])
+		splitIdx := strings.LastIndex(sub, "\n")
+		var chunk string
+		if splitIdx != -1 {
+			chunk = sub[:splitIdx]
+			runes = runes[len([]rune(chunk))+1:]
+		} else {
+			chunk = sub
+			runes = runes[maxRunes:]
 		}
-		chunk := text[:splitIdx]
-		text = text[splitIdx:]
 
-		msg := tgbotapi.NewMessage(chatID, chunk)
+		msg := tgbotapi.NewMessage(chatID, strings.ToValidUTF8(chunk, ""))
 		msg.ParseMode = tgbotapi.ModeMarkdown
 		if _, err := b.Send(msg); err != nil {
 			msg.ParseMode = ""
@@ -1131,8 +1128,8 @@ func (b *Bot) sendChunkedText(chatID int64, text string) {
 		}
 	}
 
-	if len(text) > 0 {
-		msg := tgbotapi.NewMessage(chatID, text)
+	if len(runes) > 0 {
+		msg := tgbotapi.NewMessage(chatID, strings.ToValidUTF8(string(runes), ""))
 		msg.ParseMode = tgbotapi.ModeMarkdown
 		if _, err := b.Send(msg); err != nil {
 			msg.ParseMode = ""

@@ -1783,14 +1783,12 @@ func GenerateSpamBioMarkdown(items []SpamBioUserItem, opts SpamBioOptions) strin
 }
 
 func truncateString(s string, maxLen int) string {
-	if maxLen <= 0 || len([]rune(s)) <= maxLen {
+	s = strings.ToValidUTF8(s, "")
+	runes := []rune(s)
+	if maxLen <= 0 || len(runes) <= maxLen {
 		return s
 	}
-	runes := []rune(s)
-	if len(runes) > maxLen {
-		return string(runes[:maxLen]) + "..."
-	}
-	return s
+	return string(runes[:maxLen]) + "..."
 }
 
 // AddSpamSnippet inserts a spam snippet into the spam_snippets table.
