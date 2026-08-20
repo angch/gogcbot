@@ -103,6 +103,9 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 			}
 			det.RegisterTrigger(detector.NewRedPacketNameTrigger(rpCfg))
 		}
+		if cfg.Detector.OllamaNameClassifier.Enabled {
+			det.RegisterTrigger(detector.NewOllamaNameClassifierTrigger(cfg.Detector.OllamaNameClassifier))
+		}
 	}
 
 	if database != nil && len(cfg.AutoFlag.BlockedKeywords) > 0 {

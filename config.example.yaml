@@ -50,10 +50,19 @@ detector:
     min_cjk_ratio: 0.5
     min_cjk_chars: 1
     rep_penalty: 20
+  ollama_name_classifier:
+    enabled: false
+    ollama_url: "http://localhost:11434"
+    model: "phi4"
+    min_high_user_id: 1000000000
+    max_reputation: 5
+    max_user_posts: 5
+    request_timeout: 10s
+    flag_only: true
+    rep_penalty: 20
 
 shieldy:
   enabled: true
   rep_bonus: 5
   max_messages: 5
   recheck_delay_minutes: 6
-
