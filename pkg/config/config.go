@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/angch/gogcbot/pkg/detector"
 	"github.com/spf13/viper"
@@ -41,6 +42,7 @@ type DetectorConfig struct {
 	NewUserChinese        detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
 	UsernameAnomaly       detector.UsernameAnomalyTriggerConfig `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
 	ProfileNameKeywordBan detector.ProfileNameKeywordBanConfig  `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
+	OllamaNameClassifier  detector.OllamaNameClassifierConfig   `mapstructure:"ollama_name_classifier" yaml:"ollama_name_classifier,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -122,6 +124,17 @@ func DefaultConfig() Config {
 				RepPenalty:      20,
 				BlockedKeywords: []string{"0壹天", "每日", "吴压", "吾思", "兼织"},
 			},
+			OllamaNameClassifier: detector.OllamaNameClassifierConfig{
+				Enabled:        false,
+				OllamaURL:      "http://localhost:11434",
+				Model:          "phi4",
+				MinHighUserID:  1000000000,
+				MaxReputation:  5,
+				MaxUserPosts:   5,
+				RequestTimeout: 10 * time.Second,
+				FlagOnly:       true,
+				RepPenalty:     20,
+			},
 		},
 		Shieldy: ShieldyConfig{
 			Enabled:             true,
@@ -191,6 +204,16 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.profile_name_keyword_ban.flag_only", true)
 	v.SetDefault("detector.profile_name_keyword_ban.rep_penalty", 20)
 	v.SetDefault("detector.profile_name_keyword_ban.blocked_keywords", []string{"0壹天", "每日", "吴压", "吾思", "兼织"})
+
+	v.SetDefault("detector.ollama_name_classifier.enabled", false)
+	v.SetDefault("detector.ollama_name_classifier.ollama_url", "http://localhost:11434")
+	v.SetDefault("detector.ollama_name_classifier.model", "phi4")
+	v.SetDefault("detector.ollama_name_classifier.min_high_user_id", int64(1000000000))
+	v.SetDefault("detector.ollama_name_classifier.max_reputation", 5)
+	v.SetDefault("detector.ollama_name_classifier.max_user_posts", 5)
+	v.SetDefault("detector.ollama_name_classifier.request_timeout", "10s")
+	v.SetDefault("detector.ollama_name_classifier.flag_only", true)
+	v.SetDefault("detector.ollama_name_classifier.rep_penalty", 20)
 
 	v.SetDefault("shieldy.enabled", true)
 	v.SetDefault("shieldy.rep_bonus", 5)

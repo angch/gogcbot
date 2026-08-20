@@ -67,6 +67,9 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 		if cfg.Detector.ProfileNameKeywordBan.Enabled {
 			det.RegisterTrigger(detector.NewProfileNameKeywordBanTrigger(cfg.Detector.ProfileNameKeywordBan))
 		}
+		if cfg.Detector.OllamaNameClassifier.Enabled {
+			det.RegisterTrigger(detector.NewOllamaNameClassifierTrigger(cfg.Detector.OllamaNameClassifier))
+		}
 	}
 
 	b := &Bot{

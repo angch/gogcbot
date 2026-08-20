@@ -58,6 +58,16 @@ detector:
       - "吴压"
       - "吾思"
       - "兼织"
+  ollama_name_classifier:
+    enabled: false
+    ollama_url: "http://localhost:11434"
+    model: "phi4"
+    min_high_user_id: 1000000000
+    max_reputation: 5
+    max_user_posts: 5
+    request_timeout: 10s
+    flag_only: true
+    rep_penalty: 20
 
 shieldy:
   enabled: true
