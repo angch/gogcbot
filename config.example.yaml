@@ -59,7 +59,7 @@ detector:
       - "吾思"
       - "兼织"
   ollama_name_classifier:
-    enabled: false
+    enabled: true
     ollama_url: "http://localhost:11434"
     model: "phi4"
     min_high_user_id: 1000000000

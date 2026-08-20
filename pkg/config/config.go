@@ -125,7 +125,7 @@ func DefaultConfig() Config {
 				BlockedKeywords: []string{"0壹天", "每日", "吴压", "吾思", "兼织"},
 			},
 			OllamaNameClassifier: detector.OllamaNameClassifierConfig{
-				Enabled:        false,
+				Enabled:        true,
 				OllamaURL:      "http://localhost:11434",
 				Model:          "phi4",
 				MinHighUserID:  1000000000,
@@ -205,7 +205,7 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.profile_name_keyword_ban.rep_penalty", 20)
 	v.SetDefault("detector.profile_name_keyword_ban.blocked_keywords", []string{"0壹天", "每日", "吴压", "吾思", "兼织"})
 
-	v.SetDefault("detector.ollama_name_classifier.enabled", false)
+	v.SetDefault("detector.ollama_name_classifier.enabled", true)
 	v.SetDefault("detector.ollama_name_classifier.ollama_url", "http://localhost:11434")
 	v.SetDefault("detector.ollama_name_classifier.model", "phi4")
 	v.SetDefault("detector.ollama_name_classifier.min_high_user_id", int64(1000000000))
