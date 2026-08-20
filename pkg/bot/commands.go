@@ -768,12 +768,28 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 		return
 	}
 
-	keyword := strings.TrimSpace(args)
+	parts := strings.Fields(args)
+	shouldBan := false
+	var kwParts []string
+	for _, p := range parts {
+		if strings.EqualFold(p, "ban") || strings.EqualFold(p, "--ban") || strings.EqualFold(p, "-b") {
+			shouldBan = true
+		} else {
+			kwParts = append(kwParts, p)
+		}
+	}
+	keyword := strings.TrimSpace(strings.Join(kwParts, " "))
+
+	limit := 30
+	if shouldBan {
+		limit = 100
+	}
+
 	opts := db.SpamBioOptions{
 		Keyword:            keyword,
 		ConfiguredKeywords: b.cfg.AutoFlag.BlockedKeywords,
 		MaxPosts:           5,
-		Limit:              30,
+		Limit:              limit,
 	}
 
 	items, err := b.db.GetUnbannedSpamBioUsers(opts)
@@ -788,6 +804,79 @@ func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized b
 			filterMsg = fmt.Sprintf(" matching %q", keyword)
 		}
 		b.replyText(msg, fmt.Sprintf("✅ No unbanned new users with suspicious spam bios found%s.", filterMsg))
+		return
+	}
+
+	if shouldBan {
+		var matchingUsers []db.SpamBioUserItem
+		for _, u := range items {
+			if u.IsSpamMatch || len(u.MatchedKeywords) > 0 {
+				matchingUsers = append(matchingUsers, u)
+			}
+		}
+
+		if len(matchingUsers) == 0 {
+			b.replyText(msg, "✅ No unbanned users matching the spam filter to ban.")
+			return
+		}
+
+		// Send immediate confirmation reply
+		b.replyText(msg, fmt.Sprintf("🔨 **Batch Spam Ban Initiated**\nFound `%d` unbanned user(s) matching spam filter. Banning across all monitored groups in background...", len(matchingUsers)))
+
+		// Execute in background
+		go func(senderChatID int64) {
+			var successCount int
+			var failCount int
+			var actionLogs []string
+
+			for i, u := range matchingUsers {
+				displayName := strings.TrimSpace(u.FirstName + " " + u.LastName)
+				if displayName == "" {
+					displayName = "Unknown"
+				}
+				userHandle := ""
+				if u.Username != "" {
+					userHandle = " (@" + escapeMarkdown(u.Username) + ")"
+				}
+				kwStr := strings.Join(u.MatchedKeywords, ", ")
+				if len(kwStr) > 40 {
+					kwStr = kwStr[:37] + "..."
+				}
+
+				err := b.BanUserAcrossAllGroups(u.UserID, senderChatID)
+				if err != nil {
+					failCount++
+					log.Printf("[BatchBan] Failed to ban user %d across groups: %v", u.UserID, err)
+					actionLogs = append(actionLogs, fmt.Sprintf("%d. ❌ **%s**%s (`%d`) - Failed: `%v`", i+1, escapeMarkdown(displayName), userHandle, u.UserID, err))
+				} else {
+					successCount++
+					log.Printf("[BatchBan] Successfully banned user %d across groups", u.UserID)
+					actionLogs = append(actionLogs, fmt.Sprintf("%d. ✅ **%s**%s (`%d`) - Banned [Matched: `%s`]", i+1, escapeMarkdown(displayName), userHandle, u.UserID, escapeMarkdown(kwStr)))
+				}
+			}
+
+			// Build summary report
+			var sb strings.Builder
+			sb.WriteString("🔨 **Batch Spam Ban Summary Report**\n\n")
+			sb.WriteString(fmt.Sprintf("• **Total Evaluated**: `%d`\n", len(matchingUsers)))
+			sb.WriteString(fmt.Sprintf("• **Successfully Banned**: `%d`\n", successCount))
+			sb.WriteString(fmt.Sprintf("• **Failed Actions**: `%d`\n\n", failCount))
+			sb.WriteString("**Action Details**:\n")
+
+			for _, logLine := range actionLogs {
+				sb.WriteString(logLine + "\n")
+			}
+
+			summaryMsg := sb.String()
+
+			// Send summary back to sender chat
+			b.sendChunkedText(senderChatID, summaryMsg)
+
+			// Send summary to Private Moderation Group if configured and different from sender chat
+			if b.cfg.ModerationGroupID != 0 && b.cfg.ModerationGroupID != senderChatID {
+				b.sendChunkedText(b.cfg.ModerationGroupID, summaryMsg)
+			}
+		}(msg.Chat.ID)
 		return
 	}
 
@@ -1021,6 +1110,37 @@ func (b *Bot) replyText(msg *tgbotapi.Message, text string) {
 	}
 }
 
+func (b *Bot) sendChunkedText(chatID int64, text string) {
+	if chatID == 0 || text == "" {
+		return
+	}
+	const maxLen = 3800
+	for len(text) > maxLen {
+		splitIdx := strings.LastIndex(text[:maxLen], "\n")
+		if splitIdx == -1 {
+			splitIdx = maxLen
+		}
+		chunk := text[:splitIdx]
+		text = text[splitIdx:]
+
+		msg := tgbotapi.NewMessage(chatID, chunk)
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		if _, err := b.Send(msg); err != nil {
+			msg.ParseMode = ""
+			_, _ = b.Send(msg)
+		}
+	}
+
+	if len(text) > 0 {
+		msg := tgbotapi.NewMessage(chatID, text)
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		if _, err := b.Send(msg); err != nil {
+			msg.ParseMode = ""
+			_, _ = b.Send(msg)
+		}
+	}
+}
+
 func boolStatus(val bool) string {
 	if val {
 		return "✅ Allowed"
@@ -1050,7 +1170,7 @@ func getHelpText(isSuperAdmin, isModGroup bool) string {
 		"• `/promote <user|@username>` - Promote user to Group Admin & set rep to 100\n" +
 		"• `/demote <user|@username>` - Remove admin status & reset rep (Super Admin only)\n" +
 		"• `/listusers` - List all known users, reputation scores & admin flags\n" +
-		"• `/listspambios [keyword]` - List unbanned new users with suspicious or syndicate spam bios\n" +
+		"• `/listspambios [kw] [ban]` - List or batch-ban unbanned new users with suspicious or syndicate spam bios\n" +
 		"• `/cleanup` - Manually run 7-day logs & 50-post-per-user retention cleanup\n" +
 		"• `/getdb` - Download a copy of the current SQLite3 database (Admin direct message only)\n" +
 		"• `/fetchprofile <user|@username>` - Fetch fresh Telegram profile (bio & picture) & cache in DB\n" +

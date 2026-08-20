@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/angch/gogcbot/pkg/config"
 	"github.com/angch/gogcbot/pkg/db"
@@ -15,6 +16,7 @@ var (
 	listSpamBiosKeyword    string
 	listSpamBiosMaxPosts   int
 	listSpamBiosLimit      int
+	listSpamBiosBan        bool
 )
 
 var listSpamBiosCmd = &cobra.Command{
@@ -23,7 +25,8 @@ var listSpamBiosCmd = &cobra.Command{
 	Short:   "List unbanned new users with profile bios (matches all by default, or filtered by keyword)",
 	Long: `Scan cached user profiles for unbanned new users with non-empty bios.
 By default (empty keyword), matches all unbanned users with bios.
-Use --keyword / -k to filter by specific keywords or phrases (e.g. 锦鲤代发, 油卡, E卡, 沃尔玛, 联系 @...).`,
+Use --keyword / -k to filter by specific keywords or phrases.
+Use --ban / -b to automatically ban all users matching the spam filter in the database.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.LoadConfig(cfgFile)
 		if err != nil {
@@ -58,6 +61,35 @@ Use --keyword / -k to filter by specific keywords or phrases (e.g. 锦鲤代发,
 			return fmt.Errorf("failed to query spam bio users: %w", err)
 		}
 
+		if listSpamBiosBan {
+			var matching []db.SpamBioUserItem
+			for _, u := range items {
+				if u.IsSpamMatch || len(u.MatchedKeywords) > 0 {
+					matching = append(matching, u)
+				}
+			}
+
+			if len(matching) == 0 {
+				fmt.Println("✅ No unbanned users matching the spam filter to ban.")
+				return nil
+			}
+
+			fmt.Printf("🔨 Banning %d unbanned user(s) matching spam filter...\n", len(matching))
+			var successCount, failCount int
+			for _, u := range matching {
+				err := database.SetUserBanned(u.UserID, true)
+				if err != nil {
+					failCount++
+					fmt.Printf("❌ User %d (@%s) - Failed: %v\n", u.UserID, u.Username, err)
+				} else {
+					successCount++
+					fmt.Printf("✅ User %d (@%s) - Banned [Matched: %s]\n", u.UserID, u.Username, strings.Join(u.MatchedKeywords, ", "))
+				}
+			}
+			fmt.Printf("\n🔨 Summary: %d successfully banned, %d failed out of %d total matching users.\n", successCount, failCount, len(matching))
+			return nil
+		}
+
 		markdownReport := db.GenerateSpamBioMarkdown(items, opts)
 
 		if listSpamBiosOutputFile != "" {
@@ -78,5 +110,6 @@ func init() {
 	listSpamBiosCmd.Flags().StringVarP(&listSpamBiosKeyword, "keyword", "k", "", "Filter by specific keyword or phrase in bio (empty matches all)")
 	listSpamBiosCmd.Flags().IntVarP(&listSpamBiosMaxPosts, "max-posts", "m", 5, "Filter users with at most N logged posts (0 for any post count)")
 	listSpamBiosCmd.Flags().IntVarP(&listSpamBiosLimit, "limit", "l", 0, "Limit number of users displayed (0 for unlimited)")
+	listSpamBiosCmd.Flags().BoolVarP(&listSpamBiosBan, "ban", "b", false, "Ban all users matching the spam filter in database")
 	rootCmd.AddCommand(listSpamBiosCmd)
 }

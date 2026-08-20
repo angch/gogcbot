@@ -763,4 +763,38 @@ func TestCmdListSpamBios(t *testing.T) {
 	}
 
 	b.handleCommand(msgFilter, adminUser)
+
+	// Test batch ban with /listspambios ban
+	b.cfg.ModerationGroupID = -100998877
+	msgBan := &tgbotapi.Message{
+		MessageID: 62,
+		From: &tgbotapi.User{
+			ID:        superAdminID,
+			UserName:  "superadmin",
+			FirstName: "Super",
+			LastName:  "Admin",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:   superAdminID,
+			Type: "private",
+		},
+		Text: "/listspambios ban",
+		Entities: []tgbotapi.MessageEntity{
+			{Type: "bot_command", Offset: 0, Length: 13},
+		},
+	}
+
+	b.handleCommand(msgBan, adminUser)
+
+	// Give the background goroutine a moment to complete
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify target user 888999 was banned
+	u, err := b.db.GetUserByID(888999)
+	if err != nil {
+		t.Fatalf("failed to query user 888999: %v", err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user 888999 to be banned after /listspambios ban")
+	}
 }

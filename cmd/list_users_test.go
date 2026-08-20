@@ -194,4 +194,33 @@ func TestListSpamBiosCmd(t *testing.T) {
 			t.Errorf("expected '⚠️ YES' in generated file for spam user")
 		}
 	})
+
+	t.Run("Execute list-spambios --ban", func(t *testing.T) {
+		listSpamBiosOutputFile = ""
+		listSpamBiosKeyword = ""
+		listSpamBiosMaxPosts = 5
+		listSpamBiosLimit = 0
+		listSpamBiosBan = true
+
+		rootCmd.SetArgs([]string{"list-spambios", "--config", cfgPath, "--ban"})
+		err := rootCmd.Execute()
+		if err != nil {
+			t.Fatalf("list-spambios --ban failed: %v", err)
+		}
+
+		// Verify user 5001 is now banned
+		database, err := db.OpenDB(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		u, err := database.GetUserByID(5001)
+		if err != nil {
+			t.Fatalf("failed to get user 5001: %v", err)
+		}
+		if !u.IsBanned {
+			t.Errorf("expected user 5001 to be banned after list-spambios --ban")
+		}
+	})
 }
