@@ -61,6 +61,9 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 			}
 			det.RegisterTrigger(detector.NewNewUserCJKTrigger(cjkCfg))
 		}
+		if cfg.Detector.UsernameAnomaly.Enabled {
+			det.RegisterTrigger(detector.NewUsernameAnomalyTrigger(cfg.Detector.UsernameAnomaly))
+		}
 	}
 
 	b := &Bot{

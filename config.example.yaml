@@ -36,6 +36,14 @@ detector:
     max_reputation: 5
     max_user_posts: 5
     rep_penalty: 20
+  username_anomaly:
+    enabled: true
+    min_high_user_id: 1000000000
+    max_reputation: 5
+    max_user_posts: 5
+    min_score: 3
+    flag_only: true
+    rep_penalty: 20
 
 shieldy:
   enabled: true
