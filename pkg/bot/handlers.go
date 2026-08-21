@@ -560,6 +560,65 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 		user.LanguageCode = tgUser.LanguageCode
 	}
 
+	// Check Red Packet CJK Name Trigger on join
+	redPacketEnabled := b.cfg.Detector.RedPacketName.Enabled || b.cfg.Detector.NewUserRedPacket.Enabled
+	if b.cfg.Detector.Enabled && redPacketEnabled {
+		rpCfg := b.cfg.Detector.RedPacketName
+		if !rpCfg.Enabled && b.cfg.Detector.NewUserRedPacket.Enabled {
+			rpCfg = b.cfg.Detector.NewUserRedPacket
+		}
+		rTrigger := detector.NewRedPacketNameTrigger(rpCfg)
+		tCtx := &detector.TriggerContext{
+			User:             user,
+			ChatID:           chatID,
+			GroupTitle:       groupTitle,
+			IsNewUser:        true,
+			UserMessageCount: 0,
+		}
+		res, err := rTrigger.Evaluate(tCtx)
+		if err == nil && res != nil && res.Triggered {
+			log.Printf("[Bot Trigger] Rule '%s' fired on join for user %d (@%s) in chat %d: %s",
+				res.TriggerID, user.UserID, user.Username, chatID, res.Reason)
+
+			// Delete join service message if present
+			if joinMsg != nil {
+				_ = b.DeleteGroupMessage(chatID, joinMsg.MessageID)
+			}
+
+			// Ban user across all monitored groups
+			if err := b.BanUserAcrossAllGroups(user.UserID, chatID); err != nil {
+				log.Printf("[Bot Action Error] Failed to ban user %d across groups: %v", user.UserID, err)
+			}
+
+			// Deduct reputation
+			repPenalty := rpCfg.RepPenalty
+			if repPenalty <= 0 {
+				repPenalty = 20
+			}
+			if newRep, err := b.db.AdjustReputation(user.UserID, -repPenalty, res.Reason, 0); err == nil {
+				user.Reputation = newRep
+			}
+
+			msgID := 0
+			if joinMsg != nil {
+				msgID = joinMsg.MessageID
+			}
+			userDisplayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+			alertMsg := &db.Message{
+				ChatID:    chatID,
+				MessageID: msgID,
+				UserID:    user.UserID,
+				Text:      fmt.Sprintf("[Joining User Name]: %s\n[Username]: @%s", userDisplayName, user.Username),
+				CreatedAt: time.Now(),
+			}
+
+			if err := b.SendTriggerBanAlert(chatID, user, alertMsg, res.Reason); err != nil {
+				log.Printf("[Bot Action Error] Failed to send trigger ban alert for red packet CJK name: %v", err)
+			}
+			return
+		}
+	}
+
 	// 1. Grab user profile and bio from Telegram API
 	profile, err := b.FetchUserProfile(user.UserID)
 	if err != nil {

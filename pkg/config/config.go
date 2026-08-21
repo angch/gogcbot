@@ -37,9 +37,11 @@ type ShieldyConfig struct {
 // DetectorConfig defines settings for modular detection triggers.
 type DetectorConfig struct {
 	Enabled        bool                                `mapstructure:"enabled" yaml:"enabled"`
-	NewUserCJK     detector.NewUserCJKTriggerConfig    `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
-	NewUserChinese detector.NewUserCJKTriggerConfig    `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
-	NewUserSpamBio detector.NewUserSpamBioTriggerConfig `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
+	NewUserCJK       detector.NewUserCJKTriggerConfig     `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
+	NewUserChinese   detector.NewUserCJKTriggerConfig     `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
+	NewUserSpamBio   detector.NewUserSpamBioTriggerConfig `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
+	RedPacketName    detector.RedPacketNameTriggerConfig  `mapstructure:"red_packet_name" yaml:"red_packet_name"`
+	NewUserRedPacket detector.RedPacketNameTriggerConfig  `mapstructure:"new_user_red_packet" yaml:"new_user_red_packet,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -108,6 +110,16 @@ func DefaultConfig() Config {
 				MaxUserPosts:  5,
 				RepPenalty:    20,
 			},
+			RedPacketName: detector.RedPacketNameTriggerConfig{
+				Enabled:           true,
+				MinHighUserID:     1000000000,
+				MaxReputation:     5,
+				MaxUserPosts:      5,
+				MinUsernameLength: 5,
+				MinCJKRatio:       0.5,
+				MinCJKChars:       1,
+				RepPenalty:        20,
+			},
 		},
 		Shieldy: ShieldyConfig{
 			Enabled:             true,
@@ -166,6 +178,24 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.new_user_spam_bio.max_user_posts", 5)
 	v.SetDefault("detector.new_user_spam_bio.rep_penalty", 20)
 
+	v.SetDefault("detector.red_packet_name.enabled", true)
+	v.SetDefault("detector.red_packet_name.min_high_user_id", int64(1000000000))
+	v.SetDefault("detector.red_packet_name.max_reputation", 5)
+	v.SetDefault("detector.red_packet_name.max_user_posts", 5)
+	v.SetDefault("detector.red_packet_name.min_username_length", 5)
+	v.SetDefault("detector.red_packet_name.min_cjk_ratio", 0.5)
+	v.SetDefault("detector.red_packet_name.min_cjk_chars", 1)
+	v.SetDefault("detector.red_packet_name.rep_penalty", 20)
+
+	v.SetDefault("detector.new_user_red_packet.enabled", true)
+	v.SetDefault("detector.new_user_red_packet.min_high_user_id", int64(1000000000))
+	v.SetDefault("detector.new_user_red_packet.max_reputation", 5)
+	v.SetDefault("detector.new_user_red_packet.max_user_posts", 5)
+	v.SetDefault("detector.new_user_red_packet.min_username_length", 5)
+	v.SetDefault("detector.new_user_red_packet.min_cjk_ratio", 0.5)
+	v.SetDefault("detector.new_user_red_packet.min_cjk_chars", 1)
+	v.SetDefault("detector.new_user_red_packet.rep_penalty", 20)
+
 	v.SetDefault("shieldy.enabled", true)
 	v.SetDefault("shieldy.rep_bonus", 5)
 	v.SetDefault("shieldy.max_messages", 5)
@@ -204,6 +234,10 @@ func LoadConfig(cfgFile string) (*Config, error) {
 
 	if (v.InConfig("detector.new_user_chinese") || cfg.Detector.NewUserChinese.MinHighUserID != 0 || cfg.Detector.NewUserChinese.RepPenalty != 0) && !v.InConfig("detector.new_user_cjk") {
 		cfg.Detector.NewUserCJK = cfg.Detector.NewUserChinese
+	}
+
+	if (v.InConfig("detector.new_user_red_packet") || cfg.Detector.NewUserRedPacket.MinHighUserID != 0 || cfg.Detector.NewUserRedPacket.RepPenalty != 0) && !v.InConfig("detector.red_packet_name") {
+		cfg.Detector.RedPacketName = cfg.Detector.NewUserRedPacket
 	}
 
 	return &cfg, nil

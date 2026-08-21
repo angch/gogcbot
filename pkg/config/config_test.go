@@ -155,6 +155,12 @@ func TestDefaultConfig_DefaultInitialZero(t *testing.T) {
 	if cfg.Detector.NewUserCJK.MinHighUserID != 1000000000 {
 		t.Errorf("Expected MinHighUserID 1000000000, got %d", cfg.Detector.NewUserCJK.MinHighUserID)
 	}
+	if !cfg.Detector.RedPacketName.Enabled {
+		t.Errorf("Expected Detector.RedPacketName.Enabled to be true by default")
+	}
+	if cfg.Detector.RedPacketName.MinHighUserID != 1000000000 {
+		t.Errorf("Expected MinHighUserID 1000000000, got %d", cfg.Detector.RedPacketName.MinHighUserID)
+	}
 	if !cfg.Shieldy.Enabled {
 		t.Errorf("Expected Shieldy.Enabled to be true by default")
 	}
@@ -201,3 +207,80 @@ detector:
 		t.Errorf("Expected RepPenalty 35, got %d", cfg.Detector.NewUserCJK.RepPenalty)
 	}
 }
+
+func TestLoadConfig_RedPacketNameConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "redpacket_config.yaml")
+
+	content := `
+detector:
+  enabled: true
+  red_packet_name:
+    enabled: true
+    min_high_user_id: 3000000000
+    max_reputation: 3
+    min_username_length: 6
+    rep_penalty: 25
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if !cfg.Detector.RedPacketName.Enabled {
+		t.Errorf("Expected RedPacketName to be enabled")
+	}
+	if cfg.Detector.RedPacketName.MinHighUserID != 3000000000 {
+		t.Errorf("Expected MinHighUserID 3000000000, got %d", cfg.Detector.RedPacketName.MinHighUserID)
+	}
+	if cfg.Detector.RedPacketName.MaxReputation != 3 {
+		t.Errorf("Expected MaxReputation 3, got %d", cfg.Detector.RedPacketName.MaxReputation)
+	}
+	if cfg.Detector.RedPacketName.MinUsernameLength != 6 {
+		t.Errorf("Expected MinUsernameLength 6, got %d", cfg.Detector.RedPacketName.MinUsernameLength)
+	}
+	if cfg.Detector.RedPacketName.RepPenalty != 25 {
+		t.Errorf("Expected RepPenalty 25, got %d", cfg.Detector.RedPacketName.RepPenalty)
+	}
+}
+
+func TestLoadConfig_LegacyNewUserRedPacketCompatibility(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "legacy_redpacket_config.yaml")
+
+	content := `
+detector:
+  enabled: true
+  new_user_red_packet:
+    enabled: true
+    min_high_user_id: 4000000000
+    max_reputation: 2
+    rep_penalty: 40
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if !cfg.Detector.RedPacketName.Enabled {
+		t.Errorf("Expected RedPacketName to be enabled from legacy new_user_red_packet config")
+	}
+	if cfg.Detector.RedPacketName.MinHighUserID != 4000000000 {
+		t.Errorf("Expected MinHighUserID 4000000000, got %d", cfg.Detector.RedPacketName.MinHighUserID)
+	}
+	if cfg.Detector.RedPacketName.MaxReputation != 2 {
+		t.Errorf("Expected MaxReputation 2, got %d", cfg.Detector.RedPacketName.MaxReputation)
+	}
+	if cfg.Detector.RedPacketName.RepPenalty != 40 {
+		t.Errorf("Expected RepPenalty 40, got %d", cfg.Detector.RedPacketName.RepPenalty)
+	}
+}
+

@@ -96,6 +96,13 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 			}
 			det.RegisterTrigger(detector.NewNewUserSpamBioTriggerWithKeywords(spamBioCfg, kws...))
 		}
+		if cfg.Detector.RedPacketName.Enabled || cfg.Detector.NewUserRedPacket.Enabled {
+			rpCfg := cfg.Detector.RedPacketName
+			if !rpCfg.Enabled && cfg.Detector.NewUserRedPacket.Enabled {
+				rpCfg = cfg.Detector.NewUserRedPacket
+			}
+			det.RegisterTrigger(detector.NewRedPacketNameTrigger(rpCfg))
+		}
 	}
 
 	if database != nil && len(cfg.AutoFlag.BlockedKeywords) > 0 {

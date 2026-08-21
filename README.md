@@ -63,6 +63,14 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
    - **`spam_snippets` Database Table**: Stores dynamic spam snippets synced from runtime `config.yaml` or added programmatically.
    - **CLI & Bot Commands**: Search and inspect suspicious bios or unknown/new accounts via `gogcbot list-unknownusers` (or `list-spambios`) and `/listunknownusers` (rendered as a compact monospace table with CJK visual alignment).
 
+9. **Red Packet CJK Name & Mixed-Caps Username Detection (`red_packet_name`)**:
+   - **Instant Ban on Join & Message**: Instantly triggers automated bans, deletes join/chat messages, penalizes reputation (-20), and alerts the moderation channel when a joining or new account matches:
+     1. Name ends with `"🧧"` (Red Packet emoji `U+1F9E7`).
+     2. Name itself is mostly CJK Unicode characters (>= 50% CJK ratio).
+     3. High user ID (>= 1,000,000,000 / 10^9).
+     4. Username consists of mixed-caps letters of at least 5 length (e.g. `@cbzbQFLOuHNkJZ`).
+
+
 ---
 
 ## 🚀 Installation & Usage

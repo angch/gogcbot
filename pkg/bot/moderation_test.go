@@ -907,3 +907,124 @@ func TestTelegramChatFullInfo_Unmarshal(t *testing.T) {
 	}
 }
 
+func TestHandleChatMemberUpdate_UserJoin_RedPacketCJKName_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(6890123456)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "cbzbQFLOuHNkJZ", FirstName: "全网最高扶持🧧", LastName: ""},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "cbzbQFLOuHNkJZ", FirstName: "全网最高扶持🧧", LastName: ""},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after joining with red packet CJK name and mixed caps username", userID)
+	}
+	if u.Reputation >= 0 {
+		t.Errorf("expected user %d reputation to be penalized (< 0), got %d", userID, u.Reputation)
+	}
+}
+
+func TestHandleMessage_NewChatMembers_RedPacketCJKName_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(7890123456)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	joinMsg := &tgbotapi.Message{
+		MessageID: 777,
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "aBcDeF",
+			FirstName: "兼职",
+			LastName:  "日结🧧",
+		},
+		NewChatMembers: []tgbotapi.User{
+			{
+				ID:        userID,
+				UserName:  "aBcDeF",
+				FirstName: "兼职",
+				LastName:  "日结🧧",
+			},
+		},
+	}
+
+	b.handleMessage(joinMsg)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after joining via NewChatMembers with red packet CJK name", userID)
+	}
+}
+
+func TestHandleMessage_RedPacketCJKName_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(8890123456)
+	chatID := int64(-100123)
+
+	b.cfg.ModerationGroupID = -100998877
+	b.detector = detector.NewDetector(
+		detector.NewRedPacketNameTrigger(b.cfg.Detector.RedPacketName),
+	)
+
+	msg := &tgbotapi.Message{
+		MessageID: 888,
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "cbzbQFLOuHNkJZ",
+			FirstName: "兼职日结🧧",
+		},
+		Text: "Hello general conversation",
+	}
+
+	b.handleMessage(msg)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after message evaluation with red packet CJK name", userID)
+	}
+}
+
+
