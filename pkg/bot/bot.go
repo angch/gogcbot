@@ -679,5 +679,9 @@ func BuildDetector(cfg *config.Config, database *db.DB) *detector.Detector {
 		det.RegisterTrigger(detector.NewProfileNameKeywordBanTrigger(cfg.Detector.ProfileNameKeywordBan))
 	}
 
+	if cfg.Detector.NonsenseBio.Enabled {
+		det.RegisterTrigger(detector.NewNonsenseBioTrigger(cfg.Detector.NonsenseBio))
+	}
+
 	return det
 }
