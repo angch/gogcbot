@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/angch/gogcbot/pkg/detector"
 	"github.com/spf13/viper"
@@ -36,12 +37,13 @@ type ShieldyConfig struct {
 
 // DetectorConfig defines settings for modular detection triggers.
 type DetectorConfig struct {
-	Enabled        bool                                `mapstructure:"enabled" yaml:"enabled"`
-	NewUserCJK       detector.NewUserCJKTriggerConfig     `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
-	NewUserChinese   detector.NewUserCJKTriggerConfig     `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
-	NewUserSpamBio   detector.NewUserSpamBioTriggerConfig `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
-	RedPacketName    detector.RedPacketNameTriggerConfig  `mapstructure:"red_packet_name" yaml:"red_packet_name"`
-	NewUserRedPacket detector.RedPacketNameTriggerConfig  `mapstructure:"new_user_red_packet" yaml:"new_user_red_packet,omitempty"`
+	Enabled              bool                                 `mapstructure:"enabled" yaml:"enabled"`
+	NewUserCJK           detector.NewUserCJKTriggerConfig     `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
+	NewUserChinese       detector.NewUserCJKTriggerConfig     `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
+	NewUserSpamBio       detector.NewUserSpamBioTriggerConfig `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
+	RedPacketName        detector.RedPacketNameTriggerConfig  `mapstructure:"red_packet_name" yaml:"red_packet_name"`
+	NewUserRedPacket     detector.RedPacketNameTriggerConfig  `mapstructure:"new_user_red_packet" yaml:"new_user_red_packet,omitempty"`
+	OllamaNameClassifier detector.OllamaNameClassifierConfig  `mapstructure:"ollama_name_classifier" yaml:"ollama_name_classifier,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -120,6 +122,17 @@ func DefaultConfig() Config {
 				MinCJKChars:       1,
 				RepPenalty:        20,
 			},
+			OllamaNameClassifier: detector.OllamaNameClassifierConfig{
+				Enabled:        true,
+				OllamaURL:      "http://localhost:11434",
+				Model:          "phi4",
+				MinHighUserID:  1000000000,
+				MaxReputation:  5,
+				MaxUserPosts:   5,
+				RequestTimeout: 10 * time.Second,
+				FlagOnly:       true,
+				RepPenalty:     20,
+			},
 		},
 		Shieldy: ShieldyConfig{
 			Enabled:             true,
@@ -196,6 +209,15 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.new_user_red_packet.min_cjk_chars", 1)
 	v.SetDefault("detector.new_user_red_packet.rep_penalty", 20)
 
+	v.SetDefault("detector.ollama_name_classifier.enabled", true)
+	v.SetDefault("detector.ollama_name_classifier.ollama_url", "http://localhost:11434")
+	v.SetDefault("detector.ollama_name_classifier.model", "phi4")
+	v.SetDefault("detector.ollama_name_classifier.min_high_user_id", int64(1000000000))
+	v.SetDefault("detector.ollama_name_classifier.max_reputation", 5)
+	v.SetDefault("detector.ollama_name_classifier.max_user_posts", 5)
+	v.SetDefault("detector.ollama_name_classifier.request_timeout", "10s")
+	v.SetDefault("detector.ollama_name_classifier.flag_only", true)
+	v.SetDefault("detector.ollama_name_classifier.rep_penalty", 20)
 	v.SetDefault("shieldy.enabled", true)
 	v.SetDefault("shieldy.rep_bonus", 5)
 	v.SetDefault("shieldy.max_messages", 5)
