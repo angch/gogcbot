@@ -77,6 +77,15 @@ func buildStandardTestDetector() *Detector {
 			RepPenalty:      20,
 			BlockedKeywords: []string{"0壹天", "每日", "吴压", "吾思", "兼织"},
 		}),
+		NewNonsenseBioTrigger(NonsenseBioTriggerConfig{
+			Enabled:       true,
+			MinHighUserID: 1000000000,
+			MaxReputation: 5,
+			MaxUserPosts:  5,
+			MinWords:      5,
+			FlagOnly:      true,
+			RepPenalty:    20,
+		}),
 	)
 }
 

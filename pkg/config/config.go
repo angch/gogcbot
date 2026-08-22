@@ -42,8 +42,9 @@ type DetectorConfig struct {
 	NewUserSpamBio        detector.NewUserSpamBioTriggerConfig  `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
 	RedPacketName         detector.RedPacketNameTriggerConfig   `mapstructure:"red_packet_name" yaml:"red_packet_name"`
 	NewUserRedPacket      detector.RedPacketNameTriggerConfig   `mapstructure:"new_user_red_packet" yaml:"new_user_red_packet,omitempty"`
-	UsernameAnomaly       detector.UsernameAnomalyTriggerConfig `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
-	ProfileNameKeywordBan detector.ProfileNameKeywordBanConfig  `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
+	UsernameAnomaly       detector.UsernameAnomalyTriggerConfig  `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
+	ProfileNameKeywordBan detector.ProfileNameKeywordBanConfig   `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
+	NonsenseBio           detector.NonsenseBioTriggerConfig      `mapstructure:"nonsense_bio" yaml:"nonsense_bio,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -140,6 +141,15 @@ func DefaultConfig() Config {
 				FlagOnly:        true,
 				RepPenalty:      20,
 				BlockedKeywords: []string{"0壹天", "每日", "吴压", "吾思", "兼织"},
+			},
+			NonsenseBio: detector.NonsenseBioTriggerConfig{
+				Enabled:       true,
+				MinHighUserID: 1000000000,
+				MaxReputation: 5,
+				MaxUserPosts:  5,
+				MinWords:      5,
+				FlagOnly:      true,
+				RepPenalty:    20,
 			},
 		},
 		Shieldy: ShieldyConfig{
