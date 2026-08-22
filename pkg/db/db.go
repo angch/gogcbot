@@ -267,7 +267,7 @@ func (d *DB) InitSchema() error {
 		last_name TEXT NOT NULL DEFAULT '',
 		language_code TEXT NOT NULL DEFAULT '',
 		is_premium BOOLEAN NOT NULL DEFAULT 0,
-		reputation INTEGER NOT NULL DEFAULT 100,
+		reputation INTEGER NOT NULL DEFAULT 0,
 		warn_count INTEGER NOT NULL DEFAULT 0,
 		is_banned BOOLEAN NOT NULL DEFAULT 0,
 		is_admin BOOLEAN NOT NULL DEFAULT 0,
