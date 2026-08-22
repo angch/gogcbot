@@ -909,4 +909,3 @@ func TestVisualStringWidthAndTruncate(t *testing.T) {
 		t.Errorf("expected '...' suffix for truncated string, got %q", truncated)
 	}
 }
-

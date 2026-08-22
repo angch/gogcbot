@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -406,6 +407,14 @@ func (d *DB) UpdateUserMetadata(userID int64, lang string, isPremium bool) error
 	return err
 }
 
+// UpdateUserName updates a user's username, first name, and last name.
+func (d *DB) UpdateUserName(userID int64, username, firstName, lastName string) error {
+	now := time.Now()
+	_, err := d.Exec(`UPDATE users SET username = ?, first_name = ?, last_name = ?, updated_at = ? WHERE user_id = ?`,
+		username, firstName, lastName, now, userID)
+	return err
+}
+
 func (d *DB) GetUserByID(userID int64) (*User, error) {
 	var user User
 	err := d.QueryRow(`
@@ -447,6 +456,30 @@ func (d *DB) GetAllUsers(limit int) ([]User, error) {
 		ORDER BY reputation DESC, created_at DESC
 		LIMIT ?
 	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
+// GetBannedUsers returns all users marked as banned (is_banned = 1) in the database.
+func (d *DB) GetBannedUsers() ([]User, error) {
+	rows, err := d.Query(`
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		FROM users
+		WHERE is_banned = 1
+		ORDER BY updated_at DESC, user_id ASC
+	`)
 	if err != nil {
 		return nil, err
 	}
@@ -1138,7 +1171,8 @@ func (d *DB) GetUserFullDump(identifier string, superAdminID int64, extraKeyword
 	}, nil
 }
 
-// MatchSpamBioProfile checks all text fields of a user profile (bio, personal channel title/username, business intro) for spam keywords.
+// MatchSpamBioProfile checks all text fields of a user profile (bio, personal channel title/username, business intro) for spam keywords,
+// and checks personal_chat.username against spammy username patterns (starts with letters, ends with digits with delimiters removed).
 func MatchSpamBioProfile(p *UserProfile, additionalKeywords ...string) (bool, []string) {
 	if p == nil {
 		return false, nil
@@ -1156,11 +1190,23 @@ func MatchSpamBioProfile(p *UserProfile, additionalKeywords ...string) (bool, []
 	if strings.TrimSpace(p.BusinessIntro) != "" {
 		texts = append(texts, p.BusinessIntro)
 	}
-	if len(texts) == 0 {
-		return false, nil
+
+	var matchedKeywords []string
+	if len(texts) > 0 {
+		combined := strings.Join(texts, " | ")
+		isSpam, matched := MatchSpamBioAll(combined, additionalKeywords...)
+		if isSpam {
+			matchedKeywords = append(matchedKeywords, matched...)
+		}
 	}
-	combined := strings.Join(texts, " | ")
-	return MatchSpamBioAll(combined, additionalKeywords...)
+
+	// Check if personal channel username matches spammy username patterns
+	if p.PersonalChatUsername != "" && IsSpammyUsername(p.PersonalChatUsername) {
+		cleanHandle := strings.TrimPrefix(strings.TrimSpace(p.PersonalChatUsername), "@")
+		matchedKeywords = append(matchedKeywords, fmt.Sprintf("spammy_channel_username:@%s", cleanHandle))
+	}
+
+	return len(matchedKeywords) > 0, matchedKeywords
 }
 
 // FormatUserDump formats a UserFullDump into a detailed Markdown report.
@@ -1381,6 +1427,54 @@ func (d *DB) GetUsersWithoutProfile(limit int) ([]User, error) {
 	return users, nil
 }
 
+// GetLowRepUsersForRescan queries unbanned, non-admin users with reputation <= maxRep
+// whose profile was fetched before cutoff (or never fetched). If cutoff is zero, the time filter is bypassed.
+func (d *DB) GetLowRepUsersForRescan(maxRep int, cutoff time.Time, limit int) ([]User, error) {
+	var query string
+	var args []interface{}
+
+	if cutoff.IsZero() {
+		query = `
+			SELECT u.user_id, u.username, u.first_name, u.last_name, u.language_code, u.is_premium, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
+			FROM users u
+			LEFT JOIN user_profiles p ON u.user_id = p.user_id
+			WHERE u.is_banned = 0 AND u.is_admin = 0 AND u.reputation <= ?
+			ORDER BY u.reputation ASC, u.user_id DESC
+		`
+		args = append(args, maxRep)
+	} else {
+		query = `
+			SELECT u.user_id, u.username, u.first_name, u.last_name, u.language_code, u.is_premium, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
+			FROM users u
+			LEFT JOIN user_profiles p ON u.user_id = p.user_id
+			WHERE u.is_banned = 0 AND u.is_admin = 0 AND u.reputation <= ?
+			  AND (p.fetched_at IS NULL OR p.fetched_at < ?)
+			ORDER BY u.reputation ASC, u.user_id DESC
+		`
+		args = append(args, maxRep, cutoff)
+	}
+
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := d.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
 func (d *DB) GetAllUserProfiles(limit int) ([]UserProfile, error) {
 	query := `
 		SELECT user_id, username, first_name, last_name, language_code, is_premium, bio,
@@ -1426,19 +1520,19 @@ func (d *DB) GetUserProfileCount() (int, error) {
 
 // UserReportItem holds comprehensive metadata for good and bad users.
 type UserReportItem struct {
-	UserID        int64      `json:"user_id"`
-	Username      string     `json:"username"`
-	FirstName     string     `json:"first_name"`
-	LastName      string     `json:"last_name"`
-	Reputation    int        `json:"reputation"`
-	WarnCount     int        `json:"warn_count"`
-	IsBanned      bool       `json:"is_banned"`
-	IsAdmin       bool       `json:"is_admin"`
-	IsSuperAdmin  bool       `json:"is_super_admin"`
-	Role          string     `json:"role"`
-	MessageCount  int        `json:"message_count"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	UserID       int64     `json:"user_id"`
+	Username     string    `json:"username"`
+	FirstName    string    `json:"first_name"`
+	LastName     string    `json:"last_name"`
+	Reputation   int       `json:"reputation"`
+	WarnCount    int       `json:"warn_count"`
+	IsBanned     bool      `json:"is_banned"`
+	IsAdmin      bool      `json:"is_admin"`
+	IsSuperAdmin bool      `json:"is_super_admin"`
+	Role         string    `json:"role"`
+	MessageCount int       `json:"message_count"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 
 	// Ban / Moderation metadata (for bad users)
 	IsManualBan  bool       `json:"is_manual_ban"`  // Banned manually by moderator or command
@@ -2020,6 +2114,7 @@ func extractTriggerName(reason string) string {
 
 // SpamBioKeywords contains common promotional, discount card, gift card, and syndicate scam terms seen in Telegram bio spam.
 var SpamBioKeywords = []string{
+	"点我",
 	"锦鲤代发",
 	"代发",
 	"油卡",
@@ -2072,6 +2167,48 @@ var SpamBioKeywords = []string{
 	"包赔",
 	"日赚",
 	"月入",
+}
+
+// IsSpammyUsername checks if a Telegram username matches typical spam syndicate patterns:
+// starts with letters, and ends with digits (with delimiters such as _, -, ., @, and whitespace removed).
+func IsSpammyUsername(username string) bool {
+	clean := strings.TrimPrefix(strings.TrimSpace(username), "@")
+	if clean == "" {
+		return false
+	}
+
+	var stripped strings.Builder
+	for _, r := range clean {
+		if r == '_' || r == '-' || r == '.' || unicode.IsSpace(r) {
+			continue
+		}
+		stripped.WriteRune(r)
+	}
+	s := stripped.String()
+	if len(s) == 0 {
+		return false
+	}
+
+	hasLetters := false
+	hasDigits := false
+	inDigits := false
+
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			if inDigits {
+				// Letter after digits -> not strictly ending in digits
+				return false
+			}
+			hasLetters = true
+		} else if r >= '0' && r <= '9' {
+			inDigits = true
+			hasDigits = true
+		} else {
+			return false
+		}
+	}
+
+	return hasLetters && hasDigits
 }
 
 // MatchSpamBio checks if a user bio matches known spam/marketing/syndicate keywords or custom filters.
@@ -2458,4 +2595,3 @@ func (d *DB) SyncSpamSnippets(snippets []string) error {
 	}
 	return nil
 }
-

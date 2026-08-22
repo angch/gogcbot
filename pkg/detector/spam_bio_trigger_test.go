@@ -84,6 +84,30 @@ func TestNewUserSpamBioTrigger_Evaluate(t *testing.T) {
 			wantKeyword:   "兼职",
 		},
 		{
+			name: "New user with 点我 keyword in personal channel title",
+			user: &db.User{
+				UserID:     8828604089,
+				Reputation: 1,
+			},
+			userMsgCount:      0,
+			bio:               "",
+			personalChatTitle: "🔴点我进群🔴",
+			wantTriggered:     true,
+			wantKeyword:       "点我",
+		},
+		{
+			name: "New user with spammy personal channel username",
+			user: &db.User{
+				UserID:     8828604089,
+				Reputation: 1,
+			},
+			userMsgCount:         0,
+			bio:                  "",
+			personalChatUsername: "gzy_8889215646_1_5248",
+			wantTriggered:        true,
+			wantKeyword:          "spammy_channel_username",
+		},
+		{
 			name: "Clean bio user",
 			user: &db.User{
 				UserID:     777111,
