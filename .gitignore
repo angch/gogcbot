@@ -9,6 +9,9 @@ gogcbot.exe
 *.db-wal
 *.db-shm
 
+# Data
+*.csv
+
 # Local Config
 config.yaml
 test_config.yaml
