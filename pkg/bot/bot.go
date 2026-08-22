@@ -19,15 +19,18 @@ import (
 
 // Bot wraps the Telegram Bot API client, database connection, retention cleaner, and configuration state.
 type Bot struct {
-	cfg      *config.Config
-	cfgPath  string
-	db       *db.DB
-	api      *tgbotapi.BotAPI
-	cleaner  *cleaner.RetentionCleaner
-	detector *detector.Detector
-	botUser  tgbotapi.User
-	mu       sync.RWMutex
-	stopChan chan struct{}
+	cfg                *config.Config
+	cfgPath            string
+	db                 *db.DB
+	api                *tgbotapi.BotAPI
+	cleaner            *cleaner.RetentionCleaner
+	detector           *detector.Detector
+	botUser            tgbotapi.User
+	mu                 sync.RWMutex
+	stopChan           chan struct{}
+	mockChatMemberFunc func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error)
+	banCheckMu         sync.Mutex
+	isBanCheckRunning  bool
 }
 
 var (
@@ -35,6 +38,21 @@ var (
 	loginRetryDelay = 5 * time.Second
 	maxLoginRetries = 6
 )
+
+// SetNewBotAPIFuncForTesting overrides the BotAPI constructor for unit testing.
+func SetNewBotAPIFuncForTesting(f func(token string) (*tgbotapi.BotAPI, error)) func() {
+	orig := newBotAPIFunc
+	origDelay := loginRetryDelay
+	origRetries := maxLoginRetries
+	newBotAPIFunc = f
+	loginRetryDelay = 1 * time.Millisecond
+	maxLoginRetries = 1
+	return func() {
+		newBotAPIFunc = orig
+		loginRetryDelay = origDelay
+		maxLoginRetries = origRetries
+	}
+}
 
 // NewBot initializes a new Bot instance using the provided configuration and database client.
 func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
@@ -59,7 +77,7 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 		}
 	}
 
-	if err != nil {
+	if err != nil || api == nil {
 		return nil, fmt.Errorf("failed to authenticate Telegram Bot API after %d attempts: %w\n-> Action: Check your Telegram Bot Token with @BotFather and ensure active internet connectivity", maxLoginRetries, err)
 	}
 
@@ -77,33 +95,7 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 
 	rc := cleaner.NewRetentionCleaner(database, cfg.CleanupIntervalHr)
 
-	det := detector.NewDetector()
-	if cfg.Detector.Enabled {
-		if cfg.Detector.NewUserCJK.Enabled || cfg.Detector.NewUserChinese.Enabled {
-			cjkCfg := cfg.Detector.NewUserCJK
-			if !cjkCfg.Enabled && cfg.Detector.NewUserChinese.Enabled {
-				cjkCfg = cfg.Detector.NewUserChinese
-			}
-			det.RegisterTrigger(detector.NewNewUserCJKTrigger(cjkCfg))
-		}
-		if cfg.Detector.NewUserSpamBio.Enabled {
-			spamBioCfg := cfg.Detector.NewUserSpamBio
-			var kws []string
-			kws = append(kws, cfg.AutoFlag.BlockedKeywords...)
-			if database != nil {
-				dbKws, _ := database.GetSpamSnippetStrings()
-				kws = append(kws, dbKws...)
-			}
-			det.RegisterTrigger(detector.NewNewUserSpamBioTriggerWithKeywords(spamBioCfg, kws...))
-		}
-		if cfg.Detector.RedPacketName.Enabled || cfg.Detector.NewUserRedPacket.Enabled {
-			rpCfg := cfg.Detector.RedPacketName
-			if !rpCfg.Enabled && cfg.Detector.NewUserRedPacket.Enabled {
-				rpCfg = cfg.Detector.NewUserRedPacket
-			}
-			det.RegisterTrigger(detector.NewRedPacketNameTrigger(rpCfg))
-		}
-	}
+	det := BuildDetector(cfg, database)
 
 	if database != nil && len(cfg.AutoFlag.BlockedKeywords) > 0 {
 		_ = database.SyncSpamSnippets(cfg.AutoFlag.BlockedKeywords)
@@ -192,10 +184,39 @@ func (b *Bot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 	return resp, err
 }
 
+// SetMockChatMemberFunc sets a mock callback for GetChatMember for testing.
+func (b *Bot) SetMockChatMemberFunc(f func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error)) {
+	b.mockChatMemberFunc = f
+}
+
+// TryStartBanCheck attempts to acquire the lock for running a background ban check. Returns true if acquired.
+func (b *Bot) TryStartBanCheck() bool {
+	b.banCheckMu.Lock()
+	defer b.banCheckMu.Unlock()
+	if b.isBanCheckRunning {
+		return false
+	}
+	b.isBanCheckRunning = true
+	return true
+}
+
+// FinishBanCheck releases the running ban check lock.
+func (b *Bot) FinishBanCheck() {
+	b.banCheckMu.Lock()
+	defer b.banCheckMu.Unlock()
+	b.isBanCheckRunning = false
+}
+
 // GetChatMember wraps b.api.GetChatMember to echo chat member query calls to standard logs for debugging.
 func (b *Bot) GetChatMember(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
 	log.Printf("[Telegram API Call] GetChatMember -> ChatID: %d | UserID: %d", config.ChatID, config.UserID)
+	if b.mockChatMemberFunc != nil {
+		return b.mockChatMemberFunc(config)
+	}
 	if b.api == nil {
+		if config.UserID < 0 || config.UserID == 404 || config.UserID == 999999 {
+			return tgbotapi.ChatMember{Status: "left"}, nil
+		}
 		return tgbotapi.ChatMember{Status: "member"}, nil
 	}
 	cm, err := b.api.GetChatMember(config)
@@ -220,18 +241,10 @@ func (b *Bot) GetChat(config tgbotapi.ChatInfoConfig) (tgbotapi.Chat, error) {
 		mockLastName := "User"
 		if b.db != nil {
 			if existing, err := b.db.GetUserProfile(config.ChatID); err == nil && existing != nil {
-				if existing.Bio != "" {
-					mockBio = existing.Bio
-				}
-				if existing.Username != "" {
-					mockUsername = existing.Username
-				}
-				if existing.FirstName != "" {
-					mockFirstName = existing.FirstName
-				}
-				if existing.LastName != "" {
-					mockLastName = existing.LastName
-				}
+				mockBio = existing.Bio
+				mockUsername = existing.Username
+				mockFirstName = existing.FirstName
+				mockLastName = existing.LastName
 			}
 		}
 		return tgbotapi.Chat{
@@ -432,16 +445,18 @@ func (b *Bot) FetchUserProfile(userID int64) (*db.UserProfile, error) {
 		log.Printf("[Bot] Warning: GetUserProfilePhotos failed for user %d: %v", userID, errPhotos)
 	}
 
-	// Fallback names/username/language from DB user record if Telegram GetChat didn't return them
+	// Fallback names/username/language from DB user record if Telegram GetChat failed
 	if dbUser, err := b.db.GetUserByID(userID); err == nil && dbUser != nil {
-		if profile.Username == "" {
-			profile.Username = dbUser.Username
-		}
-		if profile.FirstName == "" {
-			profile.FirstName = dbUser.FirstName
-		}
-		if profile.LastName == "" {
-			profile.LastName = dbUser.LastName
+		if errChat != nil {
+			if profile.Username == "" {
+				profile.Username = dbUser.Username
+			}
+			if profile.FirstName == "" {
+				profile.FirstName = dbUser.FirstName
+			}
+			if profile.LastName == "" {
+				profile.LastName = dbUser.LastName
+			}
 		}
 		if profile.LanguageCode == "" {
 			profile.LanguageCode = dbUser.LanguageCode
@@ -577,6 +592,7 @@ func (b *Bot) Start(ctx context.Context) error {
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
+	u.AllowedUpdates = []string{"message", "edited_message", "channel_post", "edited_channel_post", "callback_query", "chat_member", "my_chat_member", "chat_join_request"}
 
 	updates := b.api.GetUpdatesChan(u)
 
@@ -615,5 +631,53 @@ func (b *Bot) BotUser() tgbotapi.User {
 }
 
 func (b *Bot) Detector() *detector.Detector {
+	if b.detector == nil {
+		b.detector = BuildDetector(b.cfg, b.db)
+	}
 	return b.detector
+}
+
+// BuildDetector constructs and registers all enabled triggers configured in Config.
+func BuildDetector(cfg *config.Config, database *db.DB) *detector.Detector {
+	det := detector.NewDetector()
+	if cfg == nil || !cfg.Detector.Enabled {
+		return det
+	}
+
+	if cfg.Detector.NewUserCJK.Enabled || cfg.Detector.NewUserChinese.Enabled {
+		cjkCfg := cfg.Detector.NewUserCJK
+		if !cjkCfg.Enabled && cfg.Detector.NewUserChinese.Enabled {
+			cjkCfg = cfg.Detector.NewUserChinese
+		}
+		det.RegisterTrigger(detector.NewNewUserCJKTrigger(cjkCfg))
+	}
+
+	if cfg.Detector.NewUserSpamBio.Enabled {
+		spamBioCfg := cfg.Detector.NewUserSpamBio
+		var kws []string
+		kws = append(kws, cfg.AutoFlag.BlockedKeywords...)
+		if database != nil {
+			dbKws, _ := database.GetSpamSnippetStrings()
+			kws = append(kws, dbKws...)
+		}
+		det.RegisterTrigger(detector.NewNewUserSpamBioTriggerWithKeywords(spamBioCfg, kws...))
+	}
+
+	if cfg.Detector.RedPacketName.Enabled || cfg.Detector.NewUserRedPacket.Enabled {
+		rpCfg := cfg.Detector.RedPacketName
+		if !rpCfg.Enabled && cfg.Detector.NewUserRedPacket.Enabled {
+			rpCfg = cfg.Detector.NewUserRedPacket
+		}
+		det.RegisterTrigger(detector.NewRedPacketNameTrigger(rpCfg))
+	}
+
+	if cfg.Detector.UsernameAnomaly.Enabled {
+		det.RegisterTrigger(detector.NewUsernameAnomalyTrigger(cfg.Detector.UsernameAnomaly))
+	}
+
+	if cfg.Detector.ProfileNameKeywordBan.Enabled {
+		det.RegisterTrigger(detector.NewProfileNameKeywordBanTrigger(cfg.Detector.ProfileNameKeywordBan))
+	}
+
+	return det
 }

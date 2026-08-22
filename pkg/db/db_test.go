@@ -1090,7 +1090,10 @@ func TestGetUserFullDump(t *testing.T) {
 	})
 
 	_, _ = database.AdjustReputation(userID, -20, "Spam detected", 0)
-	fp, _ := database.CreateFlaggedPost(-1001, 10, userID, "Spam message")
+	fp, err := database.CreateFlaggedPost(-1001, 10, userID, "Spam message")
+	if err != nil || fp == nil {
+		t.Fatalf("failed to create flagged post: %v", err)
+	}
 	_ = database.ResolveFlaggedPost(fp.ID, "banned", 0)
 
 	// 1. Search by @username
@@ -1252,3 +1255,316 @@ func TestMatchSpamBioProfile_And_ExtendedSignals(t *testing.T) {
 	}
 }
 
+func TestUpdateUserName(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	userID := int64(445566)
+	_, _, err := database.GetOrCreateUser(userID, "olduser", "OldFirst", "OldLast", 10)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	if err := database.UpdateUserName(userID, "newuser", "NewFirst", "NewLast"); err != nil {
+		t.Fatalf("failed to update user name: %v", err)
+	}
+
+	u, err := database.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to get user: %v", err)
+	}
+	if u.Username != "newuser" || u.FirstName != "NewFirst" || u.LastName != "NewLast" {
+		t.Errorf("unexpected updated user: %+v", u)
+	}
+}
+
+func TestGetLowRepUsersForRescan(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	now := time.Now()
+
+	// User 1: rep 10, no profile (should be included)
+	_, _, _ = database.GetOrCreateUser(101, "u1", "User", "One", 10)
+
+	// User 2: rep 5, profile fetched 30 hours ago (should be included)
+	_, _, _ = database.GetOrCreateUser(102, "u2", "User", "Two", 5)
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:    102,
+		Username:  "u2",
+		FetchedAt: now.Add(-30 * time.Hour),
+	})
+
+	// User 3: rep 5, profile fetched 2 hours ago (should NOT be included if cutoff is 24h)
+	_, _, _ = database.GetOrCreateUser(103, "u3", "User", "Three", 5)
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:    103,
+		Username:  "u3",
+		FetchedAt: now.Add(-2 * time.Hour),
+	})
+
+	// User 4: rep 80 (high rep, should NOT be included if maxRep is 20)
+	_, _, _ = database.GetOrCreateUser(104, "u4", "User", "Four", 80)
+
+	// User 5: rep 0, banned (should NOT be included)
+	_, _, _ = database.GetOrCreateUser(105, "u5", "User", "Five", 0)
+	_ = database.SetUserBanned(105, true)
+
+	// User 6: rep 0, admin (should NOT be included)
+	_, _, _ = database.GetOrCreateUser(106, "u6", "User", "Six", 0)
+	_ = database.SetUserAdmin(106, true)
+
+	// Test 1: Cutoff 24 hours ago, maxRep 20 -> should match User 1 and User 2
+	cutoff24h := now.Add(-24 * time.Hour)
+	candidates, err := database.GetLowRepUsersForRescan(20, cutoff24h, 0)
+	if err != nil {
+		t.Fatalf("failed to query candidates: %v", err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 candidates (User 1 and User 2), got %d: %+v", len(candidates), candidates)
+	}
+	candIDs := map[int64]bool{candidates[0].UserID: true, candidates[1].UserID: true}
+	if !candIDs[101] || !candIDs[102] {
+		t.Errorf("expected IDs 101 and 102, got %+v", candIDs)
+	}
+
+	// Test 2: Force (cutoff zero), maxRep 20 -> should match User 1, User 2, User 3
+	candidatesForce, err := database.GetLowRepUsersForRescan(20, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("failed to query candidates force: %v", err)
+	}
+	if len(candidatesForce) != 3 {
+		t.Fatalf("expected 3 candidates force (User 1, 2, 3), got %d: %+v", len(candidatesForce), candidatesForce)
+	}
+}
+
+func TestIsSpammyUsername(t *testing.T) {
+	tests := []struct {
+		username string
+		want     bool
+	}{
+		{"gzy_8889215646_1_5248", true},
+		{"@gzy_8889215646_1_5248", true},
+		{"abc12345", true},
+		{"test_channel_999", true},
+		{"ch-123", true},
+		{"user.2026.08", true},
+		{"gzy888921564615248", true},
+		{"news_channel", false},
+		{"alice", false},
+		{"123_channel", false},
+		{"user_123_abc", false},
+		{"123456", false},
+		{"", false},
+		{"___---...", false},
+	}
+
+	for _, tt := range tests {
+		got := IsSpammyUsername(tt.username)
+		if got != tt.want {
+			t.Errorf("IsSpammyUsername(%q) = %v, want %v", tt.username, got, tt.want)
+		}
+	}
+}
+
+func TestMatchSpamBioProfile_DianWo_And_SpammyUsername(t *testing.T) {
+	// Test 1: Dian Wo keyword in personal chat title
+	p1 := &UserProfile{
+		UserID:            8828604089,
+		PersonalChatTitle: "🔴点我六折出平果机进群🔴",
+	}
+	isSpam1, matched1 := MatchSpamBioProfile(p1)
+	if !isSpam1 {
+		t.Fatalf("expected MatchSpamBioProfile to detect '点我', got isSpam=false")
+	}
+	hasDianWo := false
+	for _, kw := range matched1 {
+		if kw == "点我" {
+			hasDianWo = true
+		}
+	}
+	if !hasDianWo {
+		t.Errorf("expected matched keywords to contain '点我', got: %v", matched1)
+	}
+
+	// Test 2: Spammy username in personal chat username
+	p2 := &UserProfile{
+		UserID:               8828604089,
+		PersonalChatUsername: "gzy_8889215646_1_5248",
+	}
+	isSpam2, matched2 := MatchSpamBioProfile(p2)
+	if !isSpam2 {
+		t.Fatalf("expected MatchSpamBioProfile to detect spammy channel username, got isSpam=false")
+	}
+	hasSpammyUser := false
+	for _, kw := range matched2 {
+		if strings.Contains(kw, "spammy_channel_username") {
+			hasSpammyUser = true
+		}
+	}
+	if !hasSpammyUser {
+		t.Errorf("expected matched keywords to contain spammy_channel_username, got: %v", matched2)
+	}
+
+	// Test 3: Clean profile
+	p3 := &UserProfile{
+		UserID:               12345,
+		Bio:                  "Just a normal user bio",
+		PersonalChatTitle:    "My Coding Channel",
+		PersonalChatUsername: "my_coding_channel",
+	}
+	isSpam3, matched3 := MatchSpamBioProfile(p3)
+	if isSpam3 || len(matched3) > 0 {
+		t.Errorf("expected clean profile, got isSpam=%v, matched=%v", isSpam3, matched3)
+	}
+}
+
+func TestGetBannedUsers(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Initially no banned users
+	banned, err := database.GetBannedUsers()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(banned) != 0 {
+		t.Fatalf("expected 0 banned users, got %d", len(banned))
+	}
+
+	// Create users
+	_, _, err = database.GetOrCreateUser(1001, "active_user", "Active", "User", 50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	_, _, err = database.GetOrCreateUser(1002, "banned_user1", "Banned", "One", -50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	_, _, err = database.GetOrCreateUser(1003, "banned_user2", "Banned", "Two", -50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	// Mark users as banned
+	_ = database.SetUserBanned(1002, true)
+	_ = database.SetUserBanned(1003, true)
+
+	banned, err = database.GetBannedUsers()
+	if err != nil {
+		t.Fatalf("failed to get banned users: %v", err)
+	}
+	if len(banned) != 2 {
+		t.Fatalf("expected 2 banned users, got %d", len(banned))
+	}
+
+	// Unban one
+	_ = database.SetUserBanned(1002, false)
+	banned, err = database.GetBannedUsers()
+	if err != nil {
+		t.Fatalf("failed to get banned users: %v", err)
+	}
+	if len(banned) != 1 || banned[0].UserID != 1003 {
+		t.Fatalf("expected 1 banned user (1003), got %v", banned)
+	}
+}
+
+func TestUserJoins(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	userID := int64(987654)
+	_, _, err := database.GetOrCreateUser(userID, "joiner", "Join", "User", 50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	// 1. Initially no joins
+	joins, err := database.GetUserJoins(userID, 10)
+	if err != nil {
+		t.Fatalf("failed to get user joins: %v", err)
+	}
+	if len(joins) != 0 {
+		t.Errorf("expected 0 joins, got %d", len(joins))
+	}
+	count, err := database.GetUserJoinCount(userID)
+	if err != nil || count != 0 {
+		t.Errorf("expected join count 0, got %d (err: %v)", count, err)
+	}
+
+	// 2. Log first join
+	t1 := time.Now().Add(-2 * time.Hour)
+	if err := database.LogUserJoinWithTime(userID, -100111, "Alpha Channel", "channel", t1); err != nil {
+		t.Fatalf("failed to log user join: %v", err)
+	}
+
+	// 3. Log second join
+	t2 := time.Now().Add(-1 * time.Hour)
+	if err := database.LogUserJoinWithTime(userID, -100222, "Beta Group", "supergroup", t2); err != nil {
+		t.Fatalf("failed to log user join: %v", err)
+	}
+
+	// 4. Log third join with LogUserJoin (current time)
+	if err := database.LogUserJoin(userID, -100333, "Gamma Group", "group"); err != nil {
+		t.Fatalf("failed to log user join: %v", err)
+	}
+
+	// Check count
+	count, err = database.GetUserJoinCount(userID)
+	if err != nil || count != 3 {
+		t.Errorf("expected join count 3, got %d (err: %v)", count, err)
+	}
+
+	// Check GetUserJoins ordered DESC
+	joins, err = database.GetUserJoins(userID, 10)
+	if err != nil {
+		t.Fatalf("failed to get user joins: %v", err)
+	}
+	if len(joins) != 3 {
+		t.Fatalf("expected 3 joins, got %d", len(joins))
+	}
+	if joins[0].ChatID != -100333 || joins[0].ChatTitle != "Gamma Group" {
+		t.Errorf("expected most recent join to be -100333, got %d", joins[0].ChatID)
+	}
+	if joins[1].ChatID != -100222 || joins[1].ChatTitle != "Beta Group" {
+		t.Errorf("expected second join to be -100222, got %d", joins[1].ChatID)
+	}
+	if joins[2].ChatID != -100111 || joins[2].ChatTitle != "Alpha Channel" {
+		t.Errorf("expected oldest join to be -100111, got %d", joins[2].ChatID)
+	}
+
+	// Check limit
+	joinsLimited, err := database.GetUserJoins(userID, 2)
+	if err != nil || len(joinsLimited) != 2 {
+		t.Errorf("expected 2 joins with limit 2, got %d", len(joinsLimited))
+	}
+
+	// 5. Test GetUserFullDump with joins
+	dump, err := database.GetUserFullDump("joiner", 0)
+	if err != nil {
+		t.Fatalf("failed to get user full dump: %v", err)
+	}
+	if len(dump.ChannelJoins) != 3 {
+		t.Errorf("expected 3 channel joins in full dump, got %d", len(dump.ChannelJoins))
+	}
+
+	// 6. Test FormatUserDump includes channel joins section
+	formatted := FormatUserDump(dump)
+	if !strings.Contains(formatted, "## 🚪 Channel & Group Joins (Total Logs: 3)") {
+		t.Errorf("expected Channel & Group Joins section in formatted dump, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "Alpha Channel") || !strings.Contains(formatted, "Beta Group") {
+		t.Errorf("expected channel titles in formatted dump, got: %s", formatted)
+	}
+
+	// 7. Test PruneOldUserJoins
+	oldTime := time.Now().AddDate(0, 0, -10)
+	_ = database.LogUserJoinWithTime(userID, -100999, "Ancient Channel", "channel", oldTime)
+	pruned, err := database.PruneOldUserJoins(7)
+	if err != nil {
+		t.Fatalf("failed to prune old joins: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("expected 1 pruned join, got %d", pruned)
+	}
+}

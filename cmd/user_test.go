@@ -53,8 +53,13 @@ func TestUserCmd(t *testing.T) {
 		CreatedAt: time.Now(),
 	})
 
+	_ = database.LogUserJoin(spammerID, -100999, "Spam Target Group", "supergroup")
+
 	_, _ = database.AdjustReputation(spammerID, -20, "Detection trigger (new_user_spam_bio)", 0)
-	fp, _ := database.CreateFlaggedPost(-100999, 42, spammerID, "Spam bio detected")
+	fp, err := database.CreateFlaggedPost(-100999, 42, spammerID, "Spam bio detected")
+	if err != nil || fp == nil {
+		t.Fatalf("failed to create flagged post: %v", err)
+	}
 	_ = database.ResolveFlaggedPost(fp.ID, "banned", 0)
 	_ = database.SetUserBanned(spammerID, true)
 
@@ -97,6 +102,12 @@ func TestUserCmd(t *testing.T) {
 		}
 		if !strings.Contains(out, "Reputation Audit Trail") {
 			t.Errorf("expected reputation logs in output, got: %s", out)
+		}
+		if !strings.Contains(out, "Channel & Group Joins") {
+			t.Errorf("expected Channel & Group Joins in output, got: %s", out)
+		}
+		if !strings.Contains(out, "Spam Target Group") {
+			t.Errorf("expected join chat title in output, got: %s", out)
 		}
 		if !strings.Contains(out, "Raw Telegram Profile JSON") {
 			t.Errorf("expected Raw Telegram Profile JSON section in output, got: %s", out)
@@ -141,6 +152,9 @@ func TestUserCmd(t *testing.T) {
 		}
 		if !strings.Contains(out, `"is_spam_bio_match": true`) {
 			t.Errorf("expected JSON is_spam_bio_match field, got: %s", out)
+		}
+		if !strings.Contains(out, `"channel_joins"`) {
+			t.Errorf("expected JSON channel_joins field, got: %s", out)
 		}
 		if !strings.Contains(out, `"raw_json"`) {
 			t.Errorf("expected JSON raw_json field, got: %s", out)

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -34,6 +35,14 @@ type User struct {
 	IsAdmin      bool      `json:"is_admin"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// DisplayName returns the trimmed combined FirstName and LastName for the user.
+func (u *User) DisplayName() string {
+	if u == nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimSpace(u.FirstName) + " " + strings.TrimSpace(u.LastName))
 }
 
 type Group struct {
@@ -107,6 +116,15 @@ type SpamSnippet struct {
 	Snippet   string    `json:"snippet"`
 	Category  string    `json:"category"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type UserJoin struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	ChatID    int64     `json:"chat_id"`
+	ChatTitle string    `json:"chat_title"`
+	ChatType  string    `json:"chat_type,omitempty"`
+	JoinedAt  time.Time `json:"joined_at"`
 }
 
 func OpenDB(dbPath string) (*DB, error) {
@@ -222,6 +240,16 @@ func (d *DB) AutoMigrate() error {
 			created_at DATETIME NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_spam_snippets_snippet ON spam_snippets(snippet);`,
+		`CREATE TABLE IF NOT EXISTS user_joins (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			chat_id INTEGER NOT NULL,
+			chat_title TEXT NOT NULL DEFAULT '',
+			chat_type TEXT NOT NULL DEFAULT '',
+			joined_at DATETIME NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_joins_user_joined ON user_joins(user_id, joined_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_joins_chat_joined ON user_joins(chat_id, joined_at DESC);`,
 	}
 
 	for _, stmt := range migrations {
@@ -330,6 +358,18 @@ func (d *DB) InitSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_spam_snippets_snippet ON spam_snippets(snippet);
+
+	CREATE TABLE IF NOT EXISTS user_joins (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		chat_id INTEGER NOT NULL,
+		chat_title TEXT NOT NULL DEFAULT '',
+		chat_type TEXT NOT NULL DEFAULT '',
+		joined_at DATETIME NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_user_joins_user_joined ON user_joins(user_id, joined_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_user_joins_chat_joined ON user_joins(chat_id, joined_at DESC);
 	`
 	_, err := d.Exec(schema)
 	if err != nil {
@@ -406,6 +446,14 @@ func (d *DB) UpdateUserMetadata(userID int64, lang string, isPremium bool) error
 	return err
 }
 
+// UpdateUserName updates a user's username, first name, and last name.
+func (d *DB) UpdateUserName(userID int64, username, firstName, lastName string) error {
+	now := time.Now()
+	_, err := d.Exec(`UPDATE users SET username = ?, first_name = ?, last_name = ?, updated_at = ? WHERE user_id = ?`,
+		username, firstName, lastName, now, userID)
+	return err
+}
+
 func (d *DB) GetUserByID(userID int64) (*User, error) {
 	var user User
 	err := d.QueryRow(`
@@ -447,6 +495,30 @@ func (d *DB) GetAllUsers(limit int) ([]User, error) {
 		ORDER BY reputation DESC, created_at DESC
 		LIMIT ?
 	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
+// GetBannedUsers returns all users marked as banned (is_banned = 1) in the database.
+func (d *DB) GetBannedUsers() ([]User, error) {
+	rows, err := d.Query(`
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		FROM users
+		WHERE is_banned = 1
+		ORDER BY updated_at DESC, user_id ASC
+	`)
 	if err != nil {
 		return nil, err
 	}
@@ -1021,6 +1093,70 @@ func (d *DB) GetUserFlaggedPosts(userID int64, limit int) ([]FlaggedPost, error)
 	return posts, nil
 }
 
+// User Join Methods
+
+// LogUserJoin records a channel or group join event for a user.
+func (d *DB) LogUserJoin(userID int64, chatID int64, chatTitle, chatType string) error {
+	return d.LogUserJoinWithTime(userID, chatID, chatTitle, chatType, time.Now())
+}
+
+// LogUserJoinWithTime records a channel or group join event for a user at a specific timestamp.
+func (d *DB) LogUserJoinWithTime(userID int64, chatID int64, chatTitle, chatType string, joinedAt time.Time) error {
+	if joinedAt.IsZero() {
+		joinedAt = time.Now()
+	}
+	_, err := d.Exec(`
+		INSERT INTO user_joins (user_id, chat_id, chat_title, chat_type, joined_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, userID, chatID, chatTitle, chatType, joinedAt)
+	return err
+}
+
+// GetUserJoins retrieves recent channel/group joins for a user, ordered from most recent to oldest.
+func (d *DB) GetUserJoins(userID int64, limit int) ([]UserJoin, error) {
+	query := `
+		SELECT id, user_id, chat_id, chat_title, chat_type, joined_at
+		FROM user_joins
+		WHERE user_id = ?
+		ORDER BY joined_at DESC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := d.Query(query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var joins []UserJoin
+	for rows.Next() {
+		var uj UserJoin
+		if err := rows.Scan(&uj.ID, &uj.UserID, &uj.ChatID, &uj.ChatTitle, &uj.ChatType, &uj.JoinedAt); err != nil {
+			return nil, err
+		}
+		joins = append(joins, uj)
+	}
+	return joins, nil
+}
+
+// GetUserJoinCount returns the total number of channel/group joins logged for a user.
+func (d *DB) GetUserJoinCount(userID int64) (int, error) {
+	var count int
+	err := d.QueryRow(`SELECT COUNT(*) FROM user_joins WHERE user_id = ?`, userID).Scan(&count)
+	return count, err
+}
+
+// PruneOldUserJoins prunes join records older than retentionDays.
+func (d *DB) PruneOldUserJoins(days int) (int64, error) {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	res, err := d.Exec(`DELETE FROM user_joins WHERE joined_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // UserFullDump contains comprehensive information about a single Telegram user.
 type UserFullDump struct {
 	User           *User           `json:"user"`
@@ -1032,6 +1168,7 @@ type UserFullDump struct {
 	IsSpamBioMatch bool            `json:"is_spam_bio_match"`
 	MatchedBioKws  []string        `json:"matched_bio_keywords,omitempty"`
 	IsSuperAdmin   bool            `json:"is_super_admin"`
+	ChannelJoins   []UserJoin      `json:"channel_joins,omitempty"`
 }
 
 // GetUserFullDump searches for a user by numeric user ID or @username, aggregating all known records.
@@ -1113,6 +1250,7 @@ func (d *DB) GetUserFullDump(identifier string, superAdminID int64, extraKeyword
 	recentMsgs, _ := d.GetRecentUserMessages(targetID, 20)
 	repLogs, _ := d.GetUserReputationLogs(targetID, 50)
 	flaggedPosts, _ := d.GetUserFlaggedPosts(targetID, 50)
+	channelJoins, _ := d.GetUserJoins(targetID, 50)
 
 	var isSpamMatch bool
 	var matchedKws []string
@@ -1135,10 +1273,12 @@ func (d *DB) GetUserFullDump(identifier string, superAdminID int64, extraKeyword
 		IsSpamBioMatch: isSpamMatch,
 		MatchedBioKws:  matchedKws,
 		IsSuperAdmin:   isSuperAdmin,
+		ChannelJoins:   channelJoins,
 	}, nil
 }
 
-// MatchSpamBioProfile checks all text fields of a user profile (bio, personal channel title/username, business intro) for spam keywords.
+// MatchSpamBioProfile checks all text fields of a user profile (bio, personal channel title/username, business intro) for spam keywords,
+// and checks personal_chat.username against spammy username patterns (starts with letters, ends with digits with delimiters removed).
 func MatchSpamBioProfile(p *UserProfile, additionalKeywords ...string) (bool, []string) {
 	if p == nil {
 		return false, nil
@@ -1156,11 +1296,23 @@ func MatchSpamBioProfile(p *UserProfile, additionalKeywords ...string) (bool, []
 	if strings.TrimSpace(p.BusinessIntro) != "" {
 		texts = append(texts, p.BusinessIntro)
 	}
-	if len(texts) == 0 {
-		return false, nil
+
+	var matchedKeywords []string
+	if len(texts) > 0 {
+		combined := strings.Join(texts, " | ")
+		isSpam, matched := MatchSpamBioAll(combined, additionalKeywords...)
+		if isSpam {
+			matchedKeywords = append(matchedKeywords, matched...)
+		}
 	}
-	combined := strings.Join(texts, " | ")
-	return MatchSpamBioAll(combined, additionalKeywords...)
+
+	// Check if personal channel username matches spammy username patterns
+	if p.PersonalChatUsername != "" && IsSpammyUsername(p.PersonalChatUsername) {
+		cleanHandle := strings.TrimPrefix(strings.TrimSpace(p.PersonalChatUsername), "@")
+		matchedKeywords = append(matchedKeywords, fmt.Sprintf("spammy_channel_username:@%s", cleanHandle))
+	}
+
+	return len(matchedKeywords) > 0, matchedKeywords
 }
 
 // FormatUserDump formats a UserFullDump into a detailed Markdown report.
@@ -1282,6 +1434,28 @@ func FormatUserDump(dump *UserFullDump) string {
 		}
 	}
 
+	// Channel & Group Joins
+	sb.WriteString(fmt.Sprintf("## 🚪 Channel & Group Joins (Total Logs: %d)\n", len(dump.ChannelJoins)))
+	if len(dump.ChannelJoins) == 0 {
+		sb.WriteString("*(No channel joins recorded for this user)*\n\n")
+	} else {
+		sb.WriteString("| # | Chat ID | Chat Title | Type | Timestamp |\n")
+		sb.WriteString("|---|---|---|---|---|\n")
+		for i, j := range dump.ChannelJoins {
+			typeStr := j.ChatType
+			if typeStr == "" {
+				typeStr = "-"
+			}
+			titleStr := escapeMarkdownCell(j.ChatTitle)
+			if titleStr == "" {
+				titleStr = "-"
+			}
+			sb.WriteString(fmt.Sprintf("| %d | `%d` | %s | %s | `%s` |\n",
+				i+1, j.ChatID, titleStr, typeStr, j.JoinedAt.Format("2006-01-02 15:04:05 MST")))
+		}
+		sb.WriteString("\n")
+	}
+
 	// Messages
 	sb.WriteString(fmt.Sprintf("## 💬 Activity & Messages (Total Logged: %d)\n", dump.MessageCount))
 	if len(dump.RecentMessages) == 0 {
@@ -1381,6 +1555,54 @@ func (d *DB) GetUsersWithoutProfile(limit int) ([]User, error) {
 	return users, nil
 }
 
+// GetLowRepUsersForRescan queries unbanned, non-admin users with reputation <= maxRep
+// whose profile was fetched before cutoff (or never fetched). If cutoff is zero, the time filter is bypassed.
+func (d *DB) GetLowRepUsersForRescan(maxRep int, cutoff time.Time, limit int) ([]User, error) {
+	var query string
+	var args []interface{}
+
+	if cutoff.IsZero() {
+		query = `
+			SELECT u.user_id, u.username, u.first_name, u.last_name, u.language_code, u.is_premium, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
+			FROM users u
+			LEFT JOIN user_profiles p ON u.user_id = p.user_id
+			WHERE u.is_banned = 0 AND u.is_admin = 0 AND u.reputation <= ?
+			ORDER BY u.reputation ASC, u.user_id DESC
+		`
+		args = append(args, maxRep)
+	} else {
+		query = `
+			SELECT u.user_id, u.username, u.first_name, u.last_name, u.language_code, u.is_premium, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
+			FROM users u
+			LEFT JOIN user_profiles p ON u.user_id = p.user_id
+			WHERE u.is_banned = 0 AND u.is_admin = 0 AND u.reputation <= ?
+			  AND (p.fetched_at IS NULL OR p.fetched_at < ?)
+			ORDER BY u.reputation ASC, u.user_id DESC
+		`
+		args = append(args, maxRep, cutoff)
+	}
+
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := d.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
 func (d *DB) GetAllUserProfiles(limit int) ([]UserProfile, error) {
 	query := `
 		SELECT user_id, username, first_name, last_name, language_code, is_premium, bio,
@@ -1426,19 +1648,19 @@ func (d *DB) GetUserProfileCount() (int, error) {
 
 // UserReportItem holds comprehensive metadata for good and bad users.
 type UserReportItem struct {
-	UserID        int64      `json:"user_id"`
-	Username      string     `json:"username"`
-	FirstName     string     `json:"first_name"`
-	LastName      string     `json:"last_name"`
-	Reputation    int        `json:"reputation"`
-	WarnCount     int        `json:"warn_count"`
-	IsBanned      bool       `json:"is_banned"`
-	IsAdmin       bool       `json:"is_admin"`
-	IsSuperAdmin  bool       `json:"is_super_admin"`
-	Role          string     `json:"role"`
-	MessageCount  int        `json:"message_count"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	UserID       int64     `json:"user_id"`
+	Username     string    `json:"username"`
+	FirstName    string    `json:"first_name"`
+	LastName     string    `json:"last_name"`
+	Reputation   int       `json:"reputation"`
+	WarnCount    int       `json:"warn_count"`
+	IsBanned     bool      `json:"is_banned"`
+	IsAdmin      bool      `json:"is_admin"`
+	IsSuperAdmin bool      `json:"is_super_admin"`
+	Role         string    `json:"role"`
+	MessageCount int       `json:"message_count"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 
 	// Ban / Moderation metadata (for bad users)
 	IsManualBan  bool       `json:"is_manual_ban"`  // Banned manually by moderator or command
@@ -1467,7 +1689,7 @@ type UserReportOptions struct {
 }
 
 // GetUserDirectoryReport retrieves and classifies all known users into good and bad users with rich metadata.
-func (d *DB) GetUserDirectoryReport(superAdminID int64) (goodUsers []UserReportItem, badUsers []UserReportItem, err error) {
+func (d *DB) GetUserDirectoryReport(superAdminID int64) ([]UserReportItem, []UserReportItem, error) {
 	// 1. Fetch all users
 	rows, err := d.Query(`
 		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at
@@ -1478,6 +1700,9 @@ func (d *DB) GetUserDirectoryReport(superAdminID int64) (goodUsers []UserReportI
 		return nil, nil, fmt.Errorf("failed to query users: %w", err)
 	}
 	defer rows.Close()
+
+	goodUsers := make([]UserReportItem, 0)
+	badUsers := make([]UserReportItem, 0)
 
 	var allUsers []User
 	userMap := make(map[int64]*User)
@@ -2020,6 +2245,7 @@ func extractTriggerName(reason string) string {
 
 // SpamBioKeywords contains common promotional, discount card, gift card, and syndicate scam terms seen in Telegram bio spam.
 var SpamBioKeywords = []string{
+	"点我",
 	"锦鲤代发",
 	"代发",
 	"油卡",
@@ -2072,6 +2298,48 @@ var SpamBioKeywords = []string{
 	"包赔",
 	"日赚",
 	"月入",
+}
+
+// IsSpammyUsername checks if a Telegram username matches typical spam syndicate patterns:
+// starts with letters, and ends with digits (with delimiters such as _, -, ., @, and whitespace removed).
+func IsSpammyUsername(username string) bool {
+	clean := strings.TrimPrefix(strings.TrimSpace(username), "@")
+	if clean == "" {
+		return false
+	}
+
+	var stripped strings.Builder
+	for _, r := range clean {
+		if r == '_' || r == '-' || r == '.' || unicode.IsSpace(r) {
+			continue
+		}
+		stripped.WriteRune(r)
+	}
+	s := stripped.String()
+	if len(s) == 0 {
+		return false
+	}
+
+	hasLetters := false
+	hasDigits := false
+	inDigits := false
+
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			if inDigits {
+				// Letter after digits -> not strictly ending in digits
+				return false
+			}
+			hasLetters = true
+		} else if r >= '0' && r <= '9' {
+			inDigits = true
+			hasDigits = true
+		} else {
+			return false
+		}
+	}
+
+	return hasLetters && hasDigits
 }
 
 // MatchSpamBio checks if a user bio matches known spam/marketing/syndicate keywords or custom filters.
@@ -2458,4 +2726,3 @@ func (d *DB) SyncSpamSnippets(snippets []string) error {
 	}
 	return nil
 }
-

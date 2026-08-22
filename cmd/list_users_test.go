@@ -36,7 +36,10 @@ func TestListUsersCmd(t *testing.T) {
 	_ = database.SetUserAdmin(modAdminID, true)
 
 	_, _, _ = database.GetOrCreateUser(badUserID, "banneduser", "Bad", "Guy", 0)
-	fp, _ := database.CreateFlaggedPost(-100, 10, badUserID, "Crypto scam link")
+	fp, err := database.CreateFlaggedPost(-100, 10, badUserID, "Crypto scam link")
+	if err != nil || fp == nil {
+		t.Fatalf("failed to create flagged post: %v", err)
+	}
 	_ = database.ResolveFlaggedPost(fp.ID, "banned", modAdminID)
 	_ = database.SetUserBanned(badUserID, true)
 
