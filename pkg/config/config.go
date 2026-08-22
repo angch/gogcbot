@@ -36,14 +36,14 @@ type ShieldyConfig struct {
 
 // DetectorConfig defines settings for modular detection triggers.
 type DetectorConfig struct {
-	Enabled                bool                                  `mapstructure:"enabled" yaml:"enabled"`
-	NewUserCJK             detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
-	NewUserChinese         detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
-	NewUserSpamBio         detector.NewUserSpamBioTriggerConfig  `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
-	RedPacketName          detector.RedPacketNameTriggerConfig   `mapstructure:"red_packet_name" yaml:"red_packet_name"`
-	NewUserRedPacket       detector.RedPacketNameTriggerConfig   `mapstructure:"new_user_red_packet" yaml:"new_user_red_packet,omitempty"`
-	UsernameAnomaly        detector.UsernameAnomalyTriggerConfig `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
-	ProfileNameKeywordBan  detector.ProfileNameKeywordBanConfig  `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
+	Enabled               bool                                  `mapstructure:"enabled" yaml:"enabled"`
+	NewUserCJK            detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
+	NewUserChinese        detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
+	NewUserSpamBio        detector.NewUserSpamBioTriggerConfig  `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
+	RedPacketName         detector.RedPacketNameTriggerConfig   `mapstructure:"red_packet_name" yaml:"red_packet_name"`
+	NewUserRedPacket      detector.RedPacketNameTriggerConfig   `mapstructure:"new_user_red_packet" yaml:"new_user_red_packet,omitempty"`
+	UsernameAnomaly       detector.UsernameAnomalyTriggerConfig `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
+	ProfileNameKeywordBan detector.ProfileNameKeywordBanConfig  `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.

@@ -37,6 +37,14 @@ type User struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// DisplayName returns the trimmed combined FirstName and LastName for the user.
+func (u *User) DisplayName() string {
+	if u == nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimSpace(u.FirstName) + " " + strings.TrimSpace(u.LastName))
+}
+
 type Group struct {
 	ChatID      int64     `json:"chat_id"`
 	Title       string    `json:"title"`
@@ -108,6 +116,15 @@ type SpamSnippet struct {
 	Snippet   string    `json:"snippet"`
 	Category  string    `json:"category"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type UserJoin struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	ChatID    int64     `json:"chat_id"`
+	ChatTitle string    `json:"chat_title"`
+	ChatType  string    `json:"chat_type,omitempty"`
+	JoinedAt  time.Time `json:"joined_at"`
 }
 
 func OpenDB(dbPath string) (*DB, error) {
@@ -223,6 +240,16 @@ func (d *DB) AutoMigrate() error {
 			created_at DATETIME NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_spam_snippets_snippet ON spam_snippets(snippet);`,
+		`CREATE TABLE IF NOT EXISTS user_joins (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			chat_id INTEGER NOT NULL,
+			chat_title TEXT NOT NULL DEFAULT '',
+			chat_type TEXT NOT NULL DEFAULT '',
+			joined_at DATETIME NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_joins_user_joined ON user_joins(user_id, joined_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_joins_chat_joined ON user_joins(chat_id, joined_at DESC);`,
 	}
 
 	for _, stmt := range migrations {
@@ -331,6 +358,18 @@ func (d *DB) InitSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_spam_snippets_snippet ON spam_snippets(snippet);
+
+	CREATE TABLE IF NOT EXISTS user_joins (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		chat_id INTEGER NOT NULL,
+		chat_title TEXT NOT NULL DEFAULT '',
+		chat_type TEXT NOT NULL DEFAULT '',
+		joined_at DATETIME NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_user_joins_user_joined ON user_joins(user_id, joined_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_user_joins_chat_joined ON user_joins(chat_id, joined_at DESC);
 	`
 	_, err := d.Exec(schema)
 	if err != nil {
@@ -1054,6 +1093,70 @@ func (d *DB) GetUserFlaggedPosts(userID int64, limit int) ([]FlaggedPost, error)
 	return posts, nil
 }
 
+// User Join Methods
+
+// LogUserJoin records a channel or group join event for a user.
+func (d *DB) LogUserJoin(userID int64, chatID int64, chatTitle, chatType string) error {
+	return d.LogUserJoinWithTime(userID, chatID, chatTitle, chatType, time.Now())
+}
+
+// LogUserJoinWithTime records a channel or group join event for a user at a specific timestamp.
+func (d *DB) LogUserJoinWithTime(userID int64, chatID int64, chatTitle, chatType string, joinedAt time.Time) error {
+	if joinedAt.IsZero() {
+		joinedAt = time.Now()
+	}
+	_, err := d.Exec(`
+		INSERT INTO user_joins (user_id, chat_id, chat_title, chat_type, joined_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, userID, chatID, chatTitle, chatType, joinedAt)
+	return err
+}
+
+// GetUserJoins retrieves recent channel/group joins for a user, ordered from most recent to oldest.
+func (d *DB) GetUserJoins(userID int64, limit int) ([]UserJoin, error) {
+	query := `
+		SELECT id, user_id, chat_id, chat_title, chat_type, joined_at
+		FROM user_joins
+		WHERE user_id = ?
+		ORDER BY joined_at DESC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := d.Query(query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var joins []UserJoin
+	for rows.Next() {
+		var uj UserJoin
+		if err := rows.Scan(&uj.ID, &uj.UserID, &uj.ChatID, &uj.ChatTitle, &uj.ChatType, &uj.JoinedAt); err != nil {
+			return nil, err
+		}
+		joins = append(joins, uj)
+	}
+	return joins, nil
+}
+
+// GetUserJoinCount returns the total number of channel/group joins logged for a user.
+func (d *DB) GetUserJoinCount(userID int64) (int, error) {
+	var count int
+	err := d.QueryRow(`SELECT COUNT(*) FROM user_joins WHERE user_id = ?`, userID).Scan(&count)
+	return count, err
+}
+
+// PruneOldUserJoins prunes join records older than retentionDays.
+func (d *DB) PruneOldUserJoins(days int) (int64, error) {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	res, err := d.Exec(`DELETE FROM user_joins WHERE joined_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // UserFullDump contains comprehensive information about a single Telegram user.
 type UserFullDump struct {
 	User           *User           `json:"user"`
@@ -1065,6 +1168,7 @@ type UserFullDump struct {
 	IsSpamBioMatch bool            `json:"is_spam_bio_match"`
 	MatchedBioKws  []string        `json:"matched_bio_keywords,omitempty"`
 	IsSuperAdmin   bool            `json:"is_super_admin"`
+	ChannelJoins   []UserJoin      `json:"channel_joins,omitempty"`
 }
 
 // GetUserFullDump searches for a user by numeric user ID or @username, aggregating all known records.
@@ -1146,6 +1250,7 @@ func (d *DB) GetUserFullDump(identifier string, superAdminID int64, extraKeyword
 	recentMsgs, _ := d.GetRecentUserMessages(targetID, 20)
 	repLogs, _ := d.GetUserReputationLogs(targetID, 50)
 	flaggedPosts, _ := d.GetUserFlaggedPosts(targetID, 50)
+	channelJoins, _ := d.GetUserJoins(targetID, 50)
 
 	var isSpamMatch bool
 	var matchedKws []string
@@ -1168,6 +1273,7 @@ func (d *DB) GetUserFullDump(identifier string, superAdminID int64, extraKeyword
 		IsSpamBioMatch: isSpamMatch,
 		MatchedBioKws:  matchedKws,
 		IsSuperAdmin:   isSuperAdmin,
+		ChannelJoins:   channelJoins,
 	}, nil
 }
 
@@ -1326,6 +1432,28 @@ func FormatUserDump(dump *UserFullDump) string {
 				sb.WriteString("\n```\n\n")
 			}
 		}
+	}
+
+	// Channel & Group Joins
+	sb.WriteString(fmt.Sprintf("## 🚪 Channel & Group Joins (Total Logs: %d)\n", len(dump.ChannelJoins)))
+	if len(dump.ChannelJoins) == 0 {
+		sb.WriteString("*(No channel joins recorded for this user)*\n\n")
+	} else {
+		sb.WriteString("| # | Chat ID | Chat Title | Type | Timestamp |\n")
+		sb.WriteString("|---|---|---|---|---|\n")
+		for i, j := range dump.ChannelJoins {
+			typeStr := j.ChatType
+			if typeStr == "" {
+				typeStr = "-"
+			}
+			titleStr := escapeMarkdownCell(j.ChatTitle)
+			if titleStr == "" {
+				titleStr = "-"
+			}
+			sb.WriteString(fmt.Sprintf("| %d | `%d` | %s | %s | `%s` |\n",
+				i+1, j.ChatID, titleStr, typeStr, j.JoinedAt.Format("2006-01-02 15:04:05 MST")))
+		}
+		sb.WriteString("\n")
 	}
 
 	// Messages

@@ -102,7 +102,7 @@ func (b *Bot) handleChatMemberUpdate(cmu *tgbotapi.ChatMemberUpdated) {
 	isJoin := (cmu.NewChatMember.Status == "member" || cmu.NewChatMember.Status == "restricted") &&
 		(cmu.OldChatMember.Status != "member" && cmu.OldChatMember.Status != "administrator" && cmu.OldChatMember.Status != "creator")
 	if isJoin {
-		b.handleUserJoined(cmu.Chat.ID, cmu.Chat.Title, cmu.NewChatMember.User, nil)
+		b.handleUserJoined(cmu.Chat.ID, cmu.Chat.Title, cmu.Chat.Type, cmu.NewChatMember.User, nil)
 	}
 }
 
@@ -183,7 +183,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	if len(msg.NewChatMembers) > 0 {
 		for _, newMember := range msg.NewChatMembers {
 			nm := newMember
-			b.handleUserJoined(chat.ID, chat.Title, &nm, msg)
+			b.handleUserJoined(chat.ID, chat.Title, chat.Type, &nm, msg)
 		}
 	}
 
@@ -554,8 +554,8 @@ func extractMessageText(msg *tgbotapi.Message) string {
 }
 
 // handleUserJoined handles a user joining a group, supergroup, or channel.
-// It retrieves their profile and bio, checks against spam bio filters, and bans/kicks them if matched.
-func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi.User, joinMsg *tgbotapi.Message) {
+// It logs their join event, retrieves their profile and bio, checks against spam bio filters, and bans/kicks them if matched.
+func (b *Bot) handleUserJoined(chatID int64, groupTitle, chatType string, tgUser *tgbotapi.User, joinMsg *tgbotapi.Message) {
 	if tgUser == nil || tgUser.IsBot || tgUser.ID == 0 || (b.botUser.ID != 0 && tgUser.ID == b.botUser.ID) {
 		return
 	}
@@ -571,9 +571,14 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 			groupTitle = group.Title
 		}
 	}
+	if chatType == "" {
+		if group, err := b.db.GetGroup(chatID); err == nil && group != nil && group.Type != "" {
+			chatType = group.Type
+		}
+	}
 
-	log.Printf("[User Joined] User %d (@%s - %s %s) joined chat %d (%s)",
-		tgUser.ID, tgUser.UserName, tgUser.FirstName, tgUser.LastName, chatID, groupTitle)
+	log.Printf("[User Joined] User %d (@%s - %s %s) joined chat %d (%s, type: %s)",
+		tgUser.ID, tgUser.UserName, tgUser.FirstName, tgUser.LastName, chatID, groupTitle, chatType)
 
 	// Get or create user record in DB
 	user, _, err := b.db.GetOrCreateUser(
@@ -586,6 +591,16 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 	if err != nil {
 		log.Printf("[Bot] Error getting/creating user %d on join: %v", tgUser.ID, err)
 		return
+	}
+
+	// Log the join event to SQLite
+	if err := b.db.LogUserJoin(user.UserID, chatID, groupTitle, chatType); err != nil {
+		log.Printf("[Bot] Error logging channel/group join for user %d in chat %d: %v", user.UserID, chatID, err)
+	}
+
+	if tgUser.LanguageCode != "" {
+		_ = b.db.UpdateUserMetadata(user.UserID, tgUser.LanguageCode, false)
+		user.LanguageCode = tgUser.LanguageCode
 	}
 
 	// Whitelist: users with reputation >= 100 or SuperAdmin are exempt
@@ -605,28 +620,25 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 		return
 	}
 
-	if tgUser.LanguageCode != "" {
-		_ = b.db.UpdateUserMetadata(user.UserID, tgUser.LanguageCode, false)
-		user.LanguageCode = tgUser.LanguageCode
+	// 1. Fetch user profile and bio
+	profile, err := b.FetchUserProfile(user.UserID)
+	if err != nil {
+		log.Printf("[User Joined] Could not fetch profile for user %d (@%s): %v", user.UserID, user.Username, err)
+	}
+	if profile == nil {
+		if cachedProf, err := b.db.GetUserProfile(user.UserID); err == nil && cachedProf != nil {
+			profile = cachedProf
+		}
 	}
 
-	// Check Red Packet CJK Name Trigger on join
-	redPacketEnabled := b.cfg.Detector.RedPacketName.Enabled || b.cfg.Detector.NewUserRedPacket.Enabled
-	if b.cfg.Detector.Enabled && redPacketEnabled {
-		rpCfg := b.cfg.Detector.RedPacketName
-		if !rpCfg.Enabled && b.cfg.Detector.NewUserRedPacket.Enabled {
-			rpCfg = b.cfg.Detector.NewUserRedPacket
-		}
-		rTrigger := detector.NewRedPacketNameTrigger(rpCfg)
-		tCtx := &detector.TriggerContext{
-			User:             user,
-			ChatID:           chatID,
-			GroupTitle:       groupTitle,
-			IsNewUser:        true,
-			UserMessageCount: 0,
-		}
-		res, err := rTrigger.Evaluate(tCtx)
-		if err == nil && res != nil && res.Triggered {
+	// 2. Evaluate join triggers through unified detector pipeline
+	results, err := b.EvaluateUserContext(user, profile, chatID, groupTitle, true, 0)
+	if err != nil {
+		log.Printf("[User Joined] Error evaluating triggers for user %d: %v", user.UserID, err)
+	}
+
+	for _, res := range results {
+		if res != nil && res.Triggered {
 			log.Printf("[Bot Trigger] Rule '%s' fired on join for user %d (@%s) in chat %d: %s",
 				res.TriggerID, user.UserID, user.Username, chatID, res.Reason)
 
@@ -635,137 +647,20 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 				_ = b.DeleteGroupMessage(chatID, joinMsg.MessageID)
 			}
 
-			// Ban user across all monitored groups
-			if err := b.BanUserAcrossAllGroups(user.UserID, chatID); err != nil {
-				log.Printf("[Bot Action Error] Failed to ban user %d across groups: %v", user.UserID, err)
-			}
-
-			// Deduct reputation
-			repPenalty := rpCfg.RepPenalty
-			if repPenalty <= 0 {
-				repPenalty = 20
-			}
-			if newRep, err := b.db.AdjustReputation(user.UserID, -repPenalty, res.Reason, 0); err == nil {
-				user.Reputation = newRep
-			}
-
 			msgID := 0
 			if joinMsg != nil {
 				msgID = joinMsg.MessageID
 			}
-			userDisplayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
 			alertMsg := &db.Message{
 				ChatID:    chatID,
 				MessageID: msgID,
 				UserID:    user.UserID,
-				Text:      fmt.Sprintf("[Joining User Name]: %s\n[Username]: @%s", userDisplayName, user.Username),
+				Text:      FormatUserTriggerAlertSnippet(res.TriggerID, user, profile),
 				CreatedAt: time.Now(),
 			}
 
-			if err := b.SendTriggerBanAlert(chatID, user, alertMsg, res.Reason); err != nil {
-				log.Printf("[Bot Action Error] Failed to send trigger ban alert for red packet CJK name: %v", err)
-			}
+			b.ExecuteActions(chatID, user, alertMsg, res.Actions)
 			return
 		}
-	}
-
-	// 1. Grab user profile and bio from Telegram API
-	profile, err := b.FetchUserProfile(user.UserID)
-	if err != nil {
-		log.Printf("[User Joined] Could not fetch profile for user %d (@%s): %v", user.UserID, user.Username, err)
-	}
-
-	if profile == nil {
-		if cachedProf, err := b.db.GetUserProfile(user.UserID); err == nil && cachedProf != nil {
-			profile = cachedProf
-		}
-	}
-
-	if profile == nil {
-		log.Printf("[User Joined] User %d (@%s) has no profile/bio available to evaluate join spam triggers.", user.UserID, user.Username)
-		return
-	}
-
-	// 2. Check if spam bio detection is enabled
-	spamBioEnabled := b.cfg.Detector.NewUserSpamBio.Enabled || b.cfg.Detector.Enabled || b.cfg.AutoFlag.Enabled
-	if !spamBioEnabled {
-		return
-	}
-
-	// Reputation threshold check (only kick users with reputation <= MaxReputation, default 5)
-	maxRep := b.cfg.Detector.NewUserSpamBio.MaxReputation
-	if maxRep <= 0 {
-		maxRep = 5
-	}
-	if user.Reputation > maxRep {
-		log.Printf("[User Joined] User %d (@%s) reputation (%d) exceeds max reputation threshold (%d) for spam bio check. Skipping.", user.UserID, user.Username, user.Reputation, maxRep)
-		return
-	}
-
-	// 3. Match bio, personal channel, business intro against spam keywords
-	var customKeywords []string
-	customKeywords = append(customKeywords, b.cfg.AutoFlag.BlockedKeywords...)
-	customKeywords = append(customKeywords, b.cfg.Detector.NewUserSpamBio.CustomKeywords...)
-	dbSnippets, _ := b.db.GetSpamSnippetStrings()
-	customKeywords = append(customKeywords, dbSnippets...)
-
-	isSpam, matchedKeywords := db.MatchSpamBioProfile(profile, customKeywords...)
-	if !isSpam && len(matchedKeywords) == 0 {
-		log.Printf("[User Joined] User %d (@%s) profile evaluated clean (no spam keywords matched in bio/channel/intro).", user.UserID, user.Username)
-		return
-	}
-
-	// 4. User matched spam profile filter! Kick/ban them like CJK users.
-	matchedStr := strings.Join(matchedKeywords, ", ")
-	if matchedStr == "" {
-		matchedStr = "spam keyword match"
-	}
-	reason := fmt.Sprintf("Detection trigger (new_user_spam_bio): Joining user profile signals matched spam keywords [%s]", matchedStr)
-	log.Printf("[Bot Trigger] Rule 'new_user_spam_bio' fired for user %d in chat %d: %s (Bio: %q, Channel: %q, Intro: %q)",
-		user.UserID, chatID, reason, profile.Bio, profile.PersonalChatTitle, profile.BusinessIntro)
-
-	// Delete join service message if present
-	if joinMsg != nil {
-		_ = b.DeleteGroupMessage(chatID, joinMsg.MessageID)
-	}
-
-	// Ban user across all monitored groups
-	if err := b.BanUserAcrossAllGroups(user.UserID, chatID); err != nil {
-		log.Printf("[Bot Action Error] Failed to ban user %d across groups: %v", user.UserID, err)
-	}
-
-	// Deduct reputation
-	repPenalty := b.cfg.Detector.NewUserSpamBio.RepPenalty
-	if repPenalty <= 0 {
-		repPenalty = 20
-	}
-	if newRep, err := b.db.AdjustReputation(user.UserID, -repPenalty, reason, 0); err == nil {
-		user.Reputation = newRep
-	}
-
-	// Construct dummy message for alert snippet showing user's bio/profile info
-	msgID := 0
-	if joinMsg != nil {
-		msgID = joinMsg.MessageID
-	}
-	snippetText := fmt.Sprintf("[Bio]: %s", profile.Bio)
-	if profile.PersonalChatTitle != "" || profile.PersonalChatUsername != "" {
-		snippetText += fmt.Sprintf("\n[Personal Channel]: %s (@%s)", profile.PersonalChatTitle, profile.PersonalChatUsername)
-	}
-	if profile.BusinessIntro != "" {
-		snippetText += fmt.Sprintf("\n[Business Intro]: %s", profile.BusinessIntro)
-	}
-
-	alertMsg := &db.Message{
-		ChatID:    chatID,
-		MessageID: msgID,
-		UserID:    user.UserID,
-		Text:      snippetText,
-		CreatedAt: time.Now(),
-	}
-
-	// Send trigger ban alert to moderation group
-	if err := b.SendTriggerBanAlert(chatID, user, alertMsg, reason); err != nil {
-		log.Printf("[Bot Action Error] Failed to send trigger ban alert for spam bio: %v", err)
 	}
 }

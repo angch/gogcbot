@@ -27,6 +27,14 @@ type TriggerContext struct {
 	HasVerifiedNotBot    bool // True if user verified with "I am not a bot"
 }
 
+// DisplayName returns the trimmed combined display name of the context user, or empty string.
+func (ctx *TriggerContext) DisplayName() string {
+	if ctx == nil || ctx.User == nil {
+		return ""
+	}
+	return ctx.User.DisplayName()
+}
+
 // TriggerResult contains the outcome of evaluating a Trigger.
 type TriggerResult struct {
 	Triggered bool     `json:"triggered" yaml:"triggered"`

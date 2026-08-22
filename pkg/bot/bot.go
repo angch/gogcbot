@@ -95,39 +95,7 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 
 	rc := cleaner.NewRetentionCleaner(database, cfg.CleanupIntervalHr)
 
-	det := detector.NewDetector()
-	if cfg.Detector.Enabled {
-		if cfg.Detector.NewUserCJK.Enabled || cfg.Detector.NewUserChinese.Enabled {
-			cjkCfg := cfg.Detector.NewUserCJK
-			if !cjkCfg.Enabled && cfg.Detector.NewUserChinese.Enabled {
-				cjkCfg = cfg.Detector.NewUserChinese
-			}
-			det.RegisterTrigger(detector.NewNewUserCJKTrigger(cjkCfg))
-		}
-		if cfg.Detector.NewUserSpamBio.Enabled {
-			spamBioCfg := cfg.Detector.NewUserSpamBio
-			var kws []string
-			kws = append(kws, cfg.AutoFlag.BlockedKeywords...)
-			if database != nil {
-				dbKws, _ := database.GetSpamSnippetStrings()
-				kws = append(kws, dbKws...)
-			}
-			det.RegisterTrigger(detector.NewNewUserSpamBioTriggerWithKeywords(spamBioCfg, kws...))
-		}
-		if cfg.Detector.RedPacketName.Enabled || cfg.Detector.NewUserRedPacket.Enabled {
-			rpCfg := cfg.Detector.RedPacketName
-			if !rpCfg.Enabled && cfg.Detector.NewUserRedPacket.Enabled {
-				rpCfg = cfg.Detector.NewUserRedPacket
-			}
-			det.RegisterTrigger(detector.NewRedPacketNameTrigger(rpCfg))
-		}
-		if cfg.Detector.UsernameAnomaly.Enabled {
-			det.RegisterTrigger(detector.NewUsernameAnomalyTrigger(cfg.Detector.UsernameAnomaly))
-		}
-		if cfg.Detector.ProfileNameKeywordBan.Enabled {
-			det.RegisterTrigger(detector.NewProfileNameKeywordBanTrigger(cfg.Detector.ProfileNameKeywordBan))
-		}
-	}
+	det := BuildDetector(cfg, database)
 
 	if database != nil && len(cfg.AutoFlag.BlockedKeywords) > 0 {
 		_ = database.SyncSpamSnippets(cfg.AutoFlag.BlockedKeywords)
@@ -663,5 +631,53 @@ func (b *Bot) BotUser() tgbotapi.User {
 }
 
 func (b *Bot) Detector() *detector.Detector {
+	if b.detector == nil {
+		b.detector = BuildDetector(b.cfg, b.db)
+	}
 	return b.detector
+}
+
+// BuildDetector constructs and registers all enabled triggers configured in Config.
+func BuildDetector(cfg *config.Config, database *db.DB) *detector.Detector {
+	det := detector.NewDetector()
+	if cfg == nil || !cfg.Detector.Enabled {
+		return det
+	}
+
+	if cfg.Detector.NewUserCJK.Enabled || cfg.Detector.NewUserChinese.Enabled {
+		cjkCfg := cfg.Detector.NewUserCJK
+		if !cjkCfg.Enabled && cfg.Detector.NewUserChinese.Enabled {
+			cjkCfg = cfg.Detector.NewUserChinese
+		}
+		det.RegisterTrigger(detector.NewNewUserCJKTrigger(cjkCfg))
+	}
+
+	if cfg.Detector.NewUserSpamBio.Enabled {
+		spamBioCfg := cfg.Detector.NewUserSpamBio
+		var kws []string
+		kws = append(kws, cfg.AutoFlag.BlockedKeywords...)
+		if database != nil {
+			dbKws, _ := database.GetSpamSnippetStrings()
+			kws = append(kws, dbKws...)
+		}
+		det.RegisterTrigger(detector.NewNewUserSpamBioTriggerWithKeywords(spamBioCfg, kws...))
+	}
+
+	if cfg.Detector.RedPacketName.Enabled || cfg.Detector.NewUserRedPacket.Enabled {
+		rpCfg := cfg.Detector.RedPacketName
+		if !rpCfg.Enabled && cfg.Detector.NewUserRedPacket.Enabled {
+			rpCfg = cfg.Detector.NewUserRedPacket
+		}
+		det.RegisterTrigger(detector.NewRedPacketNameTrigger(rpCfg))
+	}
+
+	if cfg.Detector.UsernameAnomaly.Enabled {
+		det.RegisterTrigger(detector.NewUsernameAnomalyTrigger(cfg.Detector.UsernameAnomaly))
+	}
+
+	if cfg.Detector.ProfileNameKeywordBan.Enabled {
+		det.RegisterTrigger(detector.NewProfileNameKeywordBanTrigger(cfg.Detector.ProfileNameKeywordBan))
+	}
+
+	return det
 }

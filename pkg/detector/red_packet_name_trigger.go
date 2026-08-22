@@ -55,47 +55,18 @@ func (t *RedPacketNameTrigger) IsEnabled() bool {
 }
 
 func (t *RedPacketNameTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, error) {
-	if !t.IsEnabled() || ctx == nil || ctx.User == nil {
-		return &TriggerResult{Triggered: false}, nil
-	}
-
-	// Exempt super admin / admins / whitelisted users with maximum reputation
-	if ctx.User.IsAdmin || ctx.User.Reputation >= 100 {
-		return &TriggerResult{Triggered: false}, nil
-	}
-
-	// Condition 1: Low/default reputation check
-	maxRep := t.cfg.MaxReputation
-	if maxRep <= 0 {
-		maxRep = 5
-	}
-	if ctx.User.Reputation > maxRep {
-		return &TriggerResult{Triggered: false}, nil
-	}
-
-	// Condition 2: Must be a new user (new in DB or within max user post threshold)
-	maxPosts := t.cfg.MaxUserPosts
-	if maxPosts <= 0 {
-		maxPosts = 5
-	}
-	isNewUser := ctx.IsNewUser || ctx.UserMessageCount <= maxPosts
-	if !isNewUser {
-		return &TriggerResult{Triggered: false}, nil
-	}
-
-	// Condition 3: High ID
-	minHighID := t.cfg.MinHighUserID
-	if minHighID <= 0 {
-		minHighID = 1000000000
-	}
-	if ctx.User.UserID < minHighID {
+	if !t.IsEnabled() || !MatchesCohort(ctx, t.cfg.MinHighUserID, t.cfg.MaxReputation, t.cfg.MaxUserPosts) {
 		return &TriggerResult{Triggered: false}, nil
 	}
 
 	// Condition 4: Ends with "🧧" at the end of their name
-	fullName := strings.TrimSpace(ctx.User.FirstName + " " + ctx.User.LastName)
-	firstName := strings.TrimSpace(ctx.User.FirstName)
-	lastName := strings.TrimSpace(ctx.User.LastName)
+	fullName := ctx.DisplayName()
+	firstName := ""
+	lastName := ""
+	if ctx.User != nil {
+		firstName = strings.TrimSpace(ctx.User.FirstName)
+		lastName = strings.TrimSpace(ctx.User.LastName)
+	}
 
 	if !HasRedPacketSuffix(fullName, firstName, lastName) {
 		return &TriggerResult{Triggered: false}, nil

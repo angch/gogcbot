@@ -70,32 +70,12 @@ func (t *NewUserCJKTrigger) IsEnabled() bool {
 }
 
 func (t *NewUserCJKTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, error) {
-	if !t.IsEnabled() || ctx == nil {
+	if !t.IsEnabled() || !MatchesCohort(ctx, t.cfg.MinHighUserID, t.cfg.MaxReputation, t.cfg.MaxUserPosts) {
 		return &TriggerResult{Triggered: false}, nil
 	}
 
 	// Condition 0: Shieldy verification text message ("I am not a bot")
 	if IsShieldyVerificationText(ctx.Text) {
-		return &TriggerResult{Triggered: false}, nil
-	}
-
-	// Condition 1: Must be a new user (newly created in DB or within max user post threshold)
-	maxPosts := t.cfg.MaxUserPosts
-	if maxPosts <= 0 {
-		maxPosts = 5
-	}
-	isNewUser := ctx.IsNewUser || (ctx.UserMessageCount > 0 && ctx.UserMessageCount <= maxPosts)
-	if !isNewUser {
-		return &TriggerResult{Triggered: false}, nil
-	}
-
-	// Condition 2: High ID
-	if ctx.User == nil || ctx.User.UserID < t.cfg.MinHighUserID {
-		return &TriggerResult{Triggered: false}, nil
-	}
-
-	// Condition 3: Low or no reputation
-	if ctx.User.Reputation > t.cfg.MaxReputation {
 		return &TriggerResult{Triggered: false}, nil
 	}
 

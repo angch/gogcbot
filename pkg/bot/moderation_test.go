@@ -2196,5 +2196,189 @@ func TestCmdBanCheck_PermissionDenied(t *testing.T) {
 	b.FinishBanCheck()
 }
 
+func TestHandleChatMemberUpdate_LogsUserJoin(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
 
+	userID := int64(777111)
+	chatID := int64(-100999888)
 
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Channel",
+			Type:  "channel",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "new_channel_joiner", FirstName: "Channel", LastName: "User"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "new_channel_joiner", FirstName: "Channel", LastName: "User"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	joins, err := b.db.GetUserJoins(userID, 10)
+	if err != nil {
+		t.Fatalf("failed to get user joins: %v", err)
+	}
+	if len(joins) != 1 {
+		t.Fatalf("expected 1 join logged, got %d", len(joins))
+	}
+	if joins[0].ChatID != chatID || joins[0].ChatTitle != "Test Channel" || joins[0].ChatType != "channel" {
+		t.Errorf("unexpected join record: %+v", joins[0])
+	}
+}
+
+func TestHandleMessage_NewChatMembers_LogsUserJoin(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(777222)
+	chatID := int64(-100555444)
+
+	msg := &tgbotapi.Message{
+		MessageID: 50,
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Super Community Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{ID: userID, UserName: "group_joiner", FirstName: "Group", LastName: "User"},
+		NewChatMembers: []tgbotapi.User{
+			{ID: userID, UserName: "group_joiner", FirstName: "Group", LastName: "User"},
+		},
+		Date: int(time.Now().Unix()),
+	}
+
+	b.handleMessage(msg)
+
+	joins, err := b.db.GetUserJoins(userID, 10)
+	if err != nil {
+		t.Fatalf("failed to get user joins: %v", err)
+	}
+	if len(joins) != 1 {
+		t.Fatalf("expected 1 join logged, got %d", len(joins))
+	}
+	if joins[0].ChatID != chatID || joins[0].ChatTitle != "Super Community Group" || joins[0].ChatType != "supergroup" {
+		t.Errorf("unexpected join record: %+v", joins[0])
+	}
+}
+
+func TestOnChatMemberJoin_ProfileNameKeywordBan_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	// High ID new user with spam keyword in display name (e.g. 0壹天)
+	userID := int64(9988776655)
+	chatID := int64(-100998877)
+	b.cfg.ModerationGroupID = -100112233
+	b.cfg.Detector.ProfileNameKeywordBan.FlagOnly = false
+
+	joinMsg := &tgbotapi.Message{
+		MessageID: 100,
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{ID: userID, UserName: "daily_ad", FirstName: "六o0壹天"},
+		NewChatMembers: []tgbotapi.User{
+			{ID: userID, UserName: "daily_ad", FirstName: "六o0壹天"},
+		},
+		Date: int(time.Now().Unix()),
+	}
+
+	b.handleMessage(joinMsg)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to get user: %v", err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user with profile name '六o0壹天' to be banned on join, got user: %+v", u)
+	}
+}
+
+func TestRescanLowRepUsers_ProfileNameKeywordBan_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(8811223344)
+	b.cfg.ModerationGroupID = -100998877
+	b.cfg.Detector.ProfileNameKeywordBan.FlagOnly = false
+
+	_, _, err := b.db.GetOrCreateUser(userID, "some_handle", "NormalFirst", "NormalLast", 5)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "some_handle",
+		FirstName:  "每日2000吴压",
+		LastName:   "",
+		Bio:        "Clean bio",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now().Add(-48 * time.Hour),
+	})
+
+	opts := RescanOptions{
+		MaxReputation: 20,
+		Hours:         24,
+		Delay:         1 * time.Millisecond,
+	}
+
+	res, err := b.RescanLowRepUsers(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("rescan failed: %v", err)
+	}
+
+	if res.TotalCandidates != 1 || res.BannedCount != 1 {
+		t.Errorf("expected 1 candidate and 1 ban, got %+v", res)
+	}
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil || !u.IsBanned {
+		t.Errorf("expected user %d to be banned after rescan matched profile name keyword", userID)
+	}
+}
+
+func TestFormatUserTriggerAlertSnippet(t *testing.T) {
+	u := &db.User{
+		UserID:    1234567890,
+		Username:  "spammer_bot",
+		FirstName: "Alice",
+		LastName:  "Smith",
+	}
+	prof := &db.UserProfile{
+		Bio:                  "Check out my shop",
+		PersonalChatTitle:    "Vip Channel",
+		PersonalChatUsername: "vipchannel",
+		BusinessIntro:        "Open 24/7",
+	}
+
+	snippet := FormatUserTriggerAlertSnippet("test_rule", u, prof)
+	if !strings.Contains(snippet, "[Trigger]: test_rule") {
+		t.Errorf("missing trigger ID in snippet: %s", snippet)
+	}
+	if !strings.Contains(snippet, "[Name]: Alice Smith") {
+		t.Errorf("missing name in snippet: %s", snippet)
+	}
+	if !strings.Contains(snippet, "[Username]: @spammer_bot") {
+		t.Errorf("missing username in snippet: %s", snippet)
+	}
+	if !strings.Contains(snippet, "[Bio]: Check out my shop") {
+		t.Errorf("missing bio in snippet: %s", snippet)
+	}
+	if !strings.Contains(snippet, "[Personal Channel]: Vip Channel (@vipchannel)") {
+		t.Errorf("missing channel in snippet: %s", snippet)
+	}
+	if !strings.Contains(snippet, "[Business Intro]: Open 24/7") {
+		t.Errorf("missing intro in snippet: %s", snippet)
+	}
+}

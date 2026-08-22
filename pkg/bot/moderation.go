@@ -470,9 +470,11 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, msg *db.Message, actio
 	for _, act := range actions {
 		switch act.Type {
 		case detector.ActionDeleteMessage:
-			log.Printf("[Bot Action] Deleting message %d in chat %d (reason: %s)", messageID, chatID, act.Reason)
-			if err := b.DeleteGroupMessage(chatID, messageID); err != nil {
-				log.Printf("[Bot Action Error] Failed to delete message %d in chat %d: %v", messageID, chatID, err)
+			if messageID > 0 {
+				log.Printf("[Bot Action] Deleting message %d in chat %d (reason: %s)", messageID, chatID, act.Reason)
+				if err := b.DeleteGroupMessage(chatID, messageID); err != nil {
+					log.Printf("[Bot Action Error] Failed to delete message %d in chat %d: %v", messageID, chatID, err)
+				}
 			}
 
 		case detector.ActionBanUser:
@@ -505,6 +507,59 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, msg *db.Message, actio
 			}
 		}
 	}
+}
+
+// EvaluateUserContext evaluates registered triggers against user and profile metadata.
+func (b *Bot) EvaluateUserContext(user *db.User, profile *db.UserProfile, chatID int64, groupTitle string, isNewUser bool, messageCount int) ([]*detector.TriggerResult, error) {
+	if b.Detector() == nil {
+		return nil, nil
+	}
+	tCtx := &detector.TriggerContext{
+		User:             user,
+		ChatID:           chatID,
+		GroupTitle:       groupTitle,
+		IsNewUser:        isNewUser,
+		UserMessageCount: messageCount,
+	}
+	if profile != nil {
+		tCtx.UserBio = profile.Bio
+		tCtx.PersonalChatTitle = profile.PersonalChatTitle
+		tCtx.PersonalChatUsername = profile.PersonalChatUsername
+		tCtx.BusinessIntro = profile.BusinessIntro
+		tCtx.HasPhoto = profile.HasPhoto
+		tCtx.PhotoCount = profile.PhotoCount
+	}
+	return b.Detector().Evaluate(tCtx)
+}
+
+// FormatUserTriggerAlertSnippet constructs a descriptive markdown snippet for trigger ban alerts.
+func FormatUserTriggerAlertSnippet(triggerID string, user *db.User, profile *db.UserProfile) string {
+	var parts []string
+	if triggerID != "" {
+		parts = append(parts, fmt.Sprintf("[Trigger]: %s", triggerID))
+	}
+	if user != nil {
+		displayName := user.DisplayName()
+		if displayName == "" {
+			displayName = fmt.Sprintf("User %d", user.UserID)
+		}
+		parts = append(parts, fmt.Sprintf("[Name]: %s", displayName))
+		if user.Username != "" {
+			parts = append(parts, fmt.Sprintf("[Username]: @%s", user.Username))
+		}
+	}
+	if profile != nil {
+		if profile.Bio != "" {
+			parts = append(parts, fmt.Sprintf("[Bio]: %s", profile.Bio))
+		}
+		if profile.PersonalChatTitle != "" || profile.PersonalChatUsername != "" {
+			parts = append(parts, fmt.Sprintf("[Personal Channel]: %s (@%s)", profile.PersonalChatTitle, profile.PersonalChatUsername))
+		}
+		if profile.BusinessIntro != "" {
+			parts = append(parts, fmt.Sprintf("[Business Intro]: %s", profile.BusinessIntro))
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // RescanOptions configures parameters for manual or scheduled rescanning of low reputation users.
@@ -586,91 +641,36 @@ func (b *Bot) RescanLowRepUsers(ctx context.Context, opts RescanOptions, progres
 			_ = b.db.UpdateUserName(userCopy.UserID, userCopy.Username, userCopy.FirstName, userCopy.LastName)
 		}
 
-		// 2. Evaluate Join Rules / Triggers
+		// 2. Evaluate Triggers
 		triggeredRule := ""
 		reason := ""
+		var triggeredRes *detector.TriggerResult
 
-		// Rule A: Red Packet CJK Name Trigger
-		redPacketEnabled := b.cfg.Detector.RedPacketName.Enabled || b.cfg.Detector.NewUserRedPacket.Enabled
-		if b.cfg.Detector.Enabled && redPacketEnabled {
-			rpCfg := b.cfg.Detector.RedPacketName
-			if !rpCfg.Enabled && b.cfg.Detector.NewUserRedPacket.Enabled {
-				rpCfg = b.cfg.Detector.NewUserRedPacket
-			}
-			rTrigger := detector.NewRedPacketNameTrigger(rpCfg)
-			msgCount, _ := b.db.GetUserMessageCount(userCopy.UserID)
-			tCtx := &detector.TriggerContext{
-				User:             &userCopy,
-				IsNewUser:        true,
-				UserMessageCount: msgCount,
-			}
-			rpRes, rpErr := rTrigger.Evaluate(tCtx)
-			if rpErr == nil && rpRes != nil && rpRes.Triggered {
-				triggeredRule = "red_packet_cjk_name"
-				reason = rpRes.Reason
-			}
-		}
-
-		// Rule B: Spam Profile Bio Trigger
-		spamBioEnabled := b.cfg.Detector.NewUserSpamBio.Enabled || b.cfg.Detector.Enabled || b.cfg.AutoFlag.Enabled
-		if triggeredRule == "" && spamBioEnabled && profile != nil && userCopy.Reputation <= maxRep {
-			var customKeywords []string
-			customKeywords = append(customKeywords, b.cfg.AutoFlag.BlockedKeywords...)
-			customKeywords = append(customKeywords, b.cfg.Detector.NewUserSpamBio.CustomKeywords...)
-			dbSnippets, _ := b.db.GetSpamSnippetStrings()
-			customKeywords = append(customKeywords, dbSnippets...)
-
-			isSpam, matchedKeywords := db.MatchSpamBioProfile(profile, customKeywords...)
-			if isSpam || len(matchedKeywords) > 0 {
-				matchedStr := strings.Join(matchedKeywords, ", ")
-				if matchedStr == "" {
-					matchedStr = "spam keyword match"
-				}
-				triggeredRule = "new_user_spam_bio"
-				reason = fmt.Sprintf("Detection trigger (new_user_spam_bio): Rescanned profile signals matched spam keywords [%s]", matchedStr)
+		msgCount, _ := b.db.GetUserMessageCount(userCopy.UserID)
+		results, _ := b.EvaluateUserContext(&userCopy, profile, 0, "", true, msgCount)
+		for _, r := range results {
+			if r != nil && r.Triggered {
+				triggeredRes = r
+				triggeredRule = r.TriggerID
+				reason = r.Reason
+				break
 			}
 		}
 
 		// 3. Take Action if Triggered
-		if triggeredRule != "" {
+		if triggeredRes != nil {
 			res.BannedCount++
 			log.Printf("[Rescan Trigger] Rule '%s' fired for user %d (@%s): %s", triggeredRule, userCopy.UserID, userCopy.Username, reason)
 
 			if !opts.DryRun {
-				// Ban user across all monitored groups
-				if err := b.BanUserAcrossAllGroups(userCopy.UserID); err != nil {
-					log.Printf("[Rescan Action Error] Failed to ban user %d across groups: %v", userCopy.UserID, err)
-				}
-
-				// Deduct reputation
-				repPenalty := 20
-				if newRep, err := b.db.AdjustReputation(userCopy.UserID, -repPenalty, reason, 0); err == nil {
-					userCopy.Reputation = newRep
-				}
-
-				// Send trigger ban alert to moderation group
-				snippetText := fmt.Sprintf("[Rescan Trigger]: %s\n[Name]: %s %s\n[Username]: @%s", triggeredRule, userCopy.FirstName, userCopy.LastName, userCopy.Username)
-				if profile != nil {
-					if profile.Bio != "" {
-						snippetText += fmt.Sprintf("\n[Bio]: %s", profile.Bio)
-					}
-					if profile.PersonalChatTitle != "" || profile.PersonalChatUsername != "" {
-						snippetText += fmt.Sprintf("\n[Personal Channel]: %s (@%s)", profile.PersonalChatTitle, profile.PersonalChatUsername)
-					}
-					if profile.BusinessIntro != "" {
-						snippetText += fmt.Sprintf("\n[Business Intro]: %s", profile.BusinessIntro)
-					}
-				}
 				alertMsg := &db.Message{
 					ChatID:    0,
 					MessageID: 0,
 					UserID:    userCopy.UserID,
-					Text:      snippetText,
+					Text:      FormatUserTriggerAlertSnippet(triggeredRule, &userCopy, profile),
 					CreatedAt: time.Now(),
 				}
-				if err := b.SendTriggerBanAlert(0, &userCopy, alertMsg, reason); err != nil {
-					log.Printf("[Rescan Action Error] Failed to send trigger ban alert: %v", err)
-				}
+				b.ExecuteActions(0, &userCopy, alertMsg, triggeredRes.Actions)
 			}
 		} else {
 			res.CleanCount++
@@ -967,4 +967,3 @@ func (b *Bot) CheckBannedUsersAcrossGroups(ctx context.Context, opts BanCheckOpt
 	res.Duration = time.Since(startTime)
 	return res, nil
 }
-

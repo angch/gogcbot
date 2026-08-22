@@ -76,6 +76,18 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
     - **Full Visibility & Audit Trail**: Any private direct message (PM/DM) sent to the bot is automatically saved to the SQLite conversation history and logged to the system logs.
     - **Automated Mirroring to Moderation Channel**: Private messages from non-admin users (including text, media, edited messages, and forwards) are immediately formatted and mirrored directly to the Private Moderation Group (`moderation_group_id`), complete with sender information, user ID, reputation score, warning count, message timestamp, and forwarded attachments. Private messages from known bot admins (Super Admin, Bot Admins, and Moderation Group members) are kept private and excluded from mirroring.
 
+11. **Auto-Generated Username Anomaly Detection (`username_anomaly`)**:
+    - **Algorithmic Handle Scoring**: Detects automated/farmed Telegram handles for new high-ID users using mixed-case patterns, interleaved digit sequences (e.g. `nykrr_v9cl2t`), and Shannon entropy gated with low vowel ratios (e.g. `qtdulcljcptk6950`).
+    - Configurable score thresholds (`min_score: 3`) and `flag_only` mode.
+
+12. **Profile Name Spam Keyword Ban (`profile_name_keyword_ban`)**:
+    - **Homoglyph Normalization**: Folds visually confusable digits and letters (`o/O/零/〇 -> 0`, `l/L -> 1`) to catch evasive name variations (e.g. `六o0壹天` or `玖Oo壹天` hitting `0壹天`).
+    - Evaluates display names against calibrated blocklists for new high-ID users with low reputation.
+
+13. **Unified Detection Pipeline & Lifecycle Integration**:
+    - Centralized modular detection engine evaluating across all lifecycle entrypoints: **Message Processing**, **Chat/Channel Join Events**, and **Offline Rescan Audits** (`/rescanusers`).
+
+
 
 
 ---

@@ -1466,3 +1466,102 @@ func TestGetBannedUsers(t *testing.T) {
 	}
 }
 
+func TestUserJoins(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	userID := int64(987654)
+	_, _, err := database.GetOrCreateUser(userID, "joiner", "Join", "User", 50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	// 1. Initially no joins
+	joins, err := database.GetUserJoins(userID, 10)
+	if err != nil {
+		t.Fatalf("failed to get user joins: %v", err)
+	}
+	if len(joins) != 0 {
+		t.Errorf("expected 0 joins, got %d", len(joins))
+	}
+	count, err := database.GetUserJoinCount(userID)
+	if err != nil || count != 0 {
+		t.Errorf("expected join count 0, got %d (err: %v)", count, err)
+	}
+
+	// 2. Log first join
+	t1 := time.Now().Add(-2 * time.Hour)
+	if err := database.LogUserJoinWithTime(userID, -100111, "Alpha Channel", "channel", t1); err != nil {
+		t.Fatalf("failed to log user join: %v", err)
+	}
+
+	// 3. Log second join
+	t2 := time.Now().Add(-1 * time.Hour)
+	if err := database.LogUserJoinWithTime(userID, -100222, "Beta Group", "supergroup", t2); err != nil {
+		t.Fatalf("failed to log user join: %v", err)
+	}
+
+	// 4. Log third join with LogUserJoin (current time)
+	if err := database.LogUserJoin(userID, -100333, "Gamma Group", "group"); err != nil {
+		t.Fatalf("failed to log user join: %v", err)
+	}
+
+	// Check count
+	count, err = database.GetUserJoinCount(userID)
+	if err != nil || count != 3 {
+		t.Errorf("expected join count 3, got %d (err: %v)", count, err)
+	}
+
+	// Check GetUserJoins ordered DESC
+	joins, err = database.GetUserJoins(userID, 10)
+	if err != nil {
+		t.Fatalf("failed to get user joins: %v", err)
+	}
+	if len(joins) != 3 {
+		t.Fatalf("expected 3 joins, got %d", len(joins))
+	}
+	if joins[0].ChatID != -100333 || joins[0].ChatTitle != "Gamma Group" {
+		t.Errorf("expected most recent join to be -100333, got %d", joins[0].ChatID)
+	}
+	if joins[1].ChatID != -100222 || joins[1].ChatTitle != "Beta Group" {
+		t.Errorf("expected second join to be -100222, got %d", joins[1].ChatID)
+	}
+	if joins[2].ChatID != -100111 || joins[2].ChatTitle != "Alpha Channel" {
+		t.Errorf("expected oldest join to be -100111, got %d", joins[2].ChatID)
+	}
+
+	// Check limit
+	joinsLimited, err := database.GetUserJoins(userID, 2)
+	if err != nil || len(joinsLimited) != 2 {
+		t.Errorf("expected 2 joins with limit 2, got %d", len(joinsLimited))
+	}
+
+	// 5. Test GetUserFullDump with joins
+	dump, err := database.GetUserFullDump("joiner", 0)
+	if err != nil {
+		t.Fatalf("failed to get user full dump: %v", err)
+	}
+	if len(dump.ChannelJoins) != 3 {
+		t.Errorf("expected 3 channel joins in full dump, got %d", len(dump.ChannelJoins))
+	}
+
+	// 6. Test FormatUserDump includes channel joins section
+	formatted := FormatUserDump(dump)
+	if !strings.Contains(formatted, "## 🚪 Channel & Group Joins (Total Logs: 3)") {
+		t.Errorf("expected Channel & Group Joins section in formatted dump, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "Alpha Channel") || !strings.Contains(formatted, "Beta Group") {
+		t.Errorf("expected channel titles in formatted dump, got: %s", formatted)
+	}
+
+	// 7. Test PruneOldUserJoins
+	oldTime := time.Now().AddDate(0, 0, -10)
+	_ = database.LogUserJoinWithTime(userID, -100999, "Ancient Channel", "channel", oldTime)
+	pruned, err := database.PruneOldUserJoins(7)
+	if err != nil {
+		t.Fatalf("failed to prune old joins: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("expected 1 pruned join, got %d", pruned)
+	}
+}

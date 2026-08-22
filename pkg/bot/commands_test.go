@@ -909,3 +909,65 @@ func TestVisualStringWidthAndTruncate(t *testing.T) {
 		t.Errorf("expected '...' suffix for truncated string, got %q", truncated)
 	}
 }
+
+func TestCmdUserInfo_WithJoins(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	superAdminID := int64(111222)
+	b.cfg.SuperAdminID = superAdminID
+
+	adminUser, _, _ := b.db.GetOrCreateUser(superAdminID, "superadmin", "Super", "Admin", 100)
+	targetUser, _, _ := b.db.GetOrCreateUser(333444, "bob", "Bob", "Builder", 80)
+
+	// Case 1: No joins recorded yet
+	msg1 := &tgbotapi.Message{
+		MessageID: 101,
+		From: &tgbotapi.User{
+			ID:        superAdminID,
+			UserName:  "superadmin",
+			FirstName: "Super",
+			LastName:  "Admin",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:   superAdminID,
+			Type: "private",
+		},
+		Text: "/userinfo @bob",
+		Entities: []tgbotapi.MessageEntity{
+			{Type: "bot_command", Offset: 0, Length: 9},
+		},
+	}
+	b.handleCommand(msg1, adminUser)
+
+	// Case 2: With channel joins logged
+	_ = b.db.LogUserJoin(targetUser.UserID, -100555, "Dev Channel", "channel")
+	_ = b.db.LogUserJoin(targetUser.UserID, -100666, "Support Group", "supergroup")
+
+	msg2 := &tgbotapi.Message{
+		MessageID: 102,
+		From: &tgbotapi.User{
+			ID:        superAdminID,
+			UserName:  "superadmin",
+			FirstName: "Super",
+			LastName:  "Admin",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:   superAdminID,
+			Type: "private",
+		},
+		Text: "/userinfo 333444",
+		Entities: []tgbotapi.MessageEntity{
+			{Type: "bot_command", Offset: 0, Length: 9},
+		},
+	}
+	b.handleCommand(msg2, adminUser)
+
+	joins, err := b.db.GetUserJoins(targetUser.UserID, 10)
+	if err != nil {
+		t.Fatalf("failed to get user joins: %v", err)
+	}
+	if len(joins) != 2 {
+		t.Fatalf("expected 2 joins, got %d", len(joins))
+	}
+}

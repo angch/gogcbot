@@ -350,6 +350,19 @@ func (b *Bot) cmdUserInfo(msg *tgbotapi.Message, args string) {
 		}
 	}
 
+	recentJoins, _ := b.db.GetUserJoins(targetUser.UserID, 5)
+	var joinsSnippet strings.Builder
+	for _, rj := range recentJoins {
+		title := rj.ChatTitle
+		if title == "" {
+			title = fmt.Sprintf("Chat %d", rj.ChatID)
+		}
+		joinsSnippet.WriteString(fmt.Sprintf("• [`%s`] %s (`%d`)\n", rj.JoinedAt.Format("01-02 15:04"), escapeMarkdown(title), rj.ChatID))
+	}
+	if len(recentJoins) == 0 {
+		joinsSnippet.WriteString("• No recorded channel joins\n")
+	}
+
 	infoText := fmt.Sprintf(
 		"👤 **User Info Card**:\n\n"+
 			"• Name: %s %s (@%s)\n"+
@@ -359,6 +372,7 @@ func (b *Bot) cmdUserInfo(msg *tgbotapi.Message, args string) {
 			"• Banned: %t\n"+
 			"• Total Logged Posts: `%d`\n\n"+
 			"📋 **Profile Info**:\n%s\n\n"+
+			"🚪 **Channel Joins**:\n%s\n"+
 			"📝 **Recent Activity**:\n%s",
 		escapeMarkdown(targetUser.FirstName), escapeMarkdown(targetUser.LastName), escapeMarkdown(targetUser.Username),
 		targetUser.UserID,
@@ -367,6 +381,7 @@ func (b *Bot) cmdUserInfo(msg *tgbotapi.Message, args string) {
 		targetUser.IsBanned,
 		msgCount,
 		profileSection,
+		joinsSnippet.String(),
 		msgsSnippet.String(),
 	)
 	b.replyText(msg, infoText)

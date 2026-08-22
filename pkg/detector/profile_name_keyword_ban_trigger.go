@@ -53,28 +53,11 @@ func (t *ProfileNameKeywordBanTrigger) IsEnabled() bool {
 }
 
 func (t *ProfileNameKeywordBanTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, error) {
-	if !t.IsEnabled() || ctx == nil {
+	if !t.IsEnabled() || !MatchesCohort(ctx, t.cfg.MinHighUserID, t.cfg.MaxReputation, t.cfg.MaxUserPosts) {
 		return &TriggerResult{Triggered: false}, nil
 	}
 
-	// Same cohort gate as the username anomaly trigger: only scrutinize new
-	// users with high IDs and low reputation.
-	maxPosts := t.cfg.MaxUserPosts
-	if maxPosts <= 0 {
-		maxPosts = 5
-	}
-	isNewUser := ctx.IsNewUser || (ctx.UserMessageCount > 0 && ctx.UserMessageCount <= maxPosts)
-	if !isNewUser {
-		return &TriggerResult{Triggered: false}, nil
-	}
-	if ctx.User == nil || ctx.User.UserID < t.cfg.MinHighUserID {
-		return &TriggerResult{Triggered: false}, nil
-	}
-	if ctx.User.Reputation > t.cfg.MaxReputation {
-		return &TriggerResult{Triggered: false}, nil
-	}
-
-	name := profileName(ctx)
+	name := ctx.DisplayName()
 	if name == "" || len(t.cfg.BlockedKeywords) == 0 {
 		return &TriggerResult{Triggered: false}, nil
 	}
@@ -117,14 +100,6 @@ func (t *ProfileNameKeywordBanTrigger) Evaluate(ctx *TriggerContext) (*TriggerRe
 	}, nil
 }
 
-// profileName returns the user's combined display name, or "" when empty.
-func profileName(ctx *TriggerContext) string {
-	if ctx.User == nil {
-		return ""
-	}
-	return strings.TrimSpace(strings.TrimSpace(ctx.User.FirstName) + " " + strings.TrimSpace(ctx.User.LastName))
-}
-
 // ProfileNameKeywordBanScore scores a profile name by counting distinct matched
 // keywords from the configured blocklist. Each distinct matched keyword adds +3.
 // Names are homoglyph-normalized before matching, so "六o0壹天" and "玖Oo壹天"
@@ -147,27 +122,4 @@ func ProfileNameKeywordBanScore(name string, keywords []string) int {
 		}
 	}
 	return score
-}
-
-// homoglyphMap folds visually-confusable characters into a single canonical form
-// before keyword matching. Numeric homoglyphs (o/O/〇/零 -> 0, l/L -> 1) are the
-// ones exploited in farm profile names; other Latin text is folded via
-// lowercasing in NormalizeProfileName.
-var homoglyphMap = map[rune]rune{
-	'o': '0', 'O': '0', '〇': '0', '零': '0', '0': '0',
-	'l': '1', 'L': '1', '1': '1',
-}
-
-// NormalizeProfileName returns name lowercased with homoglyph letters folded
-// into their canonical digits. This is the form used for keyword matching.
-func NormalizeProfileName(name string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(name) {
-		if n, ok := homoglyphMap[r]; ok {
-			b.WriteRune(n)
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }

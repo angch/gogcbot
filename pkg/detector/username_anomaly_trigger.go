@@ -46,25 +46,7 @@ func (t *UsernameAnomalyTrigger) IsEnabled() bool {
 }
 
 func (t *UsernameAnomalyTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, error) {
-	if !t.IsEnabled() || ctx == nil {
-		return &TriggerResult{Triggered: false}, nil
-	}
-
-	// Only run the username gate for users we would otherwise scrutinize:
-	// new users with high IDs and low reputation, matching the CJK trigger's
-	// spam cohort. Established, or low-ID, or high-rep users are skipped.
-	maxPosts := t.cfg.MaxUserPosts
-	if maxPosts <= 0 {
-		maxPosts = 5
-	}
-	isNewUser := ctx.IsNewUser || (ctx.UserMessageCount > 0 && ctx.UserMessageCount <= maxPosts)
-	if !isNewUser {
-		return &TriggerResult{Triggered: false}, nil
-	}
-	if ctx.User == nil || ctx.User.UserID < t.cfg.MinHighUserID {
-		return &TriggerResult{Triggered: false}, nil
-	}
-	if ctx.User.Reputation > t.cfg.MaxReputation {
+	if !t.IsEnabled() || !MatchesCohort(ctx, t.cfg.MinHighUserID, t.cfg.MaxReputation, t.cfg.MaxUserPosts) {
 		return &TriggerResult{Triggered: false}, nil
 	}
 
