@@ -58,6 +58,20 @@ detector:
     min_score: 3
     flag_only: true
     rep_penalty: 20
+  profile_name_keyword_ban:
+    enabled: true
+    min_high_user_id: 1000000000
+    max_reputation: 5
+    max_user_posts: 5
+    min_score: 3
+    flag_only: true
+    rep_penalty: 20
+    blocked_keywords:
+      - "0壹天"
+      - "每日"
+      - "吴压"
+      - "吾思"
+      - "兼织"
 
 shieldy:
   enabled: true
