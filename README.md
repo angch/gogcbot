@@ -87,8 +87,8 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
 13. **Unified Detection Pipeline & Lifecycle Integration**:
     - Centralized modular detection engine evaluating across all lifecycle entrypoints: **Message Processing**, **Chat/Channel Join Events**, and **Offline Rescan Audits** (`/rescanusers`).
 
-
-
+14. **High-Reputation Rule Validation Internal Check**:
+    - Built-in validation suite (`detector.ValidateAgainstHighRepUsers`) ensuring any new or modified detection rules/triggers never match against established community members with reputation > 40 across profile data, join/rescan contexts, and message history.
 
 ---
 

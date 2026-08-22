@@ -2409,3 +2409,39 @@ func TestFormatUserTriggerAlertSnippet(t *testing.T) {
 		t.Errorf("missing intro in snippet: %s", snippet)
 	}
 }
+
+func TestBot_ValidateRulesAgainstHighRepUsers(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	// Insert high rep users (rep > 40)
+	u1, _, _ := b.db.GetOrCreateUser(10104269, "angch", "Ang", "ChinHan", 100)
+	_ = b.db.SetReputation(u1.UserID, 100, "Admin setup", 0)
+	_ = b.db.SaveMessage(&db.Message{
+		ChatID:    -100123,
+		MessageID: 1,
+		UserID:    u1.UserID,
+		Text:      "Hello world, testing bot rules",
+		CreatedAt: time.Now(),
+	})
+
+	u2, _, _ := b.db.GetOrCreateUser(5000000001, "cbzbQFLOuHNkJZ", "每日首发🧧", "", 50)
+	_ = b.db.SetReputation(u2.UserID, 50, "Setup", 0)
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:    u2.UserID,
+		Username:  "cbzbQFLOuHNkJZ",
+		FirstName: "每日首发🧧",
+		Bio:       "Good member bio",
+		FetchedAt: time.Now(),
+	})
+
+	violations, err := b.ValidateRulesAgainstHighRepUsers(40)
+	if err != nil {
+		t.Fatalf("unexpected error validating rules: %v", err)
+	}
+
+	if len(violations) > 0 {
+		t.Fatalf("expected 0 violations for high-rep users, got %d: %s",
+			len(violations), detector.FormatRuleMatchViolations(violations))
+	}
+}

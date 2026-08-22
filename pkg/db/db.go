@@ -535,6 +535,30 @@ func (d *DB) GetBannedUsers() ([]User, error) {
 	return users, nil
 }
 
+// GetUsersWithReputationAbove returns all users with reputation strictly greater than minRep.
+func (d *DB) GetUsersWithReputationAbove(minRep int) ([]User, error) {
+	rows, err := d.Query(`
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		FROM users
+		WHERE reputation > ?
+		ORDER BY reputation DESC, user_id ASC
+	`, minRep)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
 func (d *DB) AdjustReputation(userID int64, delta int, reason string, byUserID int64) (int, error) {
 	now := time.Now()
 	tx, err := d.Begin()
@@ -763,6 +787,29 @@ func (d *DB) GetRecentUserMessages(userID int64, limit int) ([]Message, error) {
 		FROM messages WHERE user_id = ?
 		ORDER BY created_at DESC LIMIT ?
 	`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, nil
+}
+
+// GetAllUserMessages retrieves all messages sent by a user, ordered newest to oldest.
+func (d *DB) GetAllUserMessages(userID int64) ([]Message, error) {
+	rows, err := d.Query(`
+		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at
+		FROM messages WHERE user_id = ?
+		ORDER BY created_at DESC
+	`, userID)
 	if err != nil {
 		return nil, err
 	}

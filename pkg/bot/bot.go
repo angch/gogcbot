@@ -637,6 +637,14 @@ func (b *Bot) Detector() *detector.Detector {
 	return b.detector
 }
 
+// ValidateRulesAgainstHighRepUsers validates all registered detector rules against users with reputation > minRep (default 40).
+func (b *Bot) ValidateRulesAgainstHighRepUsers(minRep int) ([]detector.RuleMatchViolation, error) {
+	if b.db == nil {
+		return nil, fmt.Errorf("bot database is nil")
+	}
+	return b.Detector().ValidateAgainstHighRepUsers(b.db, minRep)
+}
+
 // BuildDetector constructs and registers all enabled triggers configured in Config.
 func BuildDetector(cfg *config.Config, database *db.DB) *detector.Detector {
 	det := detector.NewDetector()

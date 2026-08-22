@@ -1568,3 +1568,60 @@ func TestUserJoins(t *testing.T) {
 		t.Errorf("expected 1 pruned join, got %d", pruned)
 	}
 }
+
+func TestGetUsersWithReputationAbove(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	_, _, _ = database.GetOrCreateUser(1, "low1", "Low", "1", 0)
+	_, _, _ = database.GetOrCreateUser(2, "low2", "Low", "2", 40)
+	_, _, _ = database.GetOrCreateUser(3, "high1", "High", "1", 41)
+	_, _, _ = database.GetOrCreateUser(4, "high2", "High", "2", 100)
+	_, _, _ = database.GetOrCreateUser(5, "high3", "High", "3", 50)
+
+	users, err := database.GetUsersWithReputationAbove(40)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(users) != 3 {
+		t.Fatalf("expected 3 users with reputation > 40, got %d", len(users))
+	}
+
+	// Should be sorted by reputation DESC
+	if users[0].Reputation != 100 || users[1].Reputation != 50 || users[2].Reputation != 41 {
+		t.Errorf("unexpected sorting or reputations: %v, %v, %v", users[0].Reputation, users[1].Reputation, users[2].Reputation)
+	}
+}
+
+func TestGetAllUserMessages(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	userID := int64(777)
+	now := time.Now()
+
+	for i := 1; i <= 5; i++ {
+		_ = database.SaveMessage(&Message{
+			ChatID:    100,
+			MessageID: i,
+			UserID:    userID,
+			Text:      fmt.Sprintf("Message %d", i),
+			CreatedAt: now.Add(time.Duration(i) * time.Minute),
+		})
+	}
+
+	msgs, err := database.GetAllUserMessages(userID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(msgs) != 5 {
+		t.Fatalf("expected 5 messages, got %d", len(msgs))
+	}
+
+	// Ordered newest to oldest
+	if msgs[0].MessageID != 5 || msgs[4].MessageID != 1 {
+		t.Errorf("expected newest to oldest order, got first=%d, last=%d", msgs[0].MessageID, msgs[4].MessageID)
+	}
+}
