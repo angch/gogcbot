@@ -81,6 +81,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 		b.cmdListUsers(msg, isAuthorized)
 	case "listunknownusers", "unknownusers", "listspambios", "spambios", "listspambiousers", "spambiousers", "spamusers":
 		b.cmdListUnknownUsers(msg, args, isAuthorized)
+	case "rescanusers", "rescan", "rescanprofiles":
+		b.cmdRescanUsers(msg, args, isAuthorized)
+	case "bancheck", "checkbans", "verifybans":
+		b.cmdBanCheck(msg, args, isAuthorized)
 	case "cleanup":
 		b.cmdCleanup(msg, isAuthorized)
 	case "getdb", "backup", "db", "dumpdb", "downloaddb":
@@ -331,7 +335,18 @@ func (b *Bot) cmdUserInfo(msg *tgbotapi.Message, args string) {
 			if p.HasPhoto {
 				photoStr = fmt.Sprintf("✅ Yes (%d photos)", p.PhotoCount)
 			}
-			profileSection = fmt.Sprintf("• Bio: %s\n• Profile Photo: %s\n• Profile Fetched: `%s`", bioSnippet, photoStr, p.FetchedAt.Format("01-02 15:04"))
+			var extraLines strings.Builder
+			if p.PersonalChatTitle != "" || p.PersonalChatUsername != "" {
+				handle := ""
+				if p.PersonalChatUsername != "" {
+					handle = fmt.Sprintf(" (@%s)", p.PersonalChatUsername)
+				}
+				extraLines.WriteString(fmt.Sprintf("\n• Channel: %s%s", escapeMarkdown(p.PersonalChatTitle), escapeMarkdown(handle)))
+			}
+			if p.BusinessIntro != "" {
+				extraLines.WriteString(fmt.Sprintf("\n• Business: %s", escapeMarkdown(truncateText(p.BusinessIntro, 50))))
+			}
+			profileSection = fmt.Sprintf("• Bio: %s\n• Profile Photo: %s%s\n• Profile Fetched: `%s`", bioSnippet, photoStr, extraLines.String(), p.FetchedAt.Format("01-02 15:04"))
 		}
 	}
 
@@ -425,6 +440,16 @@ func (b *Bot) cmdFetchProfile(msg *tgbotapi.Message, args string, isAuthorized b
 		profile.FetchedAt.Format("2006-01-02 15:04:05 MST"),
 		bioText,
 	)
+	if profile.PersonalChatTitle != "" || profile.PersonalChatUsername != "" {
+		handle := ""
+		if profile.PersonalChatUsername != "" {
+			handle = fmt.Sprintf(" (@%s)", profile.PersonalChatUsername)
+		}
+		cardText += fmt.Sprintf("\n\n📢 **Personal Channel**:\n%s%s", escapeMarkdown(profile.PersonalChatTitle), escapeMarkdown(handle))
+	}
+	if profile.BusinessIntro != "" {
+		cardText += fmt.Sprintf("\n\n💼 **Business Intro**:\n```\n%s\n```", escapeMarkdown(profile.BusinessIntro))
+	}
 	b.replyText(msg, cardText)
 }
 
@@ -462,6 +487,203 @@ func (b *Bot) cmdBackfillProfiles(msg *tgbotapi.Message, args string, isAuthoriz
 			return
 		}
 		b.replyText(msg, fmt.Sprintf("✅ **User Profile Backfill Complete**!\n\n• Successfully Fetched: `%d`\n• Failed / Not Found: `%d`", success, failed))
+	}()
+}
+
+func (b *Bot) cmdRescanUsers(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	if !isAuthorized {
+		b.replyText(msg, "❌ Permission denied.")
+		return
+	}
+
+	opts := RescanOptions{
+		MaxReputation: 20,
+		Hours:         24,
+		Delay:         100 * time.Millisecond,
+	}
+
+	lowerArgs := strings.ToLower(args)
+	if strings.Contains(lowerArgs, "force") || strings.Contains(lowerArgs, "all") {
+		opts.Force = true
+	}
+	if strings.Contains(lowerArgs, "dryrun") || strings.Contains(lowerArgs, "dry") {
+		opts.DryRun = true
+	}
+
+	// Parse custom max rep or hours if supplied: e.g. "maxrep 30" or "hours 12"
+	fields := strings.Fields(lowerArgs)
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if (f == "rep" || f == "maxrep" || f == "max-rep") && i+1 < len(fields) {
+			if v, err := strconv.Atoi(fields[i+1]); err == nil {
+				opts.MaxReputation = v
+				i++
+			}
+		} else if (f == "hours" || f == "hr" || f == "age") && i+1 < len(fields) {
+			if v, err := strconv.Atoi(fields[i+1]); err == nil {
+				opts.Hours = v
+				i++
+			}
+		}
+	}
+
+	var cutoff time.Time
+	if !opts.Force && opts.Hours > 0 {
+		cutoff = time.Now().Add(-time.Duration(opts.Hours) * time.Hour)
+	}
+
+	candidates, err := b.db.GetLowRepUsersForRescan(opts.MaxReputation, cutoff, 0)
+	if err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Error querying candidate users for rescan: %v", err))
+		return
+	}
+
+	if len(candidates) == 0 {
+		b.replyText(msg, fmt.Sprintf("ℹ️ No low-reputation users (rep <= %d) found needing rescan (last scan > %d hours ago). Use `/rescanusers force` to rescan all low-rep users.", opts.MaxReputation, opts.Hours))
+		return
+	}
+
+	modeStr := ""
+	if opts.DryRun {
+		modeStr = " (DRY RUN - No bans will be executed)"
+	}
+	b.replyText(msg, fmt.Sprintf("🔍 **Starting user rescan** for `%d` candidate users%s...\n• Max Reputation: `%d`\n• Scan Age Threshold: `>%d hours` (Force: `%t`)\n\nRunning in background. Summary will be reported when finished.", len(candidates), modeStr, opts.MaxReputation, opts.Hours, opts.Force))
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+		defer cancel()
+
+		res, err := b.RescanLowRepUsers(ctx, opts, nil)
+		if err != nil && err != context.Canceled {
+			b.replyText(msg, fmt.Sprintf("⚠️ User rescan encountered an error: %v", err))
+			return
+		}
+
+		b.replyText(msg, fmt.Sprintf(
+			"✅ **User Rescan Complete**!\n\n"+
+				"📊 **Summary**:\n"+
+				"• Total Candidates: `%d`\n"+
+				"• Scanned: `%d`\n"+
+				"• 🚫 Banned (Triggered Join Rules): `%d`\n"+
+				"• ✨ Clean: `%d`\n"+
+				"• ⚠️ Errors / Not Found: `%d`\n"+
+				"• Dry Run: `%t`",
+			res.TotalCandidates, res.ScannedCount, res.BannedCount, res.CleanCount, res.ErrorCount, opts.DryRun,
+		))
+	}()
+}
+
+func (b *Bot) cmdBanCheck(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	if !isAuthorized {
+		b.replyText(msg, "❌ Permission denied. You must be an administrator or moderation group member.")
+		return
+	}
+
+	if !b.TryStartBanCheck() {
+		b.replyText(msg, "⚠️ A ban check is already in progress. Please wait for it to complete.")
+		return
+	}
+
+	opts := BanCheckOptions{
+		Delay: 1 * time.Second,
+	}
+
+	lowerArgs := strings.ToLower(args)
+	if strings.Contains(lowerArgs, "dryrun") || strings.Contains(lowerArgs, "dry") {
+		opts.DryRun = true
+	}
+
+	// Parse optional custom delay (must be >= 1s / 1000ms)
+	fields := strings.Fields(lowerArgs)
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if (f == "delay" || f == "delay-ms" || f == "delayms" || f == "rate") && i+1 < len(fields) {
+			if v, err := strconv.Atoi(fields[i+1]); err == nil {
+				if v > 0 {
+					opts.Delay = time.Duration(v) * time.Millisecond
+				}
+				i++
+			}
+		}
+	}
+
+	bannedUsers, err := b.db.GetBannedUsers()
+	if err != nil {
+		b.FinishBanCheck()
+		b.replyText(msg, fmt.Sprintf("❌ Error querying banned users: %v", err))
+		return
+	}
+	if len(bannedUsers) == 0 {
+		b.FinishBanCheck()
+		b.replyText(msg, "ℹ️ No banned users found in database.")
+		return
+	}
+
+	groups, err := b.db.GetMonitoredGroups()
+	if err != nil {
+		b.FinishBanCheck()
+		b.replyText(msg, fmt.Sprintf("❌ Error querying monitored groups: %v", err))
+		return
+	}
+	if len(groups) == 0 {
+		b.FinishBanCheck()
+		b.replyText(msg, "ℹ️ No monitored groups/channels found in database.")
+		return
+	}
+
+	totalChecks := len(bannedUsers) * len(groups)
+	estMinutes := (totalChecks * int(opts.Delay/time.Second)) / 60
+	if estMinutes < 1 {
+		estMinutes = 1
+	}
+
+	modeStr := ""
+	if opts.DryRun {
+		modeStr = " (DRY RUN - No kick bans will be executed)"
+	}
+
+	b.replyText(msg, fmt.Sprintf(
+		"🔍 **Starting Ban Check across monitored channels & groups**%s...\n\n"+
+			"• 🚫 **Banned Users in DB**: `%d`\n"+
+			"• 👥 **Monitored Groups/Channels**: `%d`\n"+
+			"• 📋 **Total Checks**: `%d`\n"+
+			"• ⏱️ **Rate Limit**: `<= 1 req/sec` (~`%d` min est.)\n\n"+
+			"Running in background. Summary report will be sent here upon completion.",
+		modeStr, len(bannedUsers), len(groups), totalChecks, estMinutes,
+	))
+
+	go func() {
+		defer b.FinishBanCheck()
+
+		timeout := time.Duration(totalChecks*3)*time.Second + 10*time.Minute
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		res, err := b.CheckBannedUsersAcrossGroups(ctx, opts, nil)
+		if err != nil && err != context.Canceled {
+			b.replyText(msg, fmt.Sprintf("⚠️ Ban check encountered an error: %v", err))
+			return
+		}
+
+		if res == nil {
+			return
+		}
+
+		b.replyText(msg, fmt.Sprintf(
+			"✅ **Ban Check Complete**!\n\n"+
+				"📊 **Summary**:\n"+
+				"• 🚫 Banned Users in DB: `%d`\n"+
+				"• 👥 Monitored Groups/Channels: `%d`\n"+
+				"• 📋 Total Group-User Checks: `%d`\n"+
+				"• ✅ Already Banned: `%d`\n"+
+				"• 🔨 Newly Re-banned / Enforced: `%d`\n"+
+				"• ⚠️ Errors: `%d`\n"+
+				"• ⏱️ Elapsed Time: `%s`\n"+
+				"• 🧪 Dry Run: `%t`",
+			res.TotalBannedUsers, res.TotalGroups, res.TotalChecks,
+			res.AlreadyBanned, res.RebannedCount, res.ErrorCount,
+			res.Duration.Round(time.Second), opts.DryRun,
+		))
 	}()
 }
 
@@ -1042,11 +1264,7 @@ func (b *Bot) cmdGetDB(msg *tgbotapi.Message, user *db.User) {
 		return
 	}
 
-	isSuperAdmin := b.cfg.SuperAdminID != 0 && user.UserID == b.cfg.SuperAdminID
-	isBotAdmin := user.IsAdmin
-	isModGroupMember := b.cfg.ModerationGroupID != 0 && b.IsUserInModGroup(user.UserID)
-
-	if !isSuperAdmin && !isBotAdmin && !isModGroupMember {
+	if !b.IsBotAdminUser(user) {
 		b.replyText(msg, "❌ Permission denied. You must be a Bot Administrator or member of the Bot Admin group.")
 		return
 	}
@@ -1188,6 +1406,23 @@ func (b *Bot) IsUserInModGroup(userID int64) bool {
 	return cm.Status == "administrator" || cm.Status == "creator" || cm.Status == "member"
 }
 
+// IsBotAdminUser checks if a given user is a Super Admin, has bot admin privileges in the DB, or is a member of the moderation/admin group.
+func (b *Bot) IsBotAdminUser(user *db.User) bool {
+	if user == nil {
+		return false
+	}
+	if b.cfg.SuperAdminID != 0 && user.UserID == b.cfg.SuperAdminID {
+		return true
+	}
+	if user.IsAdmin {
+		return true
+	}
+	if b.cfg.ModerationGroupID != 0 && b.IsUserInModGroup(user.UserID) {
+		return true
+	}
+	return false
+}
+
 func (b *Bot) replyText(msg *tgbotapi.Message, text string) {
 	if msg == nil || text == "" {
 		return
@@ -1302,5 +1537,7 @@ func getHelpText(isSuperAdmin, isModGroup bool) string {
 		"• `/cleanup` - Manually run 7-day logs & 50-post-per-user retention cleanup\n" +
 		"• `/getdb` - Download a copy of the current SQLite3 database (Admin direct message only)\n" +
 		"• `/fetchprofile <user|@username>` - Fetch fresh Telegram profile (bio & picture) & cache in DB\n" +
-		"• `/backfillprofiles [force]` - Backfill bios and profile photos for tracked users in background"
+		"• `/backfillprofiles [force]` - Backfill bios and profile photos for tracked users in background\n" +
+		"• `/rescanusers [force] [dryrun] [maxrep <n>]` - Rescan low-rep users (>24h since last scan) & trigger join ban rules\n" +
+		"• `/bancheck [dryrun]` - Verify all banned users across monitored channels/groups (<= 1 req/sec) & enforce missing bans"
 }

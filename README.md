@@ -57,9 +57,11 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
    - Dynamic `/setsuperadmin` and `/setmodgroup` commands automatically persist settings back to `config.yaml`.
    - Full control over bot settings, group monitoring management (`/addgroup`, `/removegroup`, `/listgroups`), and reputation overrides.
 
-8. **Spam Snippet & Bio Detection**:
-   - **Profile Bio Scanning on Join & Message**: Automatically grabs user profile and bio when a user joins a channel/group or sends a message, caching them in `user_profiles`.
-   - **Automatic Spam Bio Kick Rule (`new_user_spam_bio`)**: If a joining or new user's bio matches spam/syndicate keywords, the bot immediately deletes join messages, bans them across monitored groups, penalizes reputation, and alerts the moderation channel.
+8. **Channel & Group Join Moderation**:
+   - **Allowed Updates & Real-time Join Ingestion**: Listens for Telegram `chat_member`, `my_chat_member`, and `chat_join_request` updates across broadcast channels, supergroups, and groups.
+   - **Profile Bio & Channel Scanning on Join & Message**: Automatically retrieves and evaluates user profile bio, personal channel title/username, and business intro when a user joins a channel/group or sends a message, caching them in `user_profiles`.
+   - **Automatic Spam Bio & Channel Kick Rule (`new_user_spam_bio`)**: If a joining or new user's bio, personal channel title, or business intro matches spam/syndicate keywords (such as `点我`, discount cards, etc.) or their personal channel username matches automated syndicate patterns (`letter...digits`), the bot immediately deletes join messages, bans them across all monitored channels and groups, penalizes reputation, and alerts the moderation channel.
+   - **Comprehensive Join Logging**: Detailed structured logging for every join event (`[ChatMemberUpdate]`, `[User Joined]`, rule triggers, whitelist bypasses, and clean evaluations).
    - **`spam_snippets` Database Table**: Stores dynamic spam snippets synced from runtime `config.yaml` or added programmatically.
    - **CLI & Bot Commands**: Search and inspect suspicious bios or unknown/new accounts via `gogcbot list-unknownusers` (or `list-spambios`) and `/listunknownusers` (rendered as a compact monospace table with CJK visual alignment).
 
@@ -69,6 +71,11 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
      2. Name itself is mostly CJK Unicode characters (>= 50% CJK ratio).
      3. High user ID (>= 1,000,000,000 / 10^9).
      4. Username consists of mixed-caps letters of at least 5 length (e.g. `@cbzbQFLOuHNkJZ`).
+
+10. **Private Message Logging & Moderation Channel Mirroring**:
+    - **Full Visibility & Audit Trail**: Any private direct message (PM/DM) sent to the bot is automatically saved to the SQLite conversation history and logged to the system logs.
+    - **Automated Mirroring to Moderation Channel**: Private messages from non-admin users (including text, media, edited messages, and forwards) are immediately formatted and mirrored directly to the Private Moderation Group (`moderation_group_id`), complete with sender information, user ID, reputation score, warning count, message timestamp, and forwarded attachments. Private messages from known bot admins (Super Admin, Bot Admins, and Moderation Group members) are kept private and excluded from mirroring.
+
 
 
 ---
@@ -118,11 +125,22 @@ CGO_ENABLED=0 go build -o gogcbot main.go
 ./gogcbot list-unknownusers --config config.yaml --max-rep 20
 ./gogcbot list-unknownusers --config config.yaml --ban
 
-# 8. Dump all known database info and profiles for a user by @tag or numeric ID
+# 8. Manually rescan low-reputation users (>24h since last scan) & trigger join ban rules
+./gogcbot rescan-users --config config.yaml
+./gogcbot rescan-users --config config.yaml --max-rep 20 --hours 24
+./gogcbot rescan-users --config config.yaml --force
+./gogcbot rescan-users --config config.yaml --dry-run
+
+# 9. Dump all known database info and profiles for a user by @tag or numeric ID
 ./gogcbot user @spambot --config config.yaml
 ./gogcbot user 555666 --config config.yaml
 ./gogcbot user @spambot --config config.yaml --json
 ./gogcbot user 555666 --config config.yaml --output user_dossier.md
+
+# 10. Audit all banned users across monitored channels & groups (<= 1 req/sec) and enforce missing kick bans
+./gogcbot bancheck --config config.yaml
+./gogcbot bancheck --config config.yaml --dry-run
+./gogcbot bancheck --config config.yaml --delay-ms 1000
 ```
 
 ### OS System Service Management (Windows Service / Systemd / launchd)
@@ -191,6 +209,15 @@ detector:
     max_reputation: 5                  # Maximum reputation score to apply detection
     max_user_posts: 5                  # Post count window for new user evaluation
     rep_penalty: 20                    # Reputation penalty applied upon detection
+  red_packet_name:
+    enabled: true                      # Kick/ban accounts with red packet emoji CJK names & mixed-caps usernames
+    min_high_user_id: 1000000000
+    max_reputation: 5
+    max_user_posts: 5
+    min_username_length: 5
+    min_cjk_ratio: 0.5
+    min_cjk_chars: 1
+    rep_penalty: 20
 
 shieldy:
   enabled: true                       # Enable Shieldy captcha bot verification
@@ -228,6 +255,8 @@ shieldy:
 | `/demote <user>` | Super Admin | Remove Bot Admin privileges and reset rep |
 | `/listusers` | Admin/Mod | List known good/bad users and moderation status |
 | `/listunknownusers [kw] [ban]` | Admin/Mod | Compact monospace table list or batch-ban unbanned new users with few messages (with or without bios) |
+| `/rescanusers [force] [dryrun]` | Admin/Mod | Manually rescan low-rep users (>24h since last scan) & trigger join ban rules |
+| `/bancheck [dryrun]` | Admin/Mod | Audit all banned users across monitored channels/groups (<= 1 req/sec) & enforce missing kick bans |
 | `/cleanup` | Admin/Mod | Run retention cleanup on demand |
 | `/getdb` | Bot Admin (Direct PM only) | Download a copy of current SQLite3 database |
 

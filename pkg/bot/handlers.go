@@ -41,6 +41,26 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 		b.handleChatMemberUpdate(update.ChatMember)
 		return
 	}
+
+	if update.MyChatMember != nil {
+		mcm := update.MyChatMember
+		log.Printf("[MyChatMemberUpdate] Bot status in chat %d (%s, type: %s) changed from %s to %s",
+			mcm.Chat.ID, mcm.Chat.Title, mcm.Chat.Type, mcm.OldChatMember.Status, mcm.NewChatMember.Status)
+		if mcm.Chat.IsGroup() || mcm.Chat.IsSuperGroup() || mcm.Chat.IsChannel() {
+			_ = b.db.SaveGroup(mcm.Chat.ID, mcm.Chat.Title, mcm.Chat.Type)
+		}
+		return
+	}
+
+	if update.ChatJoinRequest != nil {
+		cjr := update.ChatJoinRequest
+		log.Printf("[ChatJoinRequest] User %d (@%s - %s %s) requested to join chat %d (%s)",
+			cjr.From.ID, cjr.From.UserName, cjr.From.FirstName, cjr.From.LastName, cjr.Chat.ID, cjr.Chat.Title)
+		if cjr.Chat.IsGroup() || cjr.Chat.IsSuperGroup() || cjr.Chat.IsChannel() {
+			_ = b.db.SaveGroup(cjr.Chat.ID, cjr.Chat.Title, cjr.Chat.Type)
+		}
+		return
+	}
 }
 
 func (b *Bot) handleChatMemberUpdate(cmu *tgbotapi.ChatMemberUpdated) {
@@ -49,6 +69,14 @@ func (b *Bot) handleChatMemberUpdate(cmu *tgbotapi.ChatMemberUpdated) {
 	}
 	userID := cmu.NewChatMember.User.ID
 	chatID := cmu.Chat.ID
+
+	if cmu.Chat.IsGroup() || cmu.Chat.IsSuperGroup() || cmu.Chat.IsChannel() {
+		_ = b.db.SaveGroup(cmu.Chat.ID, cmu.Chat.Title, cmu.Chat.Type)
+	}
+
+	log.Printf("[ChatMemberUpdate] User %d (@%s - %s %s) in chat %d (%s, type: %s): Status changed from %s to %s",
+		userID, cmu.NewChatMember.User.UserName, cmu.NewChatMember.User.FirstName, cmu.NewChatMember.User.LastName,
+		chatID, cmu.Chat.Title, cmu.Chat.Type, cmu.OldChatMember.Status, cmu.NewChatMember.Status)
 
 	// Check if this user is marked as banned in our DB
 	user, err := b.db.GetUserByID(userID)
@@ -165,7 +193,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	// Detect links & media
-	hasMedia := msg.Photo != nil || msg.Video != nil || msg.Document != nil || msg.Audio != nil || msg.Animation != nil || msg.Sticker != nil
+	hasMedia := msg.Photo != nil || msg.Video != nil || msg.Document != nil || msg.Audio != nil || msg.Animation != nil || msg.Sticker != nil || msg.Voice != nil || msg.VideoNote != nil
 	hasLinks := containsLinks(msg)
 
 	text := extractMessageText(msg)
@@ -182,6 +210,15 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	log.Printf("[Received Message] Sender ID: %d (@%s) | Group: '%s' (ID: %d) | Content: %q",
 		msg.From.ID, msg.From.UserName, groupName, chat.ID, text)
 
+	if chat.IsPrivate() {
+		editTag := ""
+		if msg.EditDate != 0 {
+			editTag = " (Edited)"
+		}
+		log.Printf("[Private Message%s] Sender ID: %d (@%s - %s %s) | MessageID: %d | Content: %q",
+			editTag, msg.From.ID, msg.From.UserName, msg.From.FirstName, msg.From.LastName, msg.MessageID, text)
+	}
+
 	// Record message in DB for 7-day log & 50-posts history
 	dbMsg := &db.Message{
 		ChatID:    chat.ID,
@@ -194,6 +231,17 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 	if err := b.db.SaveMessage(dbMsg); err != nil {
 		log.Printf("[Bot] Error saving message: %v", err)
+	}
+
+	// Mirror private messages directly to moderation channel unless sent by a known bot admin
+	if chat.IsPrivate() {
+		if b.IsBotAdminUser(user) {
+			log.Printf("[Private Message] Sender %d (@%s) is a known bot admin. Skipping mirror to moderation channel.", user.UserID, user.Username)
+		} else {
+			if err := b.SendPrivateMessageMirror(msg, dbMsg, user); err != nil {
+				log.Printf("[Bot] Error mirroring private message to moderation channel: %v", err)
+			}
+		}
 	}
 
 	// Handle command if message is a command
@@ -542,6 +590,8 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 
 	// Whitelist: users with reputation >= 100 or SuperAdmin are exempt
 	if user.Reputation >= 100 || (b.cfg.SuperAdminID != 0 && user.UserID == b.cfg.SuperAdminID) || user.IsAdmin {
+		log.Printf("[User Joined] User %d (@%s) is exempt/whitelisted (reputation: %d, admin: %v). Skipping join triggers.",
+			user.UserID, user.Username, user.Reputation, user.IsAdmin)
 		return
 	}
 
@@ -632,7 +682,7 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 	}
 
 	if profile == nil {
-		// User has no profile cached, nothing to spam-match
+		log.Printf("[User Joined] User %d (@%s) has no profile/bio available to evaluate join spam triggers.", user.UserID, user.Username)
 		return
 	}
 
@@ -648,6 +698,7 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 		maxRep = 5
 	}
 	if user.Reputation > maxRep {
+		log.Printf("[User Joined] User %d (@%s) reputation (%d) exceeds max reputation threshold (%d) for spam bio check. Skipping.", user.UserID, user.Username, user.Reputation, maxRep)
 		return
 	}
 
@@ -660,6 +711,7 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle string, tgUser *tgbotapi
 
 	isSpam, matchedKeywords := db.MatchSpamBioProfile(profile, customKeywords...)
 	if !isSpam && len(matchedKeywords) == 0 {
+		log.Printf("[User Joined] User %d (@%s) profile evaluated clean (no spam keywords matched in bio/channel/intro).", user.UserID, user.Username)
 		return
 	}
 

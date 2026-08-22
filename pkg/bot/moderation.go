@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -324,7 +325,9 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, msg *db.Message, 
 	}
 
 	groupTitle := fmt.Sprintf("Chat %d", chatID)
-	if group, err := b.db.GetGroup(chatID); err == nil && group != nil && group.Title != "" {
+	if chatID == 0 {
+		groupTitle = "All Monitored Groups"
+	} else if group, err := b.db.GetGroup(chatID); err == nil && group != nil && group.Title != "" {
 		groupTitle = group.Title
 	}
 
@@ -375,7 +378,7 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, msg *db.Message, 
 		chatID,
 		msgID,
 		time.Now().Format("2006-01-02 15:04:05 MST"),
-		truncateText(msgContent, 500),
+		msgContent,
 	)
 
 	msgConfig := tgbotapi.NewMessage(modGroupID, text)
@@ -403,23 +406,13 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, msg *db.Message, 
 	return nil
 }
 
-// SendFirstEmptyMessageInfo sends a silent notification to the moderation channel (b.cfg.ModerationGroupID)
-// when a user's first message seen in a monitored group/channel is empty.
+// SendFirstEmptyMessageInfo sends a silent informational message to the moderation channel
+// when a brand new user's first recorded message is empty.
 func (b *Bot) SendFirstEmptyMessageInfo(chatID int64, msg *db.Message, user *db.User, groupTitle string) error {
 	modGroupID := b.cfg.ModerationGroupID
 	if modGroupID == 0 {
-		log.Printf("[Bot] Warning: ModerationGroupID not set. Cannot send first empty message info for user %d in chat %d", user.UserID, chatID)
 		return nil
 	}
-
-	if groupTitle == "" {
-		groupTitle = fmt.Sprintf("Chat %d", chatID)
-		if group, err := b.db.GetGroup(chatID); err == nil && group != nil && group.Title != "" {
-			groupTitle = group.Title
-		}
-	}
-
-	totalUserMsgs, _ := b.db.GetUserMessageCount(user.UserID)
 
 	userDisplayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
 	if userDisplayName == "" {
@@ -433,19 +426,18 @@ func (b *Bot) SendFirstEmptyMessageInfo(chatID int64, msg *db.Message, user *db.
 
 	text := fmt.Sprintf(
 		"ℹ️ **FIRST MESSAGE SEEN (EMPTY)**\n\n"+
-			"📌 **Info**: Poster's first message is empty (unflagged)\n\n"+
 			"👤 **User**: %s (@%s)\n"+
 			"🆔 **User ID**: `%d`\n"+
-			"⭐ **Reputation**: `%d` | ⚠️ **Warns**: `%d` | 💬 **Logged Posts**: `%d`\n\n"+
+			"⭐ **Reputation**: `%d` | ⚠️ **Warns**: `%d`\n\n"+
 			"👥 **Group**: %s (`%d`)\n"+
 			"🆔 **Message ID**: `%d`\n"+
-			"🕒 **Time**: `%s`",
+			"🕒 **Time**: `%s`\n\n"+
+			"ℹ️ *User sent an initial empty message. No moderation penalty applied.*",
 		escapeMarkdown(userDisplayName),
 		escapeMarkdown(usernameStr),
 		user.UserID,
 		user.Reputation,
 		user.WarnCount,
-		totalUserMsgs,
 		escapeMarkdown(groupTitle),
 		chatID,
 		msg.MessageID,
@@ -514,3 +506,465 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, msg *db.Message, actio
 		}
 	}
 }
+
+// RescanOptions configures parameters for manual or scheduled rescanning of low reputation users.
+type RescanOptions struct {
+	MaxReputation int           `json:"max_reputation"`
+	Hours         int           `json:"hours"`
+	Force         bool          `json:"force"`
+	Delay         time.Duration `json:"delay"`
+	DryRun        bool          `json:"dry_run"`
+}
+
+// RescanResult contains summary metrics of a rescan run.
+type RescanResult struct {
+	TotalCandidates int `json:"total_candidates"`
+	ScannedCount    int `json:"scanned_count"`
+	BannedCount     int `json:"banned_count"`
+	CleanCount      int `json:"clean_count"`
+	ErrorCount      int `json:"error_count"`
+}
+
+// RescanProgressFunc is called as each user is evaluated during a rescan.
+type RescanProgressFunc func(curr, total int, user *db.User, profile *db.UserProfile, triggeredRule string, reason string, err error)
+
+// RescanLowRepUsers rescans low-reputation users whose names or profiles were fetched more than N hours ago (or never fetched).
+// It re-evaluates all join rules (e.g. red_packet_cjk_name, new_user_spam_bio) and triggers bans if matched.
+func (b *Bot) RescanLowRepUsers(ctx context.Context, opts RescanOptions, progressCb RescanProgressFunc) (*RescanResult, error) {
+	maxRep := opts.MaxReputation
+	if maxRep <= 0 {
+		maxRep = 20
+	}
+	hours := opts.Hours
+	if hours <= 0 && !opts.Force {
+		hours = 24
+	}
+	var cutoff time.Time
+	if !opts.Force && hours > 0 {
+		cutoff = time.Now().Add(-time.Duration(hours) * time.Hour)
+	}
+	delay := opts.Delay
+	if delay <= 0 {
+		delay = 100 * time.Millisecond
+	}
+
+	users, err := b.db.GetLowRepUsersForRescan(maxRep, cutoff, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query users for rescan: %w", err)
+	}
+
+	res := &RescanResult{
+		TotalCandidates: len(users),
+	}
+
+	for i, u := range users {
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		default:
+		}
+
+		userCopy := u
+
+		// 1. Fetch fresh profile from Telegram API (updates user_profiles table)
+		profile, errFetch := b.FetchUserProfile(userCopy.UserID)
+		if errFetch != nil && profile == nil {
+			res.ErrorCount++
+			if progressCb != nil {
+				progressCb(i+1, len(users), &userCopy, nil, "", "", errFetch)
+			}
+			continue
+		}
+
+		res.ScannedCount++
+
+		// Sync latest names from Telegram profile to users table
+		if profile != nil {
+			userCopy.Username = profile.Username
+			userCopy.FirstName = profile.FirstName
+			userCopy.LastName = profile.LastName
+			_ = b.db.UpdateUserName(userCopy.UserID, userCopy.Username, userCopy.FirstName, userCopy.LastName)
+		}
+
+		// 2. Evaluate Join Rules / Triggers
+		triggeredRule := ""
+		reason := ""
+
+		// Rule A: Red Packet CJK Name Trigger
+		redPacketEnabled := b.cfg.Detector.RedPacketName.Enabled || b.cfg.Detector.NewUserRedPacket.Enabled
+		if b.cfg.Detector.Enabled && redPacketEnabled {
+			rpCfg := b.cfg.Detector.RedPacketName
+			if !rpCfg.Enabled && b.cfg.Detector.NewUserRedPacket.Enabled {
+				rpCfg = b.cfg.Detector.NewUserRedPacket
+			}
+			rTrigger := detector.NewRedPacketNameTrigger(rpCfg)
+			msgCount, _ := b.db.GetUserMessageCount(userCopy.UserID)
+			tCtx := &detector.TriggerContext{
+				User:             &userCopy,
+				IsNewUser:        true,
+				UserMessageCount: msgCount,
+			}
+			rpRes, rpErr := rTrigger.Evaluate(tCtx)
+			if rpErr == nil && rpRes != nil && rpRes.Triggered {
+				triggeredRule = "red_packet_cjk_name"
+				reason = rpRes.Reason
+			}
+		}
+
+		// Rule B: Spam Profile Bio Trigger
+		spamBioEnabled := b.cfg.Detector.NewUserSpamBio.Enabled || b.cfg.Detector.Enabled || b.cfg.AutoFlag.Enabled
+		if triggeredRule == "" && spamBioEnabled && profile != nil && userCopy.Reputation <= maxRep {
+			var customKeywords []string
+			customKeywords = append(customKeywords, b.cfg.AutoFlag.BlockedKeywords...)
+			customKeywords = append(customKeywords, b.cfg.Detector.NewUserSpamBio.CustomKeywords...)
+			dbSnippets, _ := b.db.GetSpamSnippetStrings()
+			customKeywords = append(customKeywords, dbSnippets...)
+
+			isSpam, matchedKeywords := db.MatchSpamBioProfile(profile, customKeywords...)
+			if isSpam || len(matchedKeywords) > 0 {
+				matchedStr := strings.Join(matchedKeywords, ", ")
+				if matchedStr == "" {
+					matchedStr = "spam keyword match"
+				}
+				triggeredRule = "new_user_spam_bio"
+				reason = fmt.Sprintf("Detection trigger (new_user_spam_bio): Rescanned profile signals matched spam keywords [%s]", matchedStr)
+			}
+		}
+
+		// 3. Take Action if Triggered
+		if triggeredRule != "" {
+			res.BannedCount++
+			log.Printf("[Rescan Trigger] Rule '%s' fired for user %d (@%s): %s", triggeredRule, userCopy.UserID, userCopy.Username, reason)
+
+			if !opts.DryRun {
+				// Ban user across all monitored groups
+				if err := b.BanUserAcrossAllGroups(userCopy.UserID); err != nil {
+					log.Printf("[Rescan Action Error] Failed to ban user %d across groups: %v", userCopy.UserID, err)
+				}
+
+				// Deduct reputation
+				repPenalty := 20
+				if newRep, err := b.db.AdjustReputation(userCopy.UserID, -repPenalty, reason, 0); err == nil {
+					userCopy.Reputation = newRep
+				}
+
+				// Send trigger ban alert to moderation group
+				snippetText := fmt.Sprintf("[Rescan Trigger]: %s\n[Name]: %s %s\n[Username]: @%s", triggeredRule, userCopy.FirstName, userCopy.LastName, userCopy.Username)
+				if profile != nil {
+					if profile.Bio != "" {
+						snippetText += fmt.Sprintf("\n[Bio]: %s", profile.Bio)
+					}
+					if profile.PersonalChatTitle != "" || profile.PersonalChatUsername != "" {
+						snippetText += fmt.Sprintf("\n[Personal Channel]: %s (@%s)", profile.PersonalChatTitle, profile.PersonalChatUsername)
+					}
+					if profile.BusinessIntro != "" {
+						snippetText += fmt.Sprintf("\n[Business Intro]: %s", profile.BusinessIntro)
+					}
+				}
+				alertMsg := &db.Message{
+					ChatID:    0,
+					MessageID: 0,
+					UserID:    userCopy.UserID,
+					Text:      snippetText,
+					CreatedAt: time.Now(),
+				}
+				if err := b.SendTriggerBanAlert(0, &userCopy, alertMsg, reason); err != nil {
+					log.Printf("[Rescan Action Error] Failed to send trigger ban alert: %v", err)
+				}
+			}
+		} else {
+			res.CleanCount++
+			log.Printf("[Rescan Clean] User %d (@%s) evaluated clean.", userCopy.UserID, userCopy.Username)
+		}
+
+		if progressCb != nil {
+			progressCb(i+1, len(users), &userCopy, profile, triggeredRule, reason, nil)
+		}
+
+		if i < len(users)-1 {
+			select {
+			case <-ctx.Done():
+				return res, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
+
+	return res, nil
+}
+
+// SendPrivateMessageMirror mirrors any private message sent directly to the bot to the moderation channel (b.cfg.ModerationGroupID),
+// unless the sender is a known bot admin.
+func (b *Bot) SendPrivateMessageMirror(msg *tgbotapi.Message, dbMsg *db.Message, user *db.User) error {
+	if user == nil {
+		return fmt.Errorf("user cannot be nil")
+	}
+
+	if b.IsBotAdminUser(user) {
+		log.Printf("[Bot] User %d (@%s) is a known bot admin. Skipping mirror to moderation channel.", user.UserID, user.Username)
+		return nil
+	}
+
+	modGroupID := b.cfg.ModerationGroupID
+	if modGroupID == 0 {
+		log.Printf("[Bot] Warning: ModerationGroupID not set. Cannot mirror private message from user %d", user.UserID)
+		return nil
+	}
+
+	totalUserMsgs, _ := b.db.GetUserMessageCount(user.UserID)
+
+	userDisplayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+	if userDisplayName == "" {
+		userDisplayName = fmt.Sprintf("User %d", user.UserID)
+	}
+
+	usernameStr := user.Username
+	if usernameStr == "" {
+		usernameStr = "none"
+	}
+
+	msgContent := ""
+	if dbMsg != nil && dbMsg.Text != "" {
+		msgContent = dbMsg.Text
+	} else if msg != nil {
+		msgContent = extractMessageText(msg)
+	}
+	if strings.TrimSpace(msgContent) == "" {
+		if (msg != nil && (msg.Photo != nil || msg.Video != nil || msg.Document != nil || msg.Audio != nil || msg.Animation != nil || msg.Sticker != nil || msg.Voice != nil || msg.VideoNote != nil)) || (dbMsg != nil && dbMsg.HasMedia) {
+			msgContent = "[Media message]"
+		} else {
+			msgContent = "(empty message)"
+		}
+	}
+
+	headerTitle := "📩 **PRIVATE MESSAGE RECEIVED**"
+	if msg != nil && msg.EditDate != 0 {
+		headerTitle = "📩 **PRIVATE MESSAGE RECEIVED (EDITED)**"
+	}
+
+	var extraInfo strings.Builder
+	if msg != nil {
+		if msg.ForwardFrom != nil {
+			fwdName := strings.TrimSpace(msg.ForwardFrom.FirstName + " " + msg.ForwardFrom.LastName)
+			fwdUser := msg.ForwardFrom.UserName
+			if fwdUser != "" {
+				fwdUser = "@" + fwdUser
+			} else {
+				fwdUser = fmt.Sprintf("ID: %d", msg.ForwardFrom.ID)
+			}
+			extraInfo.WriteString(fmt.Sprintf("\n↪️ **Forwarded From**: %s (%s)", escapeMarkdown(fwdName), escapeMarkdown(fwdUser)))
+		} else if msg.ForwardFromChat != nil {
+			extraInfo.WriteString(fmt.Sprintf("\n↪️ **Forwarded From Channel/Chat**: %s (`%d`)", escapeMarkdown(msg.ForwardFromChat.Title), msg.ForwardFromChat.ID))
+		} else if msg.ForwardSenderName != "" {
+			extraInfo.WriteString(fmt.Sprintf("\n↪️ **Forwarded From**: %s (Hidden Account)", escapeMarkdown(msg.ForwardSenderName)))
+		}
+	}
+
+	msgTime := time.Now()
+	msgID := 0
+	if msg != nil {
+		msgTime = msg.Time()
+		msgID = msg.MessageID
+	} else if dbMsg != nil {
+		msgTime = dbMsg.CreatedAt
+		msgID = dbMsg.MessageID
+	}
+
+	text := fmt.Sprintf(
+		"%s\n\n"+
+			"👤 **Sender**: %s (@%s)\n"+
+			"🆔 **User ID**: `%d`\n"+
+			"⭐ **Reputation**: `%d` | ⚠️ **Warns**: `%d` | 💬 **Logged Posts**: `%d`%s\n"+
+			"🆔 **Message ID**: `%d`\n"+
+			"🕒 **Time**: `%s`\n\n"+
+			"📝 **Content**:\n```\n%s\n```",
+		headerTitle,
+		escapeMarkdown(userDisplayName),
+		escapeMarkdown(usernameStr),
+		user.UserID,
+		user.Reputation,
+		user.WarnCount,
+		totalUserMsgs,
+		extraInfo.String(),
+		msgID,
+		msgTime.Format("2006-01-02 15:04:05 MST"),
+		truncateText(msgContent, 2000),
+	)
+
+	msgConfig := tgbotapi.NewMessage(modGroupID, text)
+	msgConfig.ParseMode = tgbotapi.ModeMarkdown
+
+	sentMsg, err := b.Send(msgConfig)
+	if err != nil {
+		// Fallback without markdown formatting
+		msgConfig.ParseMode = ""
+		sentMsg, err = b.Send(msgConfig)
+		if err != nil {
+			log.Printf("[Bot Error] Failed to send private message mirror alert to mod group: %v", err)
+		}
+	}
+
+	// Attempt to forward the original message to mod group so media/attachments are visible
+	if msg != nil && msg.Chat != nil && msg.MessageID != 0 {
+		forward := tgbotapi.NewForward(modGroupID, msg.Chat.ID, msg.MessageID)
+		if _, fwdErr := b.Send(forward); fwdErr != nil {
+			log.Printf("[Bot] Notice: Could not forward original private message %d to mod group: %v", msg.MessageID, fwdErr)
+		}
+	}
+
+	_ = sentMsg
+	return err
+}
+
+// BanCheckOptions configures parameters for verifying banned users across monitored channels/groups.
+type BanCheckOptions struct {
+	Delay  time.Duration // Delay between Telegram API calls (enforced to be at least 1s, ensuring <= 1 req/sec)
+	DryRun bool          // If true, evaluate without issuing new kick bans
+}
+
+// BanCheckResult contains summary metrics of a ban check audit run.
+type BanCheckResult struct {
+	TotalBannedUsers int           `json:"total_banned_users"`
+	TotalGroups      int           `json:"total_groups"`
+	TotalChecks      int           `json:"total_checks"`
+	AlreadyBanned    int           `json:"already_banned"`
+	RebannedCount    int           `json:"rebanned_count"`
+	ErrorCount       int           `json:"error_count"`
+	SkippedCount     int           `json:"skipped_count"`
+	Duration         time.Duration `json:"duration"`
+}
+
+// BanCheckProgressFunc is invoked after each user/group check.
+type BanCheckProgressFunc func(currUser, totalUsers, currGroup, totalGroups int, user *db.User, group *db.Group, status string, rebanned bool, err error)
+
+// CheckBannedUsersAcrossGroups scans all users marked as banned in the database against all monitored channels/groups.
+// It verifies that each banned user has status "kicked" (and UntilDate == 0 for permanent bans).
+// If a user is not banned in a channel/group, it issues a kick-ban.
+// Every Telegram API call (queries and kick bans) is throttled to ensure no more than 1 request per second.
+func (b *Bot) CheckBannedUsersAcrossGroups(ctx context.Context, opts BanCheckOptions, progressCb BanCheckProgressFunc) (*BanCheckResult, error) {
+	if opts.Delay <= 0 {
+		opts.Delay = time.Second
+	}
+
+	bannedUsers, err := b.db.GetBannedUsers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query banned users: %w", err)
+	}
+
+	groups, err := b.db.GetMonitoredGroups()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query monitored groups: %w", err)
+	}
+
+	res := &BanCheckResult{
+		TotalBannedUsers: len(bannedUsers),
+		TotalGroups:      len(groups),
+	}
+
+	if len(bannedUsers) == 0 || len(groups) == 0 {
+		return res, nil
+	}
+
+	startTime := time.Now()
+
+	waitDelay := func() error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(opts.Delay):
+			return nil
+		}
+	}
+
+	for uIdx, u := range bannedUsers {
+		userCopy := u
+
+		// Safety check: Never kick super admin or bot admins
+		if (b.cfg.SuperAdminID != 0 && userCopy.UserID == b.cfg.SuperAdminID) || userCopy.IsAdmin {
+			res.SkippedCount++
+			log.Printf("[BanCheck Safety] User %d (@%s) is an admin/super-admin. Skipping.", userCopy.UserID, userCopy.Username)
+			continue
+		}
+
+		for gIdx, g := range groups {
+			groupCopy := g
+			res.TotalChecks++
+
+			// 1. Query chat member status from Telegram API
+			cm, getErr := b.GetChatMember(tgbotapi.GetChatMemberConfig{
+				ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+					ChatID: groupCopy.ChatID,
+					UserID: userCopy.UserID,
+				},
+			})
+
+			// Throttle after GetChatMember
+			if wErr := waitDelay(); wErr != nil {
+				res.Duration = time.Since(startTime)
+				return res, wErr
+			}
+
+			if getErr != nil {
+				log.Printf("[BanCheck Error] GetChatMember failed for user %d in %s (`%d`): %v",
+					userCopy.UserID, groupCopy.Title, groupCopy.ChatID, getErr)
+				res.ErrorCount++
+				if progressCb != nil {
+					progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, "error", false, getErr)
+				}
+				continue
+			}
+
+			// In Telegram, a permanent ban has Status == "kicked" and UntilDate == 0.
+			isPermanentlyBanned := (cm.Status == "kicked" && cm.UntilDate == 0)
+
+			if isPermanentlyBanned {
+				res.AlreadyBanned++
+				log.Printf("[BanCheck OK] User %d (@%s) is already permanently banned in %s (`%d`)",
+					userCopy.UserID, userCopy.Username, groupCopy.Title, groupCopy.ChatID)
+				if progressCb != nil {
+					progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, cm.Status, false, nil)
+				}
+			} else {
+				log.Printf("[BanCheck Missing] User %d (@%s) is NOT permanently banned in %s (`%d`) (Status: %s, UntilDate: %d).",
+					userCopy.UserID, userCopy.Username, groupCopy.Title, groupCopy.ChatID, cm.Status, cm.UntilDate)
+
+				if !opts.DryRun {
+					// Issue kick ban
+					banErr := b.BanUserInGroup(groupCopy.ChatID, userCopy.UserID)
+
+					// Throttle after BanUserInGroup (ensures <= 1 kick-ban per second)
+					if wErr := waitDelay(); wErr != nil {
+						res.Duration = time.Since(startTime)
+						return res, wErr
+					}
+
+					if banErr != nil {
+						log.Printf("[BanCheck Action Error] Failed to ban user %d in %s (`%d`): %v",
+							userCopy.UserID, groupCopy.Title, groupCopy.ChatID, banErr)
+						res.ErrorCount++
+						if progressCb != nil {
+							progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, cm.Status, false, banErr)
+						}
+					} else {
+						log.Printf("[BanCheck Success] Enforced permanent ban for user %d in %s (`%d`)",
+							userCopy.UserID, groupCopy.Title, groupCopy.ChatID)
+						res.RebannedCount++
+						if progressCb != nil {
+							progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, cm.Status, true, nil)
+						}
+					}
+				} else {
+					// Dry run
+					res.RebannedCount++
+					if progressCb != nil {
+						progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, cm.Status, false, nil)
+					}
+				}
+			}
+		}
+	}
+
+	res.Duration = time.Since(startTime)
+	return res, nil
+}
+
