@@ -1251,4 +1251,3 @@ func TestMatchSpamBioProfile_And_ExtendedSignals(t *testing.T) {
 		t.Errorf("expected empty bio to NOT render - **Bio**: section, got: %s", formattedNoBio)
 	}
 }
-

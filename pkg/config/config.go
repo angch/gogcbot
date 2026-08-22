@@ -36,7 +36,7 @@ type ShieldyConfig struct {
 
 // DetectorConfig defines settings for modular detection triggers.
 type DetectorConfig struct {
-	Enabled        bool                                `mapstructure:"enabled" yaml:"enabled"`
+	Enabled          bool                                 `mapstructure:"enabled" yaml:"enabled"`
 	NewUserCJK       detector.NewUserCJKTriggerConfig     `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
 	NewUserChinese   detector.NewUserCJKTriggerConfig     `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
 	NewUserSpamBio   detector.NewUserSpamBioTriggerConfig `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`

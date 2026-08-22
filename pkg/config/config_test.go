@@ -283,4 +283,3 @@ detector:
 		t.Errorf("Expected RepPenalty 40, got %d", cfg.Detector.RedPacketName.RepPenalty)
 	}
 }
-

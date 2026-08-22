@@ -1027,4 +1027,195 @@ func TestHandleMessage_RedPacketCJKName_TriggersBan(t *testing.T) {
 	}
 }
 
+func TestHandleChatMemberUpdate_ChannelJoin_SpamBio_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
 
+	userID := int64(888222)
+	channelID := int64(-100987654321)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	// Pre-seed mock user profile with spam bio so FetchUserProfile returns it
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "channel_spammer_join",
+		FirstName:  "ChannelSpam",
+		LastName:   "Joiner",
+		Bio:        "锦鲤代发 @mmmmue 6折础油卡E卡、沃尔玛、永辉、携程。联系 @xgshenqing888",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    channelID,
+			Title: "Test Monitored Broadcast Channel",
+			Type:  "channel",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "channel_spammer_join", FirstName: "ChannelSpam", LastName: "Joiner"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "channel_spammer_join", FirstName: "ChannelSpam", LastName: "Joiner"},
+		},
+	}
+
+	b.handleUpdate(tgbotapi.Update{ChatMember: cmu})
+
+	// Channel should be saved in DB
+	grp, err := b.db.GetGroup(channelID)
+	if err != nil || grp == nil {
+		t.Errorf("expected channel %d to be saved in groups DB, got err: %v", channelID, err)
+	} else if grp.Type != "channel" {
+		t.Errorf("expected group type 'channel', got %q", grp.Type)
+	}
+
+	// User should be banned in DB and reputation adjusted
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after joining channel with spam bio", userID)
+	}
+	if u.Reputation >= 0 {
+		t.Errorf("expected user %d reputation to be penalized (< 0), got %d", userID, u.Reputation)
+	}
+}
+
+func TestHandleChatMemberUpdate_ChannelJoin_RedPacketCJKName_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(8890998877)
+	channelID := int64(-100987654322)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    channelID,
+			Title: "Test Monitored Announcement Channel",
+			Type:  "channel",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "cbzbQFLOuHNkJZ", FirstName: "全网首发🧧"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "cbzbQFLOuHNkJZ", FirstName: "全网首发🧧"},
+		},
+	}
+
+	b.handleUpdate(tgbotapi.Update{ChatMember: cmu})
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after joining channel with red packet CJK name", userID)
+	}
+}
+
+func TestHandleChatMemberUpdate_ChannelJoin_CleanUser_Allowed(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(334455)
+	channelID := int64(-100987654323)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "normal_subscriber",
+		FirstName:  "Normal",
+		LastName:   "User",
+		Bio:        "Just a regular tech enthusiast and developer.",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now(),
+	})
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    channelID,
+			Title: "Test Monitored Public Channel",
+			Type:  "channel",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "normal_subscriber", FirstName: "Normal", LastName: "User"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "normal_subscriber", FirstName: "Normal", LastName: "User"},
+		},
+	}
+
+	b.handleUpdate(tgbotapi.Update{ChatMember: cmu})
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if u.IsBanned {
+		t.Errorf("expected normal user %d NOT to be banned after joining channel", userID)
+	}
+}
+
+func TestHandleUpdate_MyChatMemberAndChatJoinRequest(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	channelID := int64(-10011223344)
+
+	// Test MyChatMember update
+	mcm := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    channelID,
+			Title: "New Bot Channel",
+			Type:  "channel",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "administrator",
+		},
+	}
+	b.handleUpdate(tgbotapi.Update{MyChatMember: mcm})
+
+	grp, err := b.db.GetGroup(channelID)
+	if err != nil || grp == nil {
+		t.Errorf("expected channel %d to be saved on MyChatMember update, got %v", channelID, err)
+	}
+
+	// Test ChatJoinRequest update
+	joinReqChatID := int64(-10055667788)
+	cjr := &tgbotapi.ChatJoinRequest{
+		Chat: tgbotapi.Chat{
+			ID:    joinReqChatID,
+			Title: "Private Request Channel",
+			Type:  "channel",
+		},
+		From: tgbotapi.User{
+			ID:        999111,
+			UserName:  "applicant",
+			FirstName: "App",
+			LastName:  "Licant",
+		},
+	}
+	b.handleUpdate(tgbotapi.Update{ChatJoinRequest: cjr})
+
+	grp2, err := b.db.GetGroup(joinReqChatID)
+	if err != nil || grp2 == nil {
+		t.Errorf("expected channel %d to be saved on ChatJoinRequest update, got %v", joinReqChatID, err)
+	}
+}

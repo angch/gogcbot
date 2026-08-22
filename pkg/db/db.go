@@ -1426,19 +1426,19 @@ func (d *DB) GetUserProfileCount() (int, error) {
 
 // UserReportItem holds comprehensive metadata for good and bad users.
 type UserReportItem struct {
-	UserID        int64      `json:"user_id"`
-	Username      string     `json:"username"`
-	FirstName     string     `json:"first_name"`
-	LastName      string     `json:"last_name"`
-	Reputation    int        `json:"reputation"`
-	WarnCount     int        `json:"warn_count"`
-	IsBanned      bool       `json:"is_banned"`
-	IsAdmin       bool       `json:"is_admin"`
-	IsSuperAdmin  bool       `json:"is_super_admin"`
-	Role          string     `json:"role"`
-	MessageCount  int        `json:"message_count"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	UserID       int64     `json:"user_id"`
+	Username     string    `json:"username"`
+	FirstName    string    `json:"first_name"`
+	LastName     string    `json:"last_name"`
+	Reputation   int       `json:"reputation"`
+	WarnCount    int       `json:"warn_count"`
+	IsBanned     bool      `json:"is_banned"`
+	IsAdmin      bool      `json:"is_admin"`
+	IsSuperAdmin bool      `json:"is_super_admin"`
+	Role         string    `json:"role"`
+	MessageCount int       `json:"message_count"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 
 	// Ban / Moderation metadata (for bad users)
 	IsManualBan  bool       `json:"is_manual_ban"`  // Banned manually by moderator or command
@@ -2458,4 +2458,3 @@ func (d *DB) SyncSpamSnippets(snippets []string) error {
 	}
 	return nil
 }
-

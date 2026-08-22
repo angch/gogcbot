@@ -57,9 +57,11 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
    - Dynamic `/setsuperadmin` and `/setmodgroup` commands automatically persist settings back to `config.yaml`.
    - Full control over bot settings, group monitoring management (`/addgroup`, `/removegroup`, `/listgroups`), and reputation overrides.
 
-8. **Spam Snippet & Bio Detection**:
+8. **Channel & Group Join Moderation**:
+   - **Allowed Updates & Real-time Join Ingestion**: Listens for Telegram `chat_member`, `my_chat_member`, and `chat_join_request` updates across broadcast channels, supergroups, and groups.
    - **Profile Bio Scanning on Join & Message**: Automatically grabs user profile and bio when a user joins a channel/group or sends a message, caching them in `user_profiles`.
-   - **Automatic Spam Bio Kick Rule (`new_user_spam_bio`)**: If a joining or new user's bio matches spam/syndicate keywords, the bot immediately deletes join messages, bans them across monitored groups, penalizes reputation, and alerts the moderation channel.
+   - **Automatic Spam Bio Kick Rule (`new_user_spam_bio`)**: If a joining or new user's bio matches spam/syndicate keywords, the bot immediately deletes join messages, bans them across all monitored channels and groups, penalizes reputation, and alerts the moderation channel.
+   - **Comprehensive Join Logging**: Detailed structured logging for every join event (`[ChatMemberUpdate]`, `[User Joined]`, rule triggers, whitelist bypasses, and clean evaluations).
    - **`spam_snippets` Database Table**: Stores dynamic spam snippets synced from runtime `config.yaml` or added programmatically.
    - **CLI & Bot Commands**: Search and inspect suspicious bios or unknown/new accounts via `gogcbot list-unknownusers` (or `list-spambios`) and `/listunknownusers` (rendered as a compact monospace table with CJK visual alignment).
 
@@ -191,6 +193,15 @@ detector:
     max_reputation: 5                  # Maximum reputation score to apply detection
     max_user_posts: 5                  # Post count window for new user evaluation
     rep_penalty: 20                    # Reputation penalty applied upon detection
+  red_packet_name:
+    enabled: true                      # Kick/ban accounts with red packet emoji CJK names & mixed-caps usernames
+    min_high_user_id: 1000000000
+    max_reputation: 5
+    max_user_posts: 5
+    min_username_length: 5
+    min_cjk_ratio: 0.5
+    min_cjk_chars: 1
+    rep_penalty: 20
 
 shieldy:
   enabled: true                       # Enable Shieldy captcha bot verification
