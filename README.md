@@ -59,8 +59,8 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
 
 8. **Channel & Group Join Moderation**:
    - **Allowed Updates & Real-time Join Ingestion**: Listens for Telegram `chat_member`, `my_chat_member`, and `chat_join_request` updates across broadcast channels, supergroups, and groups.
-   - **Profile Bio Scanning on Join & Message**: Automatically grabs user profile and bio when a user joins a channel/group or sends a message, caching them in `user_profiles`.
-   - **Automatic Spam Bio Kick Rule (`new_user_spam_bio`)**: If a joining or new user's bio matches spam/syndicate keywords, the bot immediately deletes join messages, bans them across all monitored channels and groups, penalizes reputation, and alerts the moderation channel.
+   - **Profile Bio & Channel Scanning on Join & Message**: Automatically retrieves and evaluates user profile bio, personal channel title/username, and business intro when a user joins a channel/group or sends a message, caching them in `user_profiles`.
+   - **Automatic Spam Bio & Channel Kick Rule (`new_user_spam_bio`)**: If a joining or new user's bio, personal channel title, or business intro matches spam/syndicate keywords (such as `点我`, discount cards, etc.) or their personal channel username matches automated syndicate patterns (`letter...digits`), the bot immediately deletes join messages, bans them across all monitored channels and groups, penalizes reputation, and alerts the moderation channel.
    - **Comprehensive Join Logging**: Detailed structured logging for every join event (`[ChatMemberUpdate]`, `[User Joined]`, rule triggers, whitelist bypasses, and clean evaluations).
    - **`spam_snippets` Database Table**: Stores dynamic spam snippets synced from runtime `config.yaml` or added programmatically.
    - **CLI & Bot Commands**: Search and inspect suspicious bios or unknown/new accounts via `gogcbot list-unknownusers` (or `list-spambios`) and `/listunknownusers` (rendered as a compact monospace table with CJK visual alignment).
@@ -71,6 +71,11 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
      2. Name itself is mostly CJK Unicode characters (>= 50% CJK ratio).
      3. High user ID (>= 1,000,000,000 / 10^9).
      4. Username consists of mixed-caps letters of at least 5 length (e.g. `@cbzbQFLOuHNkJZ`).
+
+10. **Private Message Logging & Moderation Channel Mirroring**:
+    - **Full Visibility & Audit Trail**: Any private direct message (PM/DM) sent to the bot is automatically saved to the SQLite conversation history and logged to the system logs.
+    - **Automated Mirroring to Moderation Channel**: Private messages from non-admin users (including text, media, edited messages, and forwards) are immediately formatted and mirrored directly to the Private Moderation Group (`moderation_group_id`), complete with sender information, user ID, reputation score, warning count, message timestamp, and forwarded attachments. Private messages from known bot admins (Super Admin, Bot Admins, and Moderation Group members) are kept private and excluded from mirroring.
+
 
 
 ---

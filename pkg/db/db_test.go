@@ -1334,3 +1334,85 @@ func TestGetLowRepUsersForRescan(t *testing.T) {
 		t.Fatalf("expected 3 candidates force (User 1, 2, 3), got %d: %+v", len(candidatesForce), candidatesForce)
 	}
 }
+
+func TestIsSpammyUsername(t *testing.T) {
+	tests := []struct {
+		username string
+		want     bool
+	}{
+		{"gzy_8889215646_1_5248", true},
+		{"@gzy_8889215646_1_5248", true},
+		{"abc12345", true},
+		{"test_channel_999", true},
+		{"ch-123", true},
+		{"user.2026.08", true},
+		{"gzy888921564615248", true},
+		{"news_channel", false},
+		{"alice", false},
+		{"123_channel", false},
+		{"user_123_abc", false},
+		{"123456", false},
+		{"", false},
+		{"___---...", false},
+	}
+
+	for _, tt := range tests {
+		got := IsSpammyUsername(tt.username)
+		if got != tt.want {
+			t.Errorf("IsSpammyUsername(%q) = %v, want %v", tt.username, got, tt.want)
+		}
+	}
+}
+
+func TestMatchSpamBioProfile_DianWo_And_SpammyUsername(t *testing.T) {
+	// Test 1: Dian Wo keyword in personal chat title
+	p1 := &UserProfile{
+		UserID:            8828604089,
+		PersonalChatTitle: "🔴点我六折出平果机进群🔴",
+	}
+	isSpam1, matched1 := MatchSpamBioProfile(p1)
+	if !isSpam1 {
+		t.Fatalf("expected MatchSpamBioProfile to detect '点我', got isSpam=false")
+	}
+	hasDianWo := false
+	for _, kw := range matched1 {
+		if kw == "点我" {
+			hasDianWo = true
+		}
+	}
+	if !hasDianWo {
+		t.Errorf("expected matched keywords to contain '点我', got: %v", matched1)
+	}
+
+	// Test 2: Spammy username in personal chat username
+	p2 := &UserProfile{
+		UserID:               8828604089,
+		PersonalChatUsername: "gzy_8889215646_1_5248",
+	}
+	isSpam2, matched2 := MatchSpamBioProfile(p2)
+	if !isSpam2 {
+		t.Fatalf("expected MatchSpamBioProfile to detect spammy channel username, got isSpam=false")
+	}
+	hasSpammyUser := false
+	for _, kw := range matched2 {
+		if strings.Contains(kw, "spammy_channel_username") {
+			hasSpammyUser = true
+		}
+	}
+	if !hasSpammyUser {
+		t.Errorf("expected matched keywords to contain spammy_channel_username, got: %v", matched2)
+	}
+
+	// Test 3: Clean profile
+	p3 := &UserProfile{
+		UserID:               12345,
+		Bio:                  "Just a normal user bio",
+		PersonalChatTitle:    "My Coding Channel",
+		PersonalChatUsername: "my_coding_channel",
+	}
+	isSpam3, matched3 := MatchSpamBioProfile(p3)
+	if isSpam3 || len(matched3) > 0 {
+		t.Errorf("expected clean profile, got isSpam=%v, matched=%v", isSpam3, matched3)
+	}
+}
+

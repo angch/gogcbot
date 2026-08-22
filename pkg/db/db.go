@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -1146,7 +1147,8 @@ func (d *DB) GetUserFullDump(identifier string, superAdminID int64, extraKeyword
 	}, nil
 }
 
-// MatchSpamBioProfile checks all text fields of a user profile (bio, personal channel title/username, business intro) for spam keywords.
+// MatchSpamBioProfile checks all text fields of a user profile (bio, personal channel title/username, business intro) for spam keywords,
+// and checks personal_chat.username against spammy username patterns (starts with letters, ends with digits with delimiters removed).
 func MatchSpamBioProfile(p *UserProfile, additionalKeywords ...string) (bool, []string) {
 	if p == nil {
 		return false, nil
@@ -1164,11 +1166,23 @@ func MatchSpamBioProfile(p *UserProfile, additionalKeywords ...string) (bool, []
 	if strings.TrimSpace(p.BusinessIntro) != "" {
 		texts = append(texts, p.BusinessIntro)
 	}
-	if len(texts) == 0 {
-		return false, nil
+
+	var matchedKeywords []string
+	if len(texts) > 0 {
+		combined := strings.Join(texts, " | ")
+		isSpam, matched := MatchSpamBioAll(combined, additionalKeywords...)
+		if isSpam {
+			matchedKeywords = append(matchedKeywords, matched...)
+		}
 	}
-	combined := strings.Join(texts, " | ")
-	return MatchSpamBioAll(combined, additionalKeywords...)
+
+	// Check if personal channel username matches spammy username patterns
+	if p.PersonalChatUsername != "" && IsSpammyUsername(p.PersonalChatUsername) {
+		cleanHandle := strings.TrimPrefix(strings.TrimSpace(p.PersonalChatUsername), "@")
+		matchedKeywords = append(matchedKeywords, fmt.Sprintf("spammy_channel_username:@%s", cleanHandle))
+	}
+
+	return len(matchedKeywords) > 0, matchedKeywords
 }
 
 // FormatUserDump formats a UserFullDump into a detailed Markdown report.
@@ -2076,6 +2090,7 @@ func extractTriggerName(reason string) string {
 
 // SpamBioKeywords contains common promotional, discount card, gift card, and syndicate scam terms seen in Telegram bio spam.
 var SpamBioKeywords = []string{
+	"点我",
 	"锦鲤代发",
 	"代发",
 	"油卡",
@@ -2128,6 +2143,48 @@ var SpamBioKeywords = []string{
 	"包赔",
 	"日赚",
 	"月入",
+}
+
+// IsSpammyUsername checks if a Telegram username matches typical spam syndicate patterns:
+// starts with letters, and ends with digits (with delimiters such as _, -, ., @, and whitespace removed).
+func IsSpammyUsername(username string) bool {
+	clean := strings.TrimPrefix(strings.TrimSpace(username), "@")
+	if clean == "" {
+		return false
+	}
+
+	var stripped strings.Builder
+	for _, r := range clean {
+		if r == '_' || r == '-' || r == '.' || unicode.IsSpace(r) {
+			continue
+		}
+		stripped.WriteRune(r)
+	}
+	s := stripped.String()
+	if len(s) == 0 {
+		return false
+	}
+
+	hasLetters := false
+	hasDigits := false
+	inDigits := false
+
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			if inDigits {
+				// Letter after digits -> not strictly ending in digits
+				return false
+			}
+			hasLetters = true
+		} else if r >= '0' && r <= '9' {
+			inDigits = true
+			hasDigits = true
+		} else {
+			return false
+		}
+	}
+
+	return hasLetters && hasDigits
 }
 
 // MatchSpamBio checks if a user bio matches known spam/marketing/syndicate keywords or custom filters.

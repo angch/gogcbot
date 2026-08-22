@@ -1477,3 +1477,482 @@ func TestCmdRescanUsers_TelegramCommand(t *testing.T) {
 	// Should execute without panic or error
 	b.handleCommand(msg, adminUser)
 }
+
+func TestSendPrivateMessageMirror_ModGroupIDZero(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = 0
+	user, _, _ := b.db.GetOrCreateUser(123456, "pmuser", "PM", "User", 0)
+
+	msg := &tgbotapi.Message{
+		MessageID: 55,
+		Chat: &tgbotapi.Chat{
+			ID:   123456,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        123456,
+			UserName:  "pmuser",
+			FirstName: "PM",
+			LastName:  "User",
+		},
+		Text: "Hello bot in private",
+		Date: int(time.Now().Unix()),
+	}
+	dbMsg := &db.Message{
+		ChatID:    123456,
+		MessageID: 55,
+		UserID:    user.UserID,
+		Text:      "Hello bot in private",
+		CreatedAt: time.Now(),
+	}
+
+	// Should return nil without error when ModerationGroupID is 0
+	if err := b.SendPrivateMessageMirror(msg, dbMsg, user); err != nil {
+		t.Errorf("expected no error when ModerationGroupID is 0, got %v", err)
+	}
+
+	// Should return error if user is nil
+	if err := b.SendPrivateMessageMirror(msg, dbMsg, nil); err == nil {
+		t.Errorf("expected error when user is nil, got nil")
+	}
+}
+
+func TestSendPrivateMessageMirror_Success(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{Status: "left"}, nil
+	})
+	user, _, _ := b.db.GetOrCreateUser(234567, "tester", "Test", "User", 10)
+
+	// Sub-test 1: Regular text message
+	msg1 := &tgbotapi.Message{
+		MessageID: 101,
+		Chat: &tgbotapi.Chat{
+			ID:   234567,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        234567,
+			UserName:  "tester",
+			FirstName: "Test",
+			LastName:  "User",
+		},
+		Text: "Can you help unban my account?",
+		Date: int(time.Now().Unix()),
+	}
+	dbMsg1 := &db.Message{
+		ChatID:    234567,
+		MessageID: 101,
+		UserID:    user.UserID,
+		Text:      "Can you help unban my account?",
+		CreatedAt: time.Now(),
+	}
+	if err := b.SendPrivateMessageMirror(msg1, dbMsg1, user); err != nil {
+		t.Errorf("expected successful mirror for regular text, got %v", err)
+	}
+
+	// Sub-test 2: Edited message
+	msg2 := &tgbotapi.Message{
+		MessageID: 102,
+		Chat: &tgbotapi.Chat{
+			ID:   234567,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        234567,
+			UserName:  "tester",
+			FirstName: "Test",
+			LastName:  "User",
+		},
+		Text:     "Edited message content",
+		Date:     int(time.Now().Unix()),
+		EditDate: int(time.Now().Unix()),
+	}
+	dbMsg2 := &db.Message{
+		ChatID:    234567,
+		MessageID: 102,
+		UserID:    user.UserID,
+		Text:      "Edited message content",
+		CreatedAt: time.Now(),
+	}
+	if err := b.SendPrivateMessageMirror(msg2, dbMsg2, user); err != nil {
+		t.Errorf("expected successful mirror for edited message, got %v", err)
+	}
+
+	// Sub-test 3: Forwarded from user
+	msg3 := &tgbotapi.Message{
+		MessageID: 103,
+		Chat: &tgbotapi.Chat{
+			ID:   234567,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        234567,
+			UserName:  "tester",
+			FirstName: "Test",
+			LastName:  "User",
+		},
+		ForwardFrom: &tgbotapi.User{
+			ID:        345678,
+			UserName:  "origuser",
+			FirstName: "Original",
+			LastName:  "Author",
+		},
+		Text: "Forwarded scam message",
+		Date: int(time.Now().Unix()),
+	}
+	if err := b.SendPrivateMessageMirror(msg3, nil, user); err != nil {
+		t.Errorf("expected successful mirror for forwarded message from user, got %v", err)
+	}
+
+	// Sub-test 4: Forwarded from channel
+	msg4 := &tgbotapi.Message{
+		MessageID: 104,
+		Chat: &tgbotapi.Chat{
+			ID:   234567,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        234567,
+			UserName:  "tester",
+			FirstName: "Test",
+			LastName:  "User",
+		},
+		ForwardFromChat: &tgbotapi.Chat{
+			ID:    -100223344,
+			Title: "Crypto Signals Channel",
+			Type:  "channel",
+		},
+		Text: "Join our signal channel now!",
+		Date: int(time.Now().Unix()),
+	}
+	if err := b.SendPrivateMessageMirror(msg4, nil, user); err != nil {
+		t.Errorf("expected successful mirror for forwarded message from channel, got %v", err)
+	}
+
+	// Sub-test 5: Forwarded with hidden sender name
+	msg5 := &tgbotapi.Message{
+		MessageID: 105,
+		Chat: &tgbotapi.Chat{
+			ID:   234567,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        234567,
+			UserName:  "tester",
+			FirstName: "Test",
+			LastName:  "User",
+		},
+		ForwardSenderName: "Anonymous Trader",
+		Text:              "Secret tips inside",
+		Date:              int(time.Now().Unix()),
+	}
+	if err := b.SendPrivateMessageMirror(msg5, nil, user); err != nil {
+		t.Errorf("expected successful mirror for hidden sender forward, got %v", err)
+	}
+
+	// Sub-test 6: Media message (photo with no text)
+	msg6 := &tgbotapi.Message{
+		MessageID: 106,
+		Chat: &tgbotapi.Chat{
+			ID:   234567,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        234567,
+			UserName:  "tester",
+			FirstName: "Test",
+			LastName:  "User",
+		},
+		Photo: []tgbotapi.PhotoSize{
+			{FileID: "photo123", Width: 100, Height: 100},
+		},
+		Date: int(time.Now().Unix()),
+	}
+	if err := b.SendPrivateMessageMirror(msg6, nil, user); err != nil {
+		t.Errorf("expected successful mirror for photo message, got %v", err)
+	}
+}
+
+func TestHandleMessage_PrivateMessage_LoggedAndMirrored(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{Status: "left"}, nil
+	})
+	userID := int64(789012)
+
+	msg := &tgbotapi.Message{
+		MessageID: 201,
+		Chat: &tgbotapi.Chat{
+			ID:   userID,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "pm_sender",
+			FirstName: "Private",
+			LastName:  "Sender",
+		},
+		Text: "Hello bot, this is a private direct message.",
+		Date: int(time.Now().Unix()),
+	}
+
+	// Execute message handler
+	b.handleMessage(msg)
+
+	// Verify user is created in database
+	u, err := b.db.GetUserByID(userID)
+	if err != nil || u == nil {
+		t.Fatalf("expected user to be created in DB, got err: %v, u: %+v", err, u)
+	}
+	if u.Username != "pm_sender" {
+		t.Errorf("expected username 'pm_sender', got %s", u.Username)
+	}
+
+	// Verify message is saved to database
+	count, err := b.db.GetUserMessageCount(userID)
+	if err != nil || count != 1 {
+		t.Errorf("expected 1 logged message in DB, got count=%d, err=%v", count, err)
+	}
+
+	recent, err := b.db.GetRecentUserMessages(userID, 5)
+	if err != nil || len(recent) != 1 {
+		t.Fatalf("expected 1 recent message in DB, got %d, err=%v", len(recent), err)
+	}
+	if recent[0].Text != "Hello bot, this is a private direct message." {
+		t.Errorf("unexpected message text in DB: %s", recent[0].Text)
+	}
+}
+
+func TestHandleMessage_PrivateMessage_Command(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{Status: "left"}, nil
+	})
+	userID := int64(654321)
+
+	msg := &tgbotapi.Message{
+		MessageID: 202,
+		Chat: &tgbotapi.Chat{
+			ID:   userID,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "cmd_sender",
+			FirstName: "Cmd",
+			LastName:  "Sender",
+		},
+		Text: "/help",
+		Date: int(time.Now().Unix()),
+		Entities: []tgbotapi.MessageEntity{
+			{Type: "bot_command", Offset: 0, Length: 5},
+		},
+	}
+
+	// Execute message handler with command in private chat
+	b.handleMessage(msg)
+
+	// Verify message was still logged into DB
+	count, err := b.db.GetUserMessageCount(userID)
+	if err != nil || count != 1 {
+		t.Errorf("expected 1 logged command message in DB, got count=%d, err=%v", count, err)
+	}
+}
+
+func TestHandleMessage_PrivateMessage_Edited(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{Status: "left"}, nil
+	})
+	userID := int64(876543)
+
+	msg := &tgbotapi.Message{
+		MessageID: 203,
+		Chat: &tgbotapi.Chat{
+			ID:   userID,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "edit_sender",
+			FirstName: "Edit",
+			LastName:  "Sender",
+		},
+		Text:     "Edited PM text",
+		Date:     int(time.Now().Unix()),
+		EditDate: int(time.Now().Unix()),
+	}
+
+	b.handleUpdate(tgbotapi.Update{
+		UpdateID:      99,
+		EditedMessage: msg,
+	})
+
+	// Verify message was logged into DB
+	count, err := b.db.GetUserMessageCount(userID)
+	if err != nil || count != 1 {
+		t.Errorf("expected 1 logged edited message in DB, got count=%d, err=%v", count, err)
+	}
+}
+
+func TestHandleMessage_PrivateMessage_Media(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{Status: "left"}, nil
+	})
+	userID := int64(987654)
+
+	msg := &tgbotapi.Message{
+		MessageID: 204,
+		Chat: &tgbotapi.Chat{
+			ID:   userID,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "media_sender",
+			FirstName: "Media",
+			LastName:  "Sender",
+		},
+		Voice: &tgbotapi.Voice{
+			FileID:   "voice_file_123",
+			Duration: 5,
+		},
+		Date: int(time.Now().Unix()),
+	}
+
+	b.handleMessage(msg)
+
+	recent, err := b.db.GetRecentUserMessages(userID, 1)
+	if err != nil || len(recent) != 1 {
+		t.Fatalf("expected 1 recent message in DB, got %d, err=%v", len(recent), err)
+	}
+	if !recent[0].HasMedia {
+		t.Errorf("expected HasMedia to be true for voice message")
+	}
+	if recent[0].Text != "[Voice Message]" {
+		t.Errorf("expected text '[Voice Message]', got %q", recent[0].Text)
+	}
+}
+
+func TestSendPrivateMessageMirror_KnownBotAdminSkipped(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.cfg.SuperAdminID = 11111
+
+	// Case 1: Super Admin
+	superAdmin, _, _ := b.db.GetOrCreateUser(11111, "superadmin", "Super", "Admin", 100)
+	msg1 := &tgbotapi.Message{
+		MessageID: 301,
+		Chat:      &tgbotapi.Chat{ID: 11111, Type: "private"},
+		From:      &tgbotapi.User{ID: 11111, UserName: "superadmin"},
+		Text:      "Super admin private message",
+		Date:      int(time.Now().Unix()),
+	}
+	if err := b.SendPrivateMessageMirror(msg1, nil, superAdmin); err != nil {
+		t.Errorf("expected no error for super admin, got %v", err)
+	}
+
+	// Case 2: Promoted Bot Admin (IsAdmin == true)
+	botAdmin, _, _ := b.db.GetOrCreateUser(22222, "botadmin", "Bot", "Admin", 100)
+	_ = b.db.SetUserAdmin(22222, true)
+	botAdmin.IsAdmin = true
+	msg2 := &tgbotapi.Message{
+		MessageID: 302,
+		Chat:      &tgbotapi.Chat{ID: 22222, Type: "private"},
+		From:      &tgbotapi.User{ID: 22222, UserName: "botadmin"},
+		Text:      "Bot admin private message",
+		Date:      int(time.Now().Unix()),
+	}
+	if err := b.SendPrivateMessageMirror(msg2, nil, botAdmin); err != nil {
+		t.Errorf("expected no error for bot admin, got %v", err)
+	}
+
+	// Case 3: Mod Group Member
+	modMember, _, _ := b.db.GetOrCreateUser(33333, "modmember", "Mod", "Member", 50)
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		if config.UserID == 33333 {
+			return tgbotapi.ChatMember{Status: "member"}, nil
+		}
+		return tgbotapi.ChatMember{Status: "left"}, nil
+	})
+	msg3 := &tgbotapi.Message{
+		MessageID: 303,
+		Chat:      &tgbotapi.Chat{ID: 33333, Type: "private"},
+		From:      &tgbotapi.User{ID: 33333, UserName: "modmember"},
+		Text:      "Mod member private message",
+		Date:      int(time.Now().Unix()),
+	}
+	if err := b.SendPrivateMessageMirror(msg3, nil, modMember); err != nil {
+		t.Errorf("expected no error for mod member, got %v", err)
+	}
+
+	// Case 4: Regular non-admin user (should be mirrored)
+	regularUser, _, _ := b.db.GetOrCreateUser(44444, "regular", "Regular", "User", 10)
+	msg4 := &tgbotapi.Message{
+		MessageID: 304,
+		Chat:      &tgbotapi.Chat{ID: 44444, Type: "private"},
+		From:      &tgbotapi.User{ID: 44444, UserName: "regular"},
+		Text:      "Regular user private message",
+		Date:      int(time.Now().Unix()),
+	}
+	if err := b.SendPrivateMessageMirror(msg4, nil, regularUser); err != nil {
+		t.Errorf("expected no error for regular user, got %v", err)
+	}
+}
+
+func TestHandleMessage_PrivateMessage_BotAdmin_SkippedFromMirroring(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.cfg.SuperAdminID = 55555
+
+	adminUser, _, _ := b.db.GetOrCreateUser(55555, "superadmin", "Super", "Admin", 100)
+
+	msg := &tgbotapi.Message{
+		MessageID: 401,
+		Chat: &tgbotapi.Chat{
+			ID:   55555,
+			Type: "private",
+		},
+		From: &tgbotapi.User{
+			ID:        55555,
+			UserName:  "superadmin",
+			FirstName: "Super",
+			LastName:  "Admin",
+		},
+		Text: "Admin private note",
+		Date: int(time.Now().Unix()),
+	}
+
+	b.handleMessage(msg)
+
+	// Verify the message was still logged into DB
+	count, err := b.db.GetUserMessageCount(adminUser.UserID)
+	if err != nil || count != 1 {
+		t.Errorf("expected admin message to be logged in DB, got count=%d, err=%v", count, err)
+	}
+}
+
+

@@ -692,3 +692,127 @@ func (b *Bot) RescanLowRepUsers(ctx context.Context, opts RescanOptions, progres
 
 	return res, nil
 }
+
+// SendPrivateMessageMirror mirrors any private message sent directly to the bot to the moderation channel (b.cfg.ModerationGroupID),
+// unless the sender is a known bot admin.
+func (b *Bot) SendPrivateMessageMirror(msg *tgbotapi.Message, dbMsg *db.Message, user *db.User) error {
+	if user == nil {
+		return fmt.Errorf("user cannot be nil")
+	}
+
+	if b.IsBotAdminUser(user) {
+		log.Printf("[Bot] User %d (@%s) is a known bot admin. Skipping mirror to moderation channel.", user.UserID, user.Username)
+		return nil
+	}
+
+	modGroupID := b.cfg.ModerationGroupID
+	if modGroupID == 0 {
+		log.Printf("[Bot] Warning: ModerationGroupID not set. Cannot mirror private message from user %d", user.UserID)
+		return nil
+	}
+
+	totalUserMsgs, _ := b.db.GetUserMessageCount(user.UserID)
+
+	userDisplayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+	if userDisplayName == "" {
+		userDisplayName = fmt.Sprintf("User %d", user.UserID)
+	}
+
+	usernameStr := user.Username
+	if usernameStr == "" {
+		usernameStr = "none"
+	}
+
+	msgContent := ""
+	if dbMsg != nil && dbMsg.Text != "" {
+		msgContent = dbMsg.Text
+	} else if msg != nil {
+		msgContent = extractMessageText(msg)
+	}
+	if strings.TrimSpace(msgContent) == "" {
+		if (msg != nil && (msg.Photo != nil || msg.Video != nil || msg.Document != nil || msg.Audio != nil || msg.Animation != nil || msg.Sticker != nil || msg.Voice != nil || msg.VideoNote != nil)) || (dbMsg != nil && dbMsg.HasMedia) {
+			msgContent = "[Media message]"
+		} else {
+			msgContent = "(empty message)"
+		}
+	}
+
+	headerTitle := "📩 **PRIVATE MESSAGE RECEIVED**"
+	if msg != nil && msg.EditDate != 0 {
+		headerTitle = "📩 **PRIVATE MESSAGE RECEIVED (EDITED)**"
+	}
+
+	var extraInfo strings.Builder
+	if msg != nil {
+		if msg.ForwardFrom != nil {
+			fwdName := strings.TrimSpace(msg.ForwardFrom.FirstName + " " + msg.ForwardFrom.LastName)
+			fwdUser := msg.ForwardFrom.UserName
+			if fwdUser != "" {
+				fwdUser = "@" + fwdUser
+			} else {
+				fwdUser = fmt.Sprintf("ID: %d", msg.ForwardFrom.ID)
+			}
+			extraInfo.WriteString(fmt.Sprintf("\n↪️ **Forwarded From**: %s (%s)", escapeMarkdown(fwdName), escapeMarkdown(fwdUser)))
+		} else if msg.ForwardFromChat != nil {
+			extraInfo.WriteString(fmt.Sprintf("\n↪️ **Forwarded From Channel/Chat**: %s (`%d`)", escapeMarkdown(msg.ForwardFromChat.Title), msg.ForwardFromChat.ID))
+		} else if msg.ForwardSenderName != "" {
+			extraInfo.WriteString(fmt.Sprintf("\n↪️ **Forwarded From**: %s (Hidden Account)", escapeMarkdown(msg.ForwardSenderName)))
+		}
+	}
+
+	msgTime := time.Now()
+	msgID := 0
+	if msg != nil {
+		msgTime = msg.Time()
+		msgID = msg.MessageID
+	} else if dbMsg != nil {
+		msgTime = dbMsg.CreatedAt
+		msgID = dbMsg.MessageID
+	}
+
+	text := fmt.Sprintf(
+		"%s\n\n"+
+			"👤 **Sender**: %s (@%s)\n"+
+			"🆔 **User ID**: `%d`\n"+
+			"⭐ **Reputation**: `%d` | ⚠️ **Warns**: `%d` | 💬 **Logged Posts**: `%d`%s\n"+
+			"🆔 **Message ID**: `%d`\n"+
+			"🕒 **Time**: `%s`\n\n"+
+			"📝 **Content**:\n```\n%s\n```",
+		headerTitle,
+		escapeMarkdown(userDisplayName),
+		escapeMarkdown(usernameStr),
+		user.UserID,
+		user.Reputation,
+		user.WarnCount,
+		totalUserMsgs,
+		extraInfo.String(),
+		msgID,
+		msgTime.Format("2006-01-02 15:04:05 MST"),
+		truncateText(msgContent, 2000),
+	)
+
+	msgConfig := tgbotapi.NewMessage(modGroupID, text)
+	msgConfig.ParseMode = tgbotapi.ModeMarkdown
+
+	sentMsg, err := b.Send(msgConfig)
+	if err != nil {
+		// Fallback without markdown formatting
+		msgConfig.ParseMode = ""
+		sentMsg, err = b.Send(msgConfig)
+		if err != nil {
+			log.Printf("[Bot Error] Failed to send private message mirror alert to mod group: %v", err)
+		}
+	}
+
+	// Attempt to forward the original message to mod group so media/attachments are visible
+	if msg != nil && msg.Chat != nil && msg.MessageID != 0 {
+		forward := tgbotapi.NewForward(modGroupID, msg.Chat.ID, msg.MessageID)
+		if _, fwdErr := b.Send(forward); fwdErr != nil {
+			log.Printf("[Bot] Notice: Could not forward original private message %d to mod group: %v", msg.MessageID, fwdErr)
+		}
+	}
+
+	_ = sentMsg
+	return err
+}
+

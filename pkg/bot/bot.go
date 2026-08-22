@@ -19,15 +19,16 @@ import (
 
 // Bot wraps the Telegram Bot API client, database connection, retention cleaner, and configuration state.
 type Bot struct {
-	cfg      *config.Config
-	cfgPath  string
-	db       *db.DB
-	api      *tgbotapi.BotAPI
-	cleaner  *cleaner.RetentionCleaner
-	detector *detector.Detector
-	botUser  tgbotapi.User
-	mu       sync.RWMutex
-	stopChan chan struct{}
+	cfg                *config.Config
+	cfgPath            string
+	db                 *db.DB
+	api                *tgbotapi.BotAPI
+	cleaner            *cleaner.RetentionCleaner
+	detector           *detector.Detector
+	botUser            tgbotapi.User
+	mu                 sync.RWMutex
+	stopChan           chan struct{}
+	mockChatMemberFunc func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error)
 }
 
 var (
@@ -207,10 +208,21 @@ func (b *Bot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 	return resp, err
 }
 
+// SetMockChatMemberFunc sets a mock callback for GetChatMember for testing.
+func (b *Bot) SetMockChatMemberFunc(f func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error)) {
+	b.mockChatMemberFunc = f
+}
+
 // GetChatMember wraps b.api.GetChatMember to echo chat member query calls to standard logs for debugging.
 func (b *Bot) GetChatMember(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
 	log.Printf("[Telegram API Call] GetChatMember -> ChatID: %d | UserID: %d", config.ChatID, config.UserID)
+	if b.mockChatMemberFunc != nil {
+		return b.mockChatMemberFunc(config)
+	}
 	if b.api == nil {
+		if config.UserID < 0 || config.UserID == 404 || config.UserID == 999999 {
+			return tgbotapi.ChatMember{Status: "left"}, nil
+		}
 		return tgbotapi.ChatMember{Status: "member"}, nil
 	}
 	cm, err := b.api.GetChatMember(config)

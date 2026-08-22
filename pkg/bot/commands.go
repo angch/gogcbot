@@ -333,7 +333,18 @@ func (b *Bot) cmdUserInfo(msg *tgbotapi.Message, args string) {
 			if p.HasPhoto {
 				photoStr = fmt.Sprintf("✅ Yes (%d photos)", p.PhotoCount)
 			}
-			profileSection = fmt.Sprintf("• Bio: %s\n• Profile Photo: %s\n• Profile Fetched: `%s`", bioSnippet, photoStr, p.FetchedAt.Format("01-02 15:04"))
+			var extraLines strings.Builder
+			if p.PersonalChatTitle != "" || p.PersonalChatUsername != "" {
+				handle := ""
+				if p.PersonalChatUsername != "" {
+					handle = fmt.Sprintf(" (@%s)", p.PersonalChatUsername)
+				}
+				extraLines.WriteString(fmt.Sprintf("\n• Channel: %s%s", escapeMarkdown(p.PersonalChatTitle), escapeMarkdown(handle)))
+			}
+			if p.BusinessIntro != "" {
+				extraLines.WriteString(fmt.Sprintf("\n• Business: %s", escapeMarkdown(truncateText(p.BusinessIntro, 50))))
+			}
+			profileSection = fmt.Sprintf("• Bio: %s\n• Profile Photo: %s%s\n• Profile Fetched: `%s`", bioSnippet, photoStr, extraLines.String(), p.FetchedAt.Format("01-02 15:04"))
 		}
 	}
 
@@ -427,6 +438,16 @@ func (b *Bot) cmdFetchProfile(msg *tgbotapi.Message, args string, isAuthorized b
 		profile.FetchedAt.Format("2006-01-02 15:04:05 MST"),
 		bioText,
 	)
+	if profile.PersonalChatTitle != "" || profile.PersonalChatUsername != "" {
+		handle := ""
+		if profile.PersonalChatUsername != "" {
+			handle = fmt.Sprintf(" (@%s)", profile.PersonalChatUsername)
+		}
+		cardText += fmt.Sprintf("\n\n📢 **Personal Channel**:\n%s%s", escapeMarkdown(profile.PersonalChatTitle), escapeMarkdown(handle))
+	}
+	if profile.BusinessIntro != "" {
+		cardText += fmt.Sprintf("\n\n💼 **Business Intro**:\n```\n%s\n```", escapeMarkdown(profile.BusinessIntro))
+	}
 	b.replyText(msg, cardText)
 }
 
@@ -1127,11 +1148,7 @@ func (b *Bot) cmdGetDB(msg *tgbotapi.Message, user *db.User) {
 		return
 	}
 
-	isSuperAdmin := b.cfg.SuperAdminID != 0 && user.UserID == b.cfg.SuperAdminID
-	isBotAdmin := user.IsAdmin
-	isModGroupMember := b.cfg.ModerationGroupID != 0 && b.IsUserInModGroup(user.UserID)
-
-	if !isSuperAdmin && !isBotAdmin && !isModGroupMember {
+	if !b.IsBotAdminUser(user) {
 		b.replyText(msg, "❌ Permission denied. You must be a Bot Administrator or member of the Bot Admin group.")
 		return
 	}
@@ -1271,6 +1288,23 @@ func (b *Bot) IsUserInModGroup(userID int64) bool {
 		return false
 	}
 	return cm.Status == "administrator" || cm.Status == "creator" || cm.Status == "member"
+}
+
+// IsBotAdminUser checks if a given user is a Super Admin, has bot admin privileges in the DB, or is a member of the moderation/admin group.
+func (b *Bot) IsBotAdminUser(user *db.User) bool {
+	if user == nil {
+		return false
+	}
+	if b.cfg.SuperAdminID != 0 && user.UserID == b.cfg.SuperAdminID {
+		return true
+	}
+	if user.IsAdmin {
+		return true
+	}
+	if b.cfg.ModerationGroupID != 0 && b.IsUserInModGroup(user.UserID) {
+		return true
+	}
+	return false
 }
 
 func (b *Bot) replyText(msg *tgbotapi.Message, text string) {

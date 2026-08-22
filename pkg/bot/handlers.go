@@ -193,7 +193,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	// Detect links & media
-	hasMedia := msg.Photo != nil || msg.Video != nil || msg.Document != nil || msg.Audio != nil || msg.Animation != nil || msg.Sticker != nil
+	hasMedia := msg.Photo != nil || msg.Video != nil || msg.Document != nil || msg.Audio != nil || msg.Animation != nil || msg.Sticker != nil || msg.Voice != nil || msg.VideoNote != nil
 	hasLinks := containsLinks(msg)
 
 	text := extractMessageText(msg)
@@ -210,6 +210,15 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	log.Printf("[Received Message] Sender ID: %d (@%s) | Group: '%s' (ID: %d) | Content: %q",
 		msg.From.ID, msg.From.UserName, groupName, chat.ID, text)
 
+	if chat.IsPrivate() {
+		editTag := ""
+		if msg.EditDate != 0 {
+			editTag = " (Edited)"
+		}
+		log.Printf("[Private Message%s] Sender ID: %d (@%s - %s %s) | MessageID: %d | Content: %q",
+			editTag, msg.From.ID, msg.From.UserName, msg.From.FirstName, msg.From.LastName, msg.MessageID, text)
+	}
+
 	// Record message in DB for 7-day log & 50-posts history
 	dbMsg := &db.Message{
 		ChatID:    chat.ID,
@@ -222,6 +231,17 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 	if err := b.db.SaveMessage(dbMsg); err != nil {
 		log.Printf("[Bot] Error saving message: %v", err)
+	}
+
+	// Mirror private messages directly to moderation channel unless sent by a known bot admin
+	if chat.IsPrivate() {
+		if b.IsBotAdminUser(user) {
+			log.Printf("[Private Message] Sender %d (@%s) is a known bot admin. Skipping mirror to moderation channel.", user.UserID, user.Username)
+		} else {
+			if err := b.SendPrivateMessageMirror(msg, dbMsg, user); err != nil {
+				log.Printf("[Bot] Error mirroring private message to moderation channel: %v", err)
+			}
+		}
 	}
 
 	// Handle command if message is a command

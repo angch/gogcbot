@@ -94,13 +94,19 @@ func (t *NewUserSpamBioTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, e
 		profileTexts = append(profileTexts, ctx.BusinessIntro)
 	}
 
-	if len(profileTexts) == 0 {
-		return &TriggerResult{Triggered: false}, nil
+	var matched []string
+	if len(profileTexts) > 0 {
+		combinedProfileText := strings.Join(profileTexts, " | ")
+		_, matchedKws := db.MatchSpamBioAll(combinedProfileText, t.customKeywords...)
+		matched = append(matched, matchedKws...)
 	}
 
-	combinedProfileText := strings.Join(profileTexts, " | ")
-	isSpam, matched := db.MatchSpamBioAll(combinedProfileText, t.customKeywords...)
-	if !isSpam && len(matched) == 0 {
+	if ctx.PersonalChatUsername != "" && db.IsSpammyUsername(ctx.PersonalChatUsername) {
+		cleanHandle := strings.TrimPrefix(strings.TrimSpace(ctx.PersonalChatUsername), "@")
+		matched = append(matched, fmt.Sprintf("spammy_channel_username:@%s", cleanHandle))
+	}
+
+	if len(matched) == 0 {
 		return &TriggerResult{Triggered: false}, nil
 	}
 
