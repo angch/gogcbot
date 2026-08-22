@@ -1251,3 +1251,86 @@ func TestMatchSpamBioProfile_And_ExtendedSignals(t *testing.T) {
 		t.Errorf("expected empty bio to NOT render - **Bio**: section, got: %s", formattedNoBio)
 	}
 }
+
+func TestUpdateUserName(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	userID := int64(445566)
+	_, _, err := database.GetOrCreateUser(userID, "olduser", "OldFirst", "OldLast", 10)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	if err := database.UpdateUserName(userID, "newuser", "NewFirst", "NewLast"); err != nil {
+		t.Fatalf("failed to update user name: %v", err)
+	}
+
+	u, err := database.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to get user: %v", err)
+	}
+	if u.Username != "newuser" || u.FirstName != "NewFirst" || u.LastName != "NewLast" {
+		t.Errorf("unexpected updated user: %+v", u)
+	}
+}
+
+func TestGetLowRepUsersForRescan(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	now := time.Now()
+
+	// User 1: rep 10, no profile (should be included)
+	_, _, _ = database.GetOrCreateUser(101, "u1", "User", "One", 10)
+
+	// User 2: rep 5, profile fetched 30 hours ago (should be included)
+	_, _, _ = database.GetOrCreateUser(102, "u2", "User", "Two", 5)
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:    102,
+		Username:  "u2",
+		FetchedAt: now.Add(-30 * time.Hour),
+	})
+
+	// User 3: rep 5, profile fetched 2 hours ago (should NOT be included if cutoff is 24h)
+	_, _, _ = database.GetOrCreateUser(103, "u3", "User", "Three", 5)
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:    103,
+		Username:  "u3",
+		FetchedAt: now.Add(-2 * time.Hour),
+	})
+
+	// User 4: rep 80 (high rep, should NOT be included if maxRep is 20)
+	_, _, _ = database.GetOrCreateUser(104, "u4", "User", "Four", 80)
+
+	// User 5: rep 0, banned (should NOT be included)
+	_, _, _ = database.GetOrCreateUser(105, "u5", "User", "Five", 0)
+	_ = database.SetUserBanned(105, true)
+
+	// User 6: rep 0, admin (should NOT be included)
+	_, _, _ = database.GetOrCreateUser(106, "u6", "User", "Six", 0)
+	_ = database.SetUserAdmin(106, true)
+
+	// Test 1: Cutoff 24 hours ago, maxRep 20 -> should match User 1 and User 2
+	cutoff24h := now.Add(-24 * time.Hour)
+	candidates, err := database.GetLowRepUsersForRescan(20, cutoff24h, 0)
+	if err != nil {
+		t.Fatalf("failed to query candidates: %v", err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 candidates (User 1 and User 2), got %d: %+v", len(candidates), candidates)
+	}
+	candIDs := map[int64]bool{candidates[0].UserID: true, candidates[1].UserID: true}
+	if !candIDs[101] || !candIDs[102] {
+		t.Errorf("expected IDs 101 and 102, got %+v", candIDs)
+	}
+
+	// Test 2: Force (cutoff zero), maxRep 20 -> should match User 1, User 2, User 3
+	candidatesForce, err := database.GetLowRepUsersForRescan(20, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("failed to query candidates force: %v", err)
+	}
+	if len(candidatesForce) != 3 {
+		t.Fatalf("expected 3 candidates force (User 1, 2, 3), got %d: %+v", len(candidatesForce), candidatesForce)
+	}
+}

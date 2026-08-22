@@ -36,6 +36,21 @@ var (
 	maxLoginRetries = 6
 )
 
+// SetNewBotAPIFuncForTesting overrides the BotAPI constructor for unit testing.
+func SetNewBotAPIFuncForTesting(f func(token string) (*tgbotapi.BotAPI, error)) func() {
+	orig := newBotAPIFunc
+	origDelay := loginRetryDelay
+	origRetries := maxLoginRetries
+	newBotAPIFunc = f
+	loginRetryDelay = 1 * time.Millisecond
+	maxLoginRetries = 1
+	return func() {
+		newBotAPIFunc = orig
+		loginRetryDelay = origDelay
+		maxLoginRetries = origRetries
+	}
+}
+
 // NewBot initializes a new Bot instance using the provided configuration and database client.
 func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 	if cfg.TelegramToken == "" {
@@ -220,18 +235,10 @@ func (b *Bot) GetChat(config tgbotapi.ChatInfoConfig) (tgbotapi.Chat, error) {
 		mockLastName := "User"
 		if b.db != nil {
 			if existing, err := b.db.GetUserProfile(config.ChatID); err == nil && existing != nil {
-				if existing.Bio != "" {
-					mockBio = existing.Bio
-				}
-				if existing.Username != "" {
-					mockUsername = existing.Username
-				}
-				if existing.FirstName != "" {
-					mockFirstName = existing.FirstName
-				}
-				if existing.LastName != "" {
-					mockLastName = existing.LastName
-				}
+				mockBio = existing.Bio
+				mockUsername = existing.Username
+				mockFirstName = existing.FirstName
+				mockLastName = existing.LastName
 			}
 		}
 		return tgbotapi.Chat{
@@ -432,16 +439,18 @@ func (b *Bot) FetchUserProfile(userID int64) (*db.UserProfile, error) {
 		log.Printf("[Bot] Warning: GetUserProfilePhotos failed for user %d: %v", userID, errPhotos)
 	}
 
-	// Fallback names/username/language from DB user record if Telegram GetChat didn't return them
+	// Fallback names/username/language from DB user record if Telegram GetChat failed
 	if dbUser, err := b.db.GetUserByID(userID); err == nil && dbUser != nil {
-		if profile.Username == "" {
-			profile.Username = dbUser.Username
-		}
-		if profile.FirstName == "" {
-			profile.FirstName = dbUser.FirstName
-		}
-		if profile.LastName == "" {
-			profile.LastName = dbUser.LastName
+		if errChat != nil {
+			if profile.Username == "" {
+				profile.Username = dbUser.Username
+			}
+			if profile.FirstName == "" {
+				profile.FirstName = dbUser.FirstName
+			}
+			if profile.LastName == "" {
+				profile.LastName = dbUser.LastName
+			}
 		}
 		if profile.LanguageCode == "" {
 			profile.LanguageCode = dbUser.LanguageCode

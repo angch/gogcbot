@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1218,4 +1219,261 @@ func TestHandleUpdate_MyChatMemberAndChatJoinRequest(t *testing.T) {
 	if err != nil || grp2 == nil {
 		t.Errorf("expected channel %d to be saved on ChatJoinRequest update, got %v", joinReqChatID, err)
 	}
+}
+
+func TestRescanLowRepUsers_SpamBio_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(777111)
+	b.cfg.ModerationGroupID = -100998877
+
+	// Create low rep user with old profile scan (30 hours ago)
+	_, _, err := b.db.GetOrCreateUser(userID, "rescan_spammer", "Rescan", "Spammer", 5)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "rescan_spammer",
+		FirstName:  "Rescan",
+		LastName:   "Spammer",
+		Bio:        "兼职代发 6折加油卡 沃尔玛卡，联系客服",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now().Add(-30 * time.Hour),
+	})
+
+	opts := RescanOptions{
+		MaxReputation: 20,
+		Hours:         24,
+		Delay:         1 * time.Millisecond,
+	}
+
+	res, err := b.RescanLowRepUsers(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("rescan failed: %v", err)
+	}
+
+	if res.TotalCandidates != 1 || res.BannedCount != 1 {
+		t.Errorf("expected 1 candidate and 1 ban, got %+v", res)
+	}
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil || !u.IsBanned {
+		t.Errorf("expected user %d to be banned after rescan matched spam bio, got u: %+v", userID, u)
+	}
+}
+
+func TestRescanLowRepUsers_RedPacketCJKName_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(8890554433)
+	b.cfg.ModerationGroupID = -100998877
+
+	// User originally had clean name, but recently changed to red packet CJK name
+	_, _, err := b.db.GetOrCreateUser(userID, "cbzbQFLOuHNkJZ", "NormalFirst", "NormalLast", 5)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "cbzbQFLOuHNkJZ",
+		FirstName:  "每日首发🧧",
+		LastName:   "",
+		Bio:        "General bio",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now().Add(-48 * time.Hour),
+	})
+
+	opts := RescanOptions{
+		MaxReputation: 20,
+		Hours:         24,
+		Delay:         1 * time.Millisecond,
+	}
+
+	res, err := b.RescanLowRepUsers(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("rescan failed: %v", err)
+	}
+
+	if res.TotalCandidates != 1 || res.BannedCount != 1 {
+		t.Errorf("expected 1 candidate and 1 ban, got %+v", res)
+	}
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil || !u.IsBanned {
+		t.Errorf("expected user %d to be banned after rescan matched red packet CJK name", userID)
+	}
+}
+
+func TestRescanLowRepUsers_CleanUser_NotBanned(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(665544)
+	b.cfg.ModerationGroupID = -100998877
+
+	_, _, err := b.db.GetOrCreateUser(userID, "clean_dev", "Clean", "Developer", 10)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:     userID,
+		Username:   "clean_dev",
+		FirstName:  "Clean",
+		LastName:   "Developer",
+		Bio:        "Just writing Go and Python code.",
+		HasPhoto:   true,
+		PhotoCount: 1,
+		FetchedAt:  time.Now().Add(-50 * time.Hour),
+	})
+
+	opts := RescanOptions{
+		MaxReputation: 20,
+		Hours:         24,
+		Delay:         1 * time.Millisecond,
+	}
+
+	res, err := b.RescanLowRepUsers(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("rescan failed: %v", err)
+	}
+
+	if res.TotalCandidates != 1 || res.CleanCount != 1 || res.BannedCount != 0 {
+		t.Errorf("expected 1 clean user and 0 bans, got %+v", res)
+	}
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil || u.IsBanned {
+		t.Errorf("expected user %d NOT to be banned, got u: %+v", userID, u)
+	}
+}
+
+func TestRescanLowRepUsers_TimeFilter_And_Force(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(112233)
+	b.cfg.ModerationGroupID = -100998877
+
+	_, _, err := b.db.GetOrCreateUser(userID, "recent_scanned", "Recent", "User", 5)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	// Scanned only 2 hours ago
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:    userID,
+		Username:  "recent_scanned",
+		FirstName: "Recent",
+		LastName:  "User",
+		Bio:       "Clean bio",
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+	})
+
+	// 1. Without force (Hours: 24) -> 0 candidates
+	opts := RescanOptions{
+		MaxReputation: 20,
+		Hours:         24,
+		Delay:         1 * time.Millisecond,
+	}
+	res, err := b.RescanLowRepUsers(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("rescan failed: %v", err)
+	}
+	if res.TotalCandidates != 0 {
+		t.Errorf("expected 0 candidates because scan is only 2h old, got %d", res.TotalCandidates)
+	}
+
+	// 2. With force -> 1 candidate
+	optsForce := RescanOptions{
+		MaxReputation: 20,
+		Force:         true,
+		Delay:         1 * time.Millisecond,
+	}
+	resForce, err := b.RescanLowRepUsers(context.Background(), optsForce, nil)
+	if err != nil {
+		t.Fatalf("rescan force failed: %v", err)
+	}
+	if resForce.TotalCandidates != 1 || resForce.CleanCount != 1 {
+		t.Errorf("expected 1 candidate with force, got %+v", resForce)
+	}
+}
+
+func TestRescanLowRepUsers_DryRun(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	userID := int64(998877)
+	b.cfg.ModerationGroupID = -100998877
+
+	_, _, err := b.db.GetOrCreateUser(userID, "dryrun_spammer", "DryRun", "Spam", 5)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:    userID,
+		Username:  "dryrun_spammer",
+		FirstName: "DryRun",
+		LastName:  "Spam",
+		Bio:       "兼职代发 6折加油卡 沃尔玛卡",
+		FetchedAt: time.Now().Add(-30 * time.Hour),
+	})
+
+	opts := RescanOptions{
+		MaxReputation: 20,
+		Hours:         24,
+		DryRun:        true,
+		Delay:         1 * time.Millisecond,
+	}
+
+	res, err := b.RescanLowRepUsers(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("rescan dry run failed: %v", err)
+	}
+
+	if res.BannedCount != 1 {
+		t.Errorf("expected BannedCount metric 1 in dry run, got %d", res.BannedCount)
+	}
+
+	// DB should NOT have banned the user because of dry-run
+	u, err := b.db.GetUserByID(userID)
+	if err != nil || u.IsBanned {
+		t.Errorf("expected user %d NOT to be banned in DB during dry run, got u: %+v", userID, u)
+	}
+}
+
+func TestCmdRescanUsers_TelegramCommand(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	adminID := int64(12345)
+	b.cfg.SuperAdminID = adminID
+	b.cfg.ModerationGroupID = -100998877
+
+	adminUser, _, _ := b.db.GetOrCreateUser(adminID, "admin", "Admin", "User", 100)
+
+	msg := &tgbotapi.Message{
+		MessageID: 101,
+		Chat: &tgbotapi.Chat{
+			ID:    b.cfg.ModerationGroupID,
+			Title: "Mod Group",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{
+			ID:       adminID,
+			UserName: "admin",
+		},
+		Text: "/rescanusers force dryrun",
+	}
+
+	// Should execute without panic or error
+	b.handleCommand(msg, adminUser)
 }

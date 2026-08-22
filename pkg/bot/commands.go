@@ -81,6 +81,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 		b.cmdListUsers(msg, isAuthorized)
 	case "listunknownusers", "unknownusers", "listspambios", "spambios", "listspambiousers", "spambiousers", "spamusers":
 		b.cmdListUnknownUsers(msg, args, isAuthorized)
+	case "rescanusers", "rescan", "rescanprofiles":
+		b.cmdRescanUsers(msg, args, isAuthorized)
 	case "cleanup":
 		b.cmdCleanup(msg, isAuthorized)
 	case "getdb", "backup", "db", "dumpdb", "downloaddb":
@@ -462,6 +464,89 @@ func (b *Bot) cmdBackfillProfiles(msg *tgbotapi.Message, args string, isAuthoriz
 			return
 		}
 		b.replyText(msg, fmt.Sprintf("✅ **User Profile Backfill Complete**!\n\n• Successfully Fetched: `%d`\n• Failed / Not Found: `%d`", success, failed))
+	}()
+}
+
+func (b *Bot) cmdRescanUsers(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	if !isAuthorized {
+		b.replyText(msg, "❌ Permission denied.")
+		return
+	}
+
+	opts := RescanOptions{
+		MaxReputation: 20,
+		Hours:         24,
+		Delay:         100 * time.Millisecond,
+	}
+
+	lowerArgs := strings.ToLower(args)
+	if strings.Contains(lowerArgs, "force") || strings.Contains(lowerArgs, "all") {
+		opts.Force = true
+	}
+	if strings.Contains(lowerArgs, "dryrun") || strings.Contains(lowerArgs, "dry") {
+		opts.DryRun = true
+	}
+
+	// Parse custom max rep or hours if supplied: e.g. "maxrep 30" or "hours 12"
+	fields := strings.Fields(lowerArgs)
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if (f == "rep" || f == "maxrep" || f == "max-rep") && i+1 < len(fields) {
+			if v, err := strconv.Atoi(fields[i+1]); err == nil {
+				opts.MaxReputation = v
+				i++
+			}
+		} else if (f == "hours" || f == "hr" || f == "age") && i+1 < len(fields) {
+			if v, err := strconv.Atoi(fields[i+1]); err == nil {
+				opts.Hours = v
+				i++
+			}
+		}
+	}
+
+	var cutoff time.Time
+	if !opts.Force && opts.Hours > 0 {
+		cutoff = time.Now().Add(-time.Duration(opts.Hours) * time.Hour)
+	}
+
+	candidates, err := b.db.GetLowRepUsersForRescan(opts.MaxReputation, cutoff, 0)
+	if err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Error querying candidate users for rescan: %v", err))
+		return
+	}
+
+	if len(candidates) == 0 {
+		b.replyText(msg, fmt.Sprintf("ℹ️ No low-reputation users (rep <= %d) found needing rescan (last scan > %d hours ago). Use `/rescanusers force` to rescan all low-rep users.", opts.MaxReputation, opts.Hours))
+		return
+	}
+
+	modeStr := ""
+	if opts.DryRun {
+		modeStr = " (DRY RUN - No bans will be executed)"
+	}
+	b.replyText(msg, fmt.Sprintf("🔍 **Starting user rescan** for `%d` candidate users%s...\n• Max Reputation: `%d`\n• Scan Age Threshold: `>%d hours` (Force: `%t`)\n\nRunning in background. Summary will be reported when finished.", len(candidates), modeStr, opts.MaxReputation, opts.Hours, opts.Force))
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+		defer cancel()
+
+		res, err := b.RescanLowRepUsers(ctx, opts, nil)
+		if err != nil && err != context.Canceled {
+			b.replyText(msg, fmt.Sprintf("⚠️ User rescan encountered an error: %v", err))
+			return
+		}
+
+		b.replyText(msg, fmt.Sprintf(
+			"✅ **User Rescan Complete**!\n\n"+
+				"📊 **Summary**:\n"+
+				"• Total Candidates: `%d`\n"+
+				"• Scanned: `%d`\n"+
+				"• 🚫 Banned (Triggered Join Rules): `%d`\n"+
+				"• ✨ Clean: `%d`\n"+
+				"• ⚠️ Errors / Not Found: `%d`\n"+
+				"• Dry Run: `%t`",
+			res.TotalCandidates, res.ScannedCount, res.BannedCount, res.CleanCount, res.ErrorCount, opts.DryRun,
+		))
 	}()
 }
 
@@ -1302,5 +1387,6 @@ func getHelpText(isSuperAdmin, isModGroup bool) string {
 		"• `/cleanup` - Manually run 7-day logs & 50-post-per-user retention cleanup\n" +
 		"• `/getdb` - Download a copy of the current SQLite3 database (Admin direct message only)\n" +
 		"• `/fetchprofile <user|@username>` - Fetch fresh Telegram profile (bio & picture) & cache in DB\n" +
-		"• `/backfillprofiles [force]` - Backfill bios and profile photos for tracked users in background"
+		"• `/backfillprofiles [force]` - Backfill bios and profile photos for tracked users in background\n" +
+		"• `/rescanusers [force] [dryrun] [maxrep <n>]` - Rescan low-rep users (>24h since last scan) & trigger join ban rules"
 }

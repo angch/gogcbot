@@ -406,6 +406,14 @@ func (d *DB) UpdateUserMetadata(userID int64, lang string, isPremium bool) error
 	return err
 }
 
+// UpdateUserName updates a user's username, first name, and last name.
+func (d *DB) UpdateUserName(userID int64, username, firstName, lastName string) error {
+	now := time.Now()
+	_, err := d.Exec(`UPDATE users SET username = ?, first_name = ?, last_name = ?, updated_at = ? WHERE user_id = ?`,
+		username, firstName, lastName, now, userID)
+	return err
+}
+
 func (d *DB) GetUserByID(userID int64) (*User, error) {
 	var user User
 	err := d.QueryRow(`
@@ -1365,6 +1373,54 @@ func (d *DB) GetUsersWithoutProfile(limit int) ([]User, error) {
 	}
 
 	rows, err := d.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
+// GetLowRepUsersForRescan queries unbanned, non-admin users with reputation <= maxRep
+// whose profile was fetched before cutoff (or never fetched). If cutoff is zero, the time filter is bypassed.
+func (d *DB) GetLowRepUsersForRescan(maxRep int, cutoff time.Time, limit int) ([]User, error) {
+	var query string
+	var args []interface{}
+
+	if cutoff.IsZero() {
+		query = `
+			SELECT u.user_id, u.username, u.first_name, u.last_name, u.language_code, u.is_premium, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
+			FROM users u
+			LEFT JOIN user_profiles p ON u.user_id = p.user_id
+			WHERE u.is_banned = 0 AND u.is_admin = 0 AND u.reputation <= ?
+			ORDER BY u.reputation ASC, u.user_id DESC
+		`
+		args = append(args, maxRep)
+	} else {
+		query = `
+			SELECT u.user_id, u.username, u.first_name, u.last_name, u.language_code, u.is_premium, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
+			FROM users u
+			LEFT JOIN user_profiles p ON u.user_id = p.user_id
+			WHERE u.is_banned = 0 AND u.is_admin = 0 AND u.reputation <= ?
+			  AND (p.fetched_at IS NULL OR p.fetched_at < ?)
+			ORDER BY u.reputation ASC, u.user_id DESC
+		`
+		args = append(args, maxRep, cutoff)
+	}
+
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := d.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

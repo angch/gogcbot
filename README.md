@@ -120,7 +120,13 @@ CGO_ENABLED=0 go build -o gogcbot main.go
 ./gogcbot list-unknownusers --config config.yaml --max-rep 20
 ./gogcbot list-unknownusers --config config.yaml --ban
 
-# 8. Dump all known database info and profiles for a user by @tag or numeric ID
+# 8. Manually rescan low-reputation users (>24h since last scan) & trigger join ban rules
+./gogcbot rescan-users --config config.yaml
+./gogcbot rescan-users --config config.yaml --max-rep 20 --hours 24
+./gogcbot rescan-users --config config.yaml --force
+./gogcbot rescan-users --config config.yaml --dry-run
+
+# 9. Dump all known database info and profiles for a user by @tag or numeric ID
 ./gogcbot user @spambot --config config.yaml
 ./gogcbot user 555666 --config config.yaml
 ./gogcbot user @spambot --config config.yaml --json
@@ -239,6 +245,7 @@ shieldy:
 | `/demote <user>` | Super Admin | Remove Bot Admin privileges and reset rep |
 | `/listusers` | Admin/Mod | List known good/bad users and moderation status |
 | `/listunknownusers [kw] [ban]` | Admin/Mod | Compact monospace table list or batch-ban unbanned new users with few messages (with or without bios) |
+| `/rescanusers [force] [dryrun]` | Admin/Mod | Manually rescan low-rep users (>24h since last scan) & trigger join ban rules |
 | `/cleanup` | Admin/Mod | Run retention cleanup on demand |
 | `/getdb` | Bot Admin (Direct PM only) | Download a copy of current SQLite3 database |
 
