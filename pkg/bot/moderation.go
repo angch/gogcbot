@@ -816,3 +816,155 @@ func (b *Bot) SendPrivateMessageMirror(msg *tgbotapi.Message, dbMsg *db.Message,
 	return err
 }
 
+// BanCheckOptions configures parameters for verifying banned users across monitored channels/groups.
+type BanCheckOptions struct {
+	Delay  time.Duration // Delay between Telegram API calls (enforced to be at least 1s, ensuring <= 1 req/sec)
+	DryRun bool          // If true, evaluate without issuing new kick bans
+}
+
+// BanCheckResult contains summary metrics of a ban check audit run.
+type BanCheckResult struct {
+	TotalBannedUsers int           `json:"total_banned_users"`
+	TotalGroups      int           `json:"total_groups"`
+	TotalChecks      int           `json:"total_checks"`
+	AlreadyBanned    int           `json:"already_banned"`
+	RebannedCount    int           `json:"rebanned_count"`
+	ErrorCount       int           `json:"error_count"`
+	SkippedCount     int           `json:"skipped_count"`
+	Duration         time.Duration `json:"duration"`
+}
+
+// BanCheckProgressFunc is invoked after each user/group check.
+type BanCheckProgressFunc func(currUser, totalUsers, currGroup, totalGroups int, user *db.User, group *db.Group, status string, rebanned bool, err error)
+
+// CheckBannedUsersAcrossGroups scans all users marked as banned in the database against all monitored channels/groups.
+// It verifies that each banned user has status "kicked" (and UntilDate == 0 for permanent bans).
+// If a user is not banned in a channel/group, it issues a kick-ban.
+// Every Telegram API call (queries and kick bans) is throttled to ensure no more than 1 request per second.
+func (b *Bot) CheckBannedUsersAcrossGroups(ctx context.Context, opts BanCheckOptions, progressCb BanCheckProgressFunc) (*BanCheckResult, error) {
+	if opts.Delay <= 0 {
+		opts.Delay = time.Second
+	}
+
+	bannedUsers, err := b.db.GetBannedUsers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query banned users: %w", err)
+	}
+
+	groups, err := b.db.GetMonitoredGroups()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query monitored groups: %w", err)
+	}
+
+	res := &BanCheckResult{
+		TotalBannedUsers: len(bannedUsers),
+		TotalGroups:      len(groups),
+	}
+
+	if len(bannedUsers) == 0 || len(groups) == 0 {
+		return res, nil
+	}
+
+	startTime := time.Now()
+
+	waitDelay := func() error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(opts.Delay):
+			return nil
+		}
+	}
+
+	for uIdx, u := range bannedUsers {
+		userCopy := u
+
+		// Safety check: Never kick super admin or bot admins
+		if (b.cfg.SuperAdminID != 0 && userCopy.UserID == b.cfg.SuperAdminID) || userCopy.IsAdmin {
+			res.SkippedCount++
+			log.Printf("[BanCheck Safety] User %d (@%s) is an admin/super-admin. Skipping.", userCopy.UserID, userCopy.Username)
+			continue
+		}
+
+		for gIdx, g := range groups {
+			groupCopy := g
+			res.TotalChecks++
+
+			// 1. Query chat member status from Telegram API
+			cm, getErr := b.GetChatMember(tgbotapi.GetChatMemberConfig{
+				ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+					ChatID: groupCopy.ChatID,
+					UserID: userCopy.UserID,
+				},
+			})
+
+			// Throttle after GetChatMember
+			if wErr := waitDelay(); wErr != nil {
+				res.Duration = time.Since(startTime)
+				return res, wErr
+			}
+
+			if getErr != nil {
+				log.Printf("[BanCheck Error] GetChatMember failed for user %d in %s (`%d`): %v",
+					userCopy.UserID, groupCopy.Title, groupCopy.ChatID, getErr)
+				res.ErrorCount++
+				if progressCb != nil {
+					progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, "error", false, getErr)
+				}
+				continue
+			}
+
+			// In Telegram, a permanent ban has Status == "kicked" and UntilDate == 0.
+			isPermanentlyBanned := (cm.Status == "kicked" && cm.UntilDate == 0)
+
+			if isPermanentlyBanned {
+				res.AlreadyBanned++
+				log.Printf("[BanCheck OK] User %d (@%s) is already permanently banned in %s (`%d`)",
+					userCopy.UserID, userCopy.Username, groupCopy.Title, groupCopy.ChatID)
+				if progressCb != nil {
+					progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, cm.Status, false, nil)
+				}
+			} else {
+				log.Printf("[BanCheck Missing] User %d (@%s) is NOT permanently banned in %s (`%d`) (Status: %s, UntilDate: %d).",
+					userCopy.UserID, userCopy.Username, groupCopy.Title, groupCopy.ChatID, cm.Status, cm.UntilDate)
+
+				if !opts.DryRun {
+					// Issue kick ban
+					banErr := b.BanUserInGroup(groupCopy.ChatID, userCopy.UserID)
+
+					// Throttle after BanUserInGroup (ensures <= 1 kick-ban per second)
+					if wErr := waitDelay(); wErr != nil {
+						res.Duration = time.Since(startTime)
+						return res, wErr
+					}
+
+					if banErr != nil {
+						log.Printf("[BanCheck Action Error] Failed to ban user %d in %s (`%d`): %v",
+							userCopy.UserID, groupCopy.Title, groupCopy.ChatID, banErr)
+						res.ErrorCount++
+						if progressCb != nil {
+							progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, cm.Status, false, banErr)
+						}
+					} else {
+						log.Printf("[BanCheck Success] Enforced permanent ban for user %d in %s (`%d`)",
+							userCopy.UserID, groupCopy.Title, groupCopy.ChatID)
+						res.RebannedCount++
+						if progressCb != nil {
+							progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, cm.Status, true, nil)
+						}
+					}
+				} else {
+					// Dry run
+					res.RebannedCount++
+					if progressCb != nil {
+						progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, cm.Status, false, nil)
+					}
+				}
+			}
+		}
+	}
+
+	res.Duration = time.Since(startTime)
+	return res, nil
+}
+

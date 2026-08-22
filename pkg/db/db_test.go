@@ -1416,3 +1416,53 @@ func TestMatchSpamBioProfile_DianWo_And_SpammyUsername(t *testing.T) {
 	}
 }
 
+func TestGetBannedUsers(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Initially no banned users
+	banned, err := database.GetBannedUsers()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(banned) != 0 {
+		t.Fatalf("expected 0 banned users, got %d", len(banned))
+	}
+
+	// Create users
+	_, _, err = database.GetOrCreateUser(1001, "active_user", "Active", "User", 50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	_, _, err = database.GetOrCreateUser(1002, "banned_user1", "Banned", "One", -50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	_, _, err = database.GetOrCreateUser(1003, "banned_user2", "Banned", "Two", -50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	// Mark users as banned
+	_ = database.SetUserBanned(1002, true)
+	_ = database.SetUserBanned(1003, true)
+
+	banned, err = database.GetBannedUsers()
+	if err != nil {
+		t.Fatalf("failed to get banned users: %v", err)
+	}
+	if len(banned) != 2 {
+		t.Fatalf("expected 2 banned users, got %d", len(banned))
+	}
+
+	// Unban one
+	_ = database.SetUserBanned(1002, false)
+	banned, err = database.GetBannedUsers()
+	if err != nil {
+		t.Fatalf("failed to get banned users: %v", err)
+	}
+	if len(banned) != 1 || banned[0].UserID != 1003 {
+		t.Fatalf("expected 1 banned user (1003), got %v", banned)
+	}
+}
+

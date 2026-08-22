@@ -472,6 +472,30 @@ func (d *DB) GetAllUsers(limit int) ([]User, error) {
 	return users, nil
 }
 
+// GetBannedUsers returns all users marked as banned (is_banned = 1) in the database.
+func (d *DB) GetBannedUsers() ([]User, error) {
+	rows, err := d.Query(`
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		FROM users
+		WHERE is_banned = 1
+		ORDER BY updated_at DESC, user_id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
 func (d *DB) AdjustReputation(userID int64, delta int, reason string, byUserID int64) (int, error) {
 	now := time.Now()
 	tx, err := d.Begin()

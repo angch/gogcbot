@@ -83,6 +83,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 		b.cmdListUnknownUsers(msg, args, isAuthorized)
 	case "rescanusers", "rescan", "rescanprofiles":
 		b.cmdRescanUsers(msg, args, isAuthorized)
+	case "bancheck", "checkbans", "verifybans":
+		b.cmdBanCheck(msg, args, isAuthorized)
 	case "cleanup":
 		b.cmdCleanup(msg, isAuthorized)
 	case "getdb", "backup", "db", "dumpdb", "downloaddb":
@@ -567,6 +569,120 @@ func (b *Bot) cmdRescanUsers(msg *tgbotapi.Message, args string, isAuthorized bo
 				"• ⚠️ Errors / Not Found: `%d`\n"+
 				"• Dry Run: `%t`",
 			res.TotalCandidates, res.ScannedCount, res.BannedCount, res.CleanCount, res.ErrorCount, opts.DryRun,
+		))
+	}()
+}
+
+func (b *Bot) cmdBanCheck(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	if !isAuthorized {
+		b.replyText(msg, "❌ Permission denied. You must be an administrator or moderation group member.")
+		return
+	}
+
+	if !b.TryStartBanCheck() {
+		b.replyText(msg, "⚠️ A ban check is already in progress. Please wait for it to complete.")
+		return
+	}
+
+	opts := BanCheckOptions{
+		Delay: 1 * time.Second,
+	}
+
+	lowerArgs := strings.ToLower(args)
+	if strings.Contains(lowerArgs, "dryrun") || strings.Contains(lowerArgs, "dry") {
+		opts.DryRun = true
+	}
+
+	// Parse optional custom delay (must be >= 1s / 1000ms)
+	fields := strings.Fields(lowerArgs)
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if (f == "delay" || f == "delay-ms" || f == "delayms" || f == "rate") && i+1 < len(fields) {
+			if v, err := strconv.Atoi(fields[i+1]); err == nil {
+				if v > 0 {
+					opts.Delay = time.Duration(v) * time.Millisecond
+				}
+				i++
+			}
+		}
+	}
+
+	bannedUsers, err := b.db.GetBannedUsers()
+	if err != nil {
+		b.FinishBanCheck()
+		b.replyText(msg, fmt.Sprintf("❌ Error querying banned users: %v", err))
+		return
+	}
+	if len(bannedUsers) == 0 {
+		b.FinishBanCheck()
+		b.replyText(msg, "ℹ️ No banned users found in database.")
+		return
+	}
+
+	groups, err := b.db.GetMonitoredGroups()
+	if err != nil {
+		b.FinishBanCheck()
+		b.replyText(msg, fmt.Sprintf("❌ Error querying monitored groups: %v", err))
+		return
+	}
+	if len(groups) == 0 {
+		b.FinishBanCheck()
+		b.replyText(msg, "ℹ️ No monitored groups/channels found in database.")
+		return
+	}
+
+	totalChecks := len(bannedUsers) * len(groups)
+	estMinutes := (totalChecks * int(opts.Delay/time.Second)) / 60
+	if estMinutes < 1 {
+		estMinutes = 1
+	}
+
+	modeStr := ""
+	if opts.DryRun {
+		modeStr = " (DRY RUN - No kick bans will be executed)"
+	}
+
+	b.replyText(msg, fmt.Sprintf(
+		"🔍 **Starting Ban Check across monitored channels & groups**%s...\n\n"+
+			"• 🚫 **Banned Users in DB**: `%d`\n"+
+			"• 👥 **Monitored Groups/Channels**: `%d`\n"+
+			"• 📋 **Total Checks**: `%d`\n"+
+			"• ⏱️ **Rate Limit**: `<= 1 req/sec` (~`%d` min est.)\n\n"+
+			"Running in background. Summary report will be sent here upon completion.",
+		modeStr, len(bannedUsers), len(groups), totalChecks, estMinutes,
+	))
+
+	go func() {
+		defer b.FinishBanCheck()
+
+		timeout := time.Duration(totalChecks*3)*time.Second + 10*time.Minute
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		res, err := b.CheckBannedUsersAcrossGroups(ctx, opts, nil)
+		if err != nil && err != context.Canceled {
+			b.replyText(msg, fmt.Sprintf("⚠️ Ban check encountered an error: %v", err))
+			return
+		}
+
+		if res == nil {
+			return
+		}
+
+		b.replyText(msg, fmt.Sprintf(
+			"✅ **Ban Check Complete**!\n\n"+
+				"📊 **Summary**:\n"+
+				"• 🚫 Banned Users in DB: `%d`\n"+
+				"• 👥 Monitored Groups/Channels: `%d`\n"+
+				"• 📋 Total Group-User Checks: `%d`\n"+
+				"• ✅ Already Banned: `%d`\n"+
+				"• 🔨 Newly Re-banned / Enforced: `%d`\n"+
+				"• ⚠️ Errors: `%d`\n"+
+				"• ⏱️ Elapsed Time: `%s`\n"+
+				"• 🧪 Dry Run: `%t`",
+			res.TotalBannedUsers, res.TotalGroups, res.TotalChecks,
+			res.AlreadyBanned, res.RebannedCount, res.ErrorCount,
+			res.Duration.Round(time.Second), opts.DryRun,
 		))
 	}()
 }
@@ -1422,5 +1538,6 @@ func getHelpText(isSuperAdmin, isModGroup bool) string {
 		"• `/getdb` - Download a copy of the current SQLite3 database (Admin direct message only)\n" +
 		"• `/fetchprofile <user|@username>` - Fetch fresh Telegram profile (bio & picture) & cache in DB\n" +
 		"• `/backfillprofiles [force]` - Backfill bios and profile photos for tracked users in background\n" +
-		"• `/rescanusers [force] [dryrun] [maxrep <n>]` - Rescan low-rep users (>24h since last scan) & trigger join ban rules"
+		"• `/rescanusers [force] [dryrun] [maxrep <n>]` - Rescan low-rep users (>24h since last scan) & trigger join ban rules\n" +
+		"• `/bancheck [dryrun]` - Verify all banned users across monitored channels/groups (<= 1 req/sec) & enforce missing bans"
 }

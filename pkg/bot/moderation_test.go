@@ -1955,4 +1955,246 @@ func TestHandleMessage_PrivateMessage_BotAdmin_SkippedFromMirroring(t *testing.T
 	}
 }
 
+func TestCheckBannedUsersAcrossGroups_AlreadyBanned(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	_ = b.db.SaveGroup(-100111222, "Test Group", "supergroup")
+	userID := int64(99001)
+	_, _, _ = b.db.GetOrCreateUser(userID, "banned_guy", "Banned", "Guy", -50)
+	_ = b.db.SetUserBanned(userID, true)
+
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{
+			Status:    "kicked",
+			UntilDate: 0,
+			User:      &tgbotapi.User{ID: userID, UserName: "banned_guy"},
+		}, nil
+	})
+
+	opts := BanCheckOptions{
+		Delay: 10 * time.Millisecond,
+	}
+
+	res, err := b.CheckBannedUsersAcrossGroups(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if res.TotalBannedUsers != 1 || res.TotalGroups != 1 || res.TotalChecks != 1 {
+		t.Errorf("unexpected counts: %+v", res)
+	}
+	if res.AlreadyBanned != 1 {
+		t.Errorf("expected 1 already banned, got %d", res.AlreadyBanned)
+	}
+	if res.RebannedCount != 0 {
+		t.Errorf("expected 0 rebanned, got %d", res.RebannedCount)
+	}
+}
+
+func TestCheckBannedUsersAcrossGroups_MissingBan_Rebanned(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	_ = b.db.SaveGroup(-100111222, "Test Group", "supergroup")
+	userID := int64(99002)
+	_, _, _ = b.db.GetOrCreateUser(userID, "unbanned_guy", "Unbanned", "Guy", -50)
+	_ = b.db.SetUserBanned(userID, true)
+
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "unbanned_guy"},
+		}, nil
+	})
+
+	opts := BanCheckOptions{
+		Delay: 10 * time.Millisecond,
+	}
+
+	res, err := b.CheckBannedUsersAcrossGroups(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if res.AlreadyBanned != 0 {
+		t.Errorf("expected 0 already banned, got %d", res.AlreadyBanned)
+	}
+	if res.RebannedCount != 1 {
+		t.Errorf("expected 1 rebanned, got %d", res.RebannedCount)
+	}
+}
+
+func TestCheckBannedUsersAcrossGroups_DryRun(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	_ = b.db.SaveGroup(-100111222, "Test Group", "supergroup")
+	userID := int64(99003)
+	_, _, _ = b.db.GetOrCreateUser(userID, "dry_guy", "Dry", "Guy", -50)
+	_ = b.db.SetUserBanned(userID, true)
+
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "dry_guy"},
+		}, nil
+	})
+
+	opts := BanCheckOptions{
+		Delay:  10 * time.Millisecond,
+		DryRun: true,
+	}
+
+	res, err := b.CheckBannedUsersAcrossGroups(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if res.RebannedCount != 1 {
+		t.Errorf("expected 1 reported missing ban in dry run, got %d", res.RebannedCount)
+	}
+	if res.AlreadyBanned != 0 {
+		t.Errorf("expected 0 already banned, got %d", res.AlreadyBanned)
+	}
+}
+
+func TestCheckBannedUsersAcrossGroups_SafetySkipAdmin(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	_ = b.db.SaveGroup(-100111222, "Test Group", "supergroup")
+	superAdminID := int64(99004)
+	b.cfg.SuperAdminID = superAdminID
+	_, _, _ = b.db.GetOrCreateUser(superAdminID, "admin_guy", "Admin", "Guy", 100)
+	_ = b.db.SetUserBanned(superAdminID, true)
+
+	opts := BanCheckOptions{
+		Delay: 10 * time.Millisecond,
+	}
+
+	res, err := b.CheckBannedUsersAcrossGroups(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if res.SkippedCount != 1 {
+		t.Errorf("expected 1 skipped admin user, got %d", res.SkippedCount)
+	}
+	if res.TotalChecks != 0 {
+		t.Errorf("expected 0 checks performed on admin, got %d", res.TotalChecks)
+	}
+}
+
+func TestCheckBannedUsersAcrossGroups_ErrorHandling(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	_ = b.db.SaveGroup(-100111222, "Test Group", "supergroup")
+	userID := int64(99005)
+	_, _, _ = b.db.GetOrCreateUser(userID, "err_guy", "Err", "Guy", -50)
+	_ = b.db.SetUserBanned(userID, true)
+
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{}, fmt.Errorf("Bad Request: chat not found")
+	})
+
+	opts := BanCheckOptions{
+		Delay: 10 * time.Millisecond,
+	}
+
+	res, err := b.CheckBannedUsersAcrossGroups(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if res.ErrorCount != 1 {
+		t.Errorf("expected 1 error count, got %d", res.ErrorCount)
+	}
+}
+
+func TestTryStartBanCheck_Concurrency(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	if !b.TryStartBanCheck() {
+		t.Fatalf("expected TryStartBanCheck to succeed first time")
+	}
+
+	// Second attempt should fail
+	if b.TryStartBanCheck() {
+		t.Fatalf("expected TryStartBanCheck to fail while already running")
+	}
+
+	b.FinishBanCheck()
+
+	// Should succeed after finish
+	if !b.TryStartBanCheck() {
+		t.Fatalf("expected TryStartBanCheck to succeed after FinishBanCheck")
+	}
+	b.FinishBanCheck()
+}
+
+func TestCmdBanCheck_TelegramCommand(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	adminID := int64(12345)
+	b.cfg.SuperAdminID = adminID
+	_ = b.db.SaveGroup(-100111222, "Test Group", "supergroup")
+
+	userID := int64(99006)
+	_, _, _ = b.db.GetOrCreateUser(userID, "banned_check_user", "Banned", "User", -50)
+	_ = b.db.SetUserBanned(userID, true)
+
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{
+			Status: "kicked",
+			User:   &tgbotapi.User{ID: userID, UserName: "banned_check_user"},
+		}, nil
+	})
+
+	msg := &tgbotapi.Message{
+		MessageID: 501,
+		Chat:      &tgbotapi.Chat{ID: adminID, Type: "private"},
+		From:      &tgbotapi.User{ID: adminID, UserName: "admin"},
+		Text:      "/bancheck dryrun delay 5",
+		Date:      int(time.Now().Unix()),
+	}
+
+	// Execute command
+	b.cmdBanCheck(msg, "dryrun delay 5", true)
+
+	// Wait briefly for background goroutine to execute
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify ban check completed and reset running flag
+	if !b.TryStartBanCheck() {
+		t.Errorf("expected ban check to have finished and released lock")
+	}
+	b.FinishBanCheck()
+}
+
+func TestCmdBanCheck_PermissionDenied(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	msg := &tgbotapi.Message{
+		MessageID: 502,
+		Chat:      &tgbotapi.Chat{ID: 99999, Type: "private"},
+		From:      &tgbotapi.User{ID: 99999, UserName: "normal_user"},
+		Text:      "/bancheck",
+		Date:      int(time.Now().Unix()),
+	}
+
+	b.cmdBanCheck(msg, "", false)
+
+	// Should not have acquired lock
+	if !b.TryStartBanCheck() {
+		t.Errorf("expected lock not to be held")
+	}
+	b.FinishBanCheck()
+}
+
+
 

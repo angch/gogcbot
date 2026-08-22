@@ -29,6 +29,8 @@ type Bot struct {
 	mu                 sync.RWMutex
 	stopChan           chan struct{}
 	mockChatMemberFunc func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error)
+	banCheckMu         sync.Mutex
+	isBanCheckRunning  bool
 }
 
 var (
@@ -211,6 +213,24 @@ func (b *Bot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 // SetMockChatMemberFunc sets a mock callback for GetChatMember for testing.
 func (b *Bot) SetMockChatMemberFunc(f func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error)) {
 	b.mockChatMemberFunc = f
+}
+
+// TryStartBanCheck attempts to acquire the lock for running a background ban check. Returns true if acquired.
+func (b *Bot) TryStartBanCheck() bool {
+	b.banCheckMu.Lock()
+	defer b.banCheckMu.Unlock()
+	if b.isBanCheckRunning {
+		return false
+	}
+	b.isBanCheckRunning = true
+	return true
+}
+
+// FinishBanCheck releases the running ban check lock.
+func (b *Bot) FinishBanCheck() {
+	b.banCheckMu.Lock()
+	defer b.banCheckMu.Unlock()
+	b.isBanCheckRunning = false
 }
 
 // GetChatMember wraps b.api.GetChatMember to echo chat member query calls to standard logs for debugging.
