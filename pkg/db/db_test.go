@@ -1625,3 +1625,84 @@ func TestGetAllUserMessages(t *testing.T) {
 		t.Errorf("expected newest to oldest order, got first=%d, last=%d", msgs[0].MessageID, msgs[4].MessageID)
 	}
 }
+
+func TestShieldyMessages(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	chatID := int64(-100123456789)
+	userID := int64(987654321)
+	username := "spammer_user"
+	text := "Hello, @spammer_user! Please, press the button below within the time amount specified, otherwise you will be kicked."
+
+	// 1. Save Shieldy Message
+	err := database.SaveShieldyMessage(chatID, 42, userID, username, text, time.Now())
+	if err != nil {
+		t.Fatalf("failed to save Shieldy message: %v", err)
+	}
+
+	// 2. Retrieve by user ID and username
+	msgs, err := database.GetShieldyMessagesForUser(chatID, userID, username)
+	if err != nil {
+		t.Fatalf("failed to get Shieldy messages for user: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 Shieldy message, got %d", len(msgs))
+	}
+	if msgs[0].MessageID != 42 || msgs[0].TargetUserID != userID || msgs[0].TargetUsername != username {
+		t.Errorf("unexpected retrieved Shieldy message: %+v", msgs[0])
+	}
+
+	// 3. Retrieve by username only
+	byName, err := database.GetShieldyMessagesForUser(chatID, 0, username)
+	if err != nil || len(byName) != 1 {
+		t.Errorf("expected 1 message by username, got %d, err: %v", len(byName), err)
+	}
+
+	// 4. Retrieve by message ID
+	single, err := database.GetShieldyMessage(chatID, 42)
+	if err != nil || single == nil {
+		t.Fatalf("failed to get single Shieldy message: %v", err)
+	}
+	if single.Text != text {
+		t.Errorf("expected text %q, got %q", text, single.Text)
+	}
+
+	// 5. Recent Shieldy messages
+	recent, err := database.GetRecentShieldyMessages(chatID, 5*time.Minute)
+	if err != nil || len(recent) != 1 {
+		t.Errorf("expected 1 recent message, got %d, err: %v", len(recent), err)
+	}
+
+	// 6. Delete single message
+	if err := database.DeleteShieldyMessage(chatID, 42); err != nil {
+		t.Fatalf("failed to delete Shieldy message: %v", err)
+	}
+	msgsAfterDel, _ := database.GetShieldyMessagesForUser(chatID, userID, username)
+	if len(msgsAfterDel) != 0 {
+		t.Errorf("expected 0 messages after delete, got %d", len(msgsAfterDel))
+	}
+
+	// 7. Delete for user
+	_ = database.SaveShieldyMessage(chatID, 43, userID, username, text, time.Now())
+	_ = database.SaveShieldyMessage(chatID, 44, userID, username, text, time.Now())
+	if err := database.DeleteShieldyMessagesForUser(chatID, userID, username); err != nil {
+		t.Fatalf("failed to delete for user: %v", err)
+	}
+	msgsAfterUserDel, _ := database.GetShieldyMessagesForUser(chatID, userID, username)
+	if len(msgsAfterUserDel) != 0 {
+		t.Errorf("expected 0 messages after DeleteShieldyMessagesForUser, got %d", len(msgsAfterUserDel))
+	}
+
+	// 8. Pruning
+	oldTime := time.Now().AddDate(0, 0, -10)
+	_ = database.SaveShieldyMessage(chatID, 45, userID, username, text, oldTime)
+	pruned, err := database.PruneOldShieldyMessages(7)
+	if err != nil {
+		t.Fatalf("failed to prune old Shieldy messages: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("expected 1 pruned message, got %d", pruned)
+	}
+}
+

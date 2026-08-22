@@ -491,6 +491,10 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, msg *db.Message, actio
 			if err := b.SendTriggerBanAlert(chatID, user, msg, act.Reason); err != nil {
 				log.Printf("[Bot Action Error] Failed to send trigger ban alert: %v", err)
 			}
+			// If kick-ban is due to user profile (not message), delete any Shieldy captcha challenge message
+			if detector.IsProfileBanReason(act.Reason) || (msg != nil && strings.HasPrefix(msg.Text, "[Trigger]:")) {
+				b.DeleteShieldyMessagesForUser(chatID, user.UserID, user.Username)
+			}
 
 		case detector.ActionAdjustReputation:
 			log.Printf("[Bot Action] Adjusting reputation for user %d by %d (reason: %s)", user.UserID, act.RepDelta, act.Reason)
@@ -536,6 +540,38 @@ func (b *Bot) EvaluateUserContext(user *db.User, profile *db.UserProfile, chatID
 		tCtx.PhotoCount = profile.PhotoCount
 	}
 	return b.Detector().Evaluate(tCtx)
+}
+
+// DeleteShieldyMessagesForUser retrieves remembered Shieldy challenge messages for a user and deletes them from Telegram.
+func (b *Bot) DeleteShieldyMessagesForUser(chatID int64, userID int64, username string) {
+	if userID == 0 && username == "" {
+		return
+	}
+
+	msgs, err := b.db.GetShieldyMessagesForUser(chatID, userID, username)
+	if err != nil {
+		log.Printf("[Shieldy Error] Failed to retrieve Shieldy messages for user %d in chat %d: %v", userID, chatID, err)
+	}
+
+	// If no exact match found and chatID != 0, check recent unassigned Shieldy messages in this chat (within last 2 minutes)
+	if len(msgs) == 0 && chatID != 0 {
+		if recent, err := b.db.GetRecentShieldyMessages(chatID, 2*time.Minute); err == nil {
+			for _, rm := range recent {
+				if rm.TargetUserID == 0 && rm.TargetUsername == "" {
+					msgs = append(msgs, rm)
+				}
+			}
+		}
+	}
+
+	for _, sm := range msgs {
+		log.Printf("[Shieldy] Deleting Shieldy challenge message %d in chat %d for banned user %d (@%s) (Reason: user profile kick/ban)",
+			sm.MessageID, sm.ChatID, userID, username)
+		if err := b.DeleteGroupMessage(sm.ChatID, sm.MessageID); err != nil {
+			log.Printf("[Shieldy Error] Failed to delete Shieldy message %d in chat %d: %v", sm.MessageID, sm.ChatID, err)
+		}
+		_ = b.db.DeleteShieldyMessage(sm.ChatID, sm.MessageID)
+	}
 }
 
 // FormatUserTriggerAlertSnippet constructs a descriptive markdown snippet for trigger ban alerts.

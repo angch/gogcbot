@@ -127,6 +127,17 @@ type UserJoin struct {
 	JoinedAt  time.Time `json:"joined_at"`
 }
 
+// ShieldyMessage represents a recorded Shieldy captcha challenge message in a chat.
+type ShieldyMessage struct {
+	ID             int64     `json:"id"`
+	ChatID         int64     `json:"chat_id"`
+	MessageID      int       `json:"message_id"`
+	TargetUserID   int64     `json:"target_user_id"`
+	TargetUsername string    `json:"target_username"`
+	Text           string    `json:"text"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 func OpenDB(dbPath string) (*DB, error) {
 	dir := filepath.Dir(dbPath)
 	if dir != "" && dir != "." {
@@ -250,6 +261,18 @@ func (d *DB) AutoMigrate() error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_user_joins_user_joined ON user_joins(user_id, joined_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_user_joins_chat_joined ON user_joins(chat_id, joined_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS shieldy_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			chat_id INTEGER NOT NULL,
+			message_id INTEGER NOT NULL,
+			target_user_id INTEGER NOT NULL DEFAULT 0,
+			target_username TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			UNIQUE(chat_id, message_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_shieldy_messages_chat_user ON shieldy_messages(chat_id, target_user_id, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_shieldy_messages_created ON shieldy_messages(created_at);`,
 	}
 
 	for _, stmt := range migrations {
@@ -370,6 +393,20 @@ func (d *DB) InitSchema() error {
 
 	CREATE INDEX IF NOT EXISTS idx_user_joins_user_joined ON user_joins(user_id, joined_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_user_joins_chat_joined ON user_joins(chat_id, joined_at DESC);
+
+	CREATE TABLE IF NOT EXISTS shieldy_messages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL,
+		message_id INTEGER NOT NULL,
+		target_user_id INTEGER NOT NULL DEFAULT 0,
+		target_username TEXT NOT NULL DEFAULT '',
+		text TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL,
+		UNIQUE(chat_id, message_id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_shieldy_messages_chat_user ON shieldy_messages(chat_id, target_user_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_shieldy_messages_created ON shieldy_messages(created_at);
 	`
 	_, err := d.Exec(schema)
 	if err != nil {
@@ -1198,6 +1235,203 @@ func (d *DB) GetUserJoinCount(userID int64) (int, error) {
 func (d *DB) PruneOldUserJoins(days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days)
 	res, err := d.Exec(`DELETE FROM user_joins WHERE joined_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// GetRecentChatJoins retrieves recent user join records in a specific chat within the specified duration.
+func (d *DB) GetRecentChatJoins(chatID int64, since time.Duration) ([]UserJoin, error) {
+	cutoff := time.Now().Add(-since)
+	rows, err := d.Query(`
+		SELECT id, user_id, chat_id, chat_title, chat_type, joined_at
+		FROM user_joins
+		WHERE chat_id = ? AND joined_at >= ?
+		ORDER BY joined_at DESC
+	`, chatID, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var joins []UserJoin
+	for rows.Next() {
+		var uj UserJoin
+		if err := rows.Scan(&uj.ID, &uj.UserID, &uj.ChatID, &uj.ChatTitle, &uj.ChatType, &uj.JoinedAt); err != nil {
+			return nil, err
+		}
+		joins = append(joins, uj)
+	}
+	return joins, nil
+}
+
+// Shieldy Message Methods
+
+// SaveShieldyMessage records or updates a Shieldy captcha challenge message in the database.
+func (d *DB) SaveShieldyMessage(chatID int64, messageID int, targetUserID int64, targetUsername string, text string, createdAt time.Time) error {
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	cleanUsername := strings.TrimPrefix(strings.TrimSpace(targetUsername), "@")
+	_, err := d.Exec(`
+		INSERT INTO shieldy_messages (chat_id, message_id, target_user_id, target_username, text, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(chat_id, message_id) DO UPDATE SET
+			target_user_id = CASE WHEN excluded.target_user_id != 0 THEN excluded.target_user_id ELSE shieldy_messages.target_user_id END,
+			target_username = CASE WHEN excluded.target_username != '' THEN excluded.target_username ELSE shieldy_messages.target_username END,
+			text = excluded.text
+	`, chatID, messageID, targetUserID, cleanUsername, text, createdAt)
+	return err
+}
+
+// GetShieldyMessagesForUser returns all remembered Shieldy captcha challenge messages for a given user.
+// If chatID != 0, it filters specifically for that chat; if chatID == 0, it returns messages across all chats.
+func (d *DB) GetShieldyMessagesForUser(chatID int64, userID int64, username string) ([]ShieldyMessage, error) {
+	cleanUsername := strings.TrimPrefix(strings.TrimSpace(username), "@")
+	var query string
+	var args []interface{}
+
+	if chatID != 0 {
+		if userID != 0 && cleanUsername != "" {
+			query = `SELECT id, chat_id, message_id, target_user_id, target_username, text, created_at
+			         FROM shieldy_messages
+			         WHERE chat_id = ? AND (target_user_id = ? OR (target_username != '' AND LOWER(target_username) = LOWER(?)))
+			         ORDER BY created_at DESC`
+			args = []interface{}{chatID, userID, cleanUsername}
+		} else if userID != 0 {
+			query = `SELECT id, chat_id, message_id, target_user_id, target_username, text, created_at
+			         FROM shieldy_messages
+			         WHERE chat_id = ? AND target_user_id = ?
+			         ORDER BY created_at DESC`
+			args = []interface{}{chatID, userID}
+		} else if cleanUsername != "" {
+			query = `SELECT id, chat_id, message_id, target_user_id, target_username, text, created_at
+			         FROM shieldy_messages
+			         WHERE chat_id = ? AND target_username != '' AND LOWER(target_username) = LOWER(?)
+			         ORDER BY created_at DESC`
+			args = []interface{}{chatID, cleanUsername}
+		} else {
+			return nil, nil
+		}
+	} else {
+		if userID != 0 && cleanUsername != "" {
+			query = `SELECT id, chat_id, message_id, target_user_id, target_username, text, created_at
+			         FROM shieldy_messages
+			         WHERE target_user_id = ? OR (target_username != '' AND LOWER(target_username) = LOWER(?))
+			         ORDER BY created_at DESC`
+			args = []interface{}{userID, cleanUsername}
+		} else if userID != 0 {
+			query = `SELECT id, chat_id, message_id, target_user_id, target_username, text, created_at
+			         FROM shieldy_messages
+			         WHERE target_user_id = ?
+			         ORDER BY created_at DESC`
+			args = []interface{}{userID}
+		} else if cleanUsername != "" {
+			query = `SELECT id, chat_id, message_id, target_user_id, target_username, text, created_at
+			         FROM shieldy_messages
+			         WHERE target_username != '' AND LOWER(target_username) = LOWER(?)
+			         ORDER BY created_at DESC`
+			args = []interface{}{cleanUsername}
+		} else {
+			return nil, nil
+		}
+	}
+
+	rows, err := d.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []ShieldyMessage
+	for rows.Next() {
+		var sm ShieldyMessage
+		if err := rows.Scan(&sm.ID, &sm.ChatID, &sm.MessageID, &sm.TargetUserID, &sm.TargetUsername, &sm.Text, &sm.CreatedAt); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, sm)
+	}
+	return msgs, nil
+}
+
+// GetRecentShieldyMessages returns recent Shieldy captcha challenge messages in a chat within the specified duration.
+func (d *DB) GetRecentShieldyMessages(chatID int64, within time.Duration) ([]ShieldyMessage, error) {
+	cutoff := time.Now().Add(-within)
+	var query string
+	var args []interface{}
+	if chatID != 0 {
+		query = `SELECT id, chat_id, message_id, target_user_id, target_username, text, created_at
+		         FROM shieldy_messages
+		         WHERE chat_id = ? AND created_at >= ?
+		         ORDER BY created_at DESC`
+		args = []interface{}{chatID, cutoff}
+	} else {
+		query = `SELECT id, chat_id, message_id, target_user_id, target_username, text, created_at
+		         FROM shieldy_messages
+		         WHERE created_at >= ?
+		         ORDER BY created_at DESC`
+		args = []interface{}{cutoff}
+	}
+
+	rows, err := d.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []ShieldyMessage
+	for rows.Next() {
+		var sm ShieldyMessage
+		if err := rows.Scan(&sm.ID, &sm.ChatID, &sm.MessageID, &sm.TargetUserID, &sm.TargetUsername, &sm.Text, &sm.CreatedAt); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, sm)
+	}
+	return msgs, nil
+}
+
+// GetShieldyMessage retrieves a specific Shieldy message by chat ID and message ID.
+func (d *DB) GetShieldyMessage(chatID int64, messageID int) (*ShieldyMessage, error) {
+	var sm ShieldyMessage
+	err := d.QueryRow(`
+		SELECT id, chat_id, message_id, target_user_id, target_username, text, created_at
+		FROM shieldy_messages
+		WHERE chat_id = ? AND message_id = ?
+	`, chatID, messageID).Scan(&sm.ID, &sm.ChatID, &sm.MessageID, &sm.TargetUserID, &sm.TargetUsername, &sm.Text, &sm.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &sm, nil
+}
+
+// DeleteShieldyMessage removes a single Shieldy message from the database.
+func (d *DB) DeleteShieldyMessage(chatID int64, messageID int) error {
+	_, err := d.Exec(`DELETE FROM shieldy_messages WHERE chat_id = ? AND message_id = ?`, chatID, messageID)
+	return err
+}
+
+// DeleteShieldyMessagesForUser removes all remembered Shieldy messages for a given user.
+func (d *DB) DeleteShieldyMessagesForUser(chatID int64, userID int64, username string) error {
+	cleanUsername := strings.TrimPrefix(strings.TrimSpace(username), "@")
+	if chatID != 0 {
+		_, err := d.Exec(`
+			DELETE FROM shieldy_messages 
+			WHERE chat_id = ? AND (target_user_id = ? OR (target_username != '' AND LOWER(target_username) = LOWER(?)))
+		`, chatID, userID, cleanUsername)
+		return err
+	}
+	_, err := d.Exec(`
+		DELETE FROM shieldy_messages 
+		WHERE target_user_id = ? OR (target_username != '' AND LOWER(target_username) = LOWER(?))
+	`, userID, cleanUsername)
+	return err
+}
+
+// PruneOldShieldyMessages deletes Shieldy messages older than retentionDays.
+func (d *DB) PruneOldShieldyMessages(days int) (int64, error) {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	res, err := d.Exec(`DELETE FROM shieldy_messages WHERE created_at < ?`, cutoff)
 	if err != nil {
 		return 0, err
 	}

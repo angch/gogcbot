@@ -2445,3 +2445,120 @@ func TestBot_ValidateRulesAgainstHighRepUsers(t *testing.T) {
 			len(violations), detector.FormatRuleMatchViolations(violations))
 	}
 }
+
+func TestHandleMessage_ShieldyChallengeMessage_Remembered(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	chatID := int64(-10012345)
+	targetUserID := int64(6000000001)
+	targetUsername := "newbie_joiner"
+
+	_, _, _ = b.db.GetOrCreateUser(targetUserID, targetUsername, "Newbie", "Joiner", 0)
+
+	// Simulate Shieldy bot sending captcha challenge message with text mention
+	msg := &tgbotapi.Message{
+		MessageID: 555,
+		Date:      int(time.Now().Unix()),
+		Chat:      &tgbotapi.Chat{ID: chatID, Type: "supergroup", Title: "Test Group"},
+		From:      &tgbotapi.User{ID: 111222, UserName: "shieldy_bot", IsBot: true},
+		Text:      fmt.Sprintf("Hello, @%s! Please, press the button below within the time amount specified, otherwise you will be kicked.", targetUsername),
+		Entities: []tgbotapi.MessageEntity{
+			{
+				Type:   "mention",
+				Offset: 7,
+				Length: len(targetUsername) + 1,
+			},
+		},
+	}
+
+	b.handleMessage(msg)
+
+	// Verify Shieldy message was remembered in SQLite
+	msgs, err := b.db.GetShieldyMessagesForUser(chatID, targetUserID, targetUsername)
+	if err != nil {
+		t.Fatalf("failed to retrieve Shieldy messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 remembered Shieldy message, got %d", len(msgs))
+	}
+	if msgs[0].MessageID != 555 || msgs[0].TargetUserID != targetUserID {
+		t.Errorf("unexpected remembered Shieldy message: %+v", msgs[0])
+	}
+}
+
+func TestHandleMessage_ShieldyChallengeMessage_DeletedIfUserAlreadyBanned(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	chatID := int64(-10012345)
+	targetUserID := int64(6000000002)
+	targetUsername := "banned_spammer"
+
+	_, _, _ = b.db.GetOrCreateUser(targetUserID, targetUsername, "Banned", "Spammer", 0)
+	_ = b.db.SetUserBanned(targetUserID, true)
+
+	// Shieldy message arrives AFTER user was already banned
+	msg := &tgbotapi.Message{
+		MessageID: 556,
+		Date:      int(time.Now().Unix()),
+		Chat:      &tgbotapi.Chat{ID: chatID, Type: "supergroup", Title: "Test Group"},
+		From:      &tgbotapi.User{ID: 111222, UserName: "shieldy_bot", IsBot: true},
+		Text:      fmt.Sprintf("Hello, @%s! Please, press the button below within the time amount specified, otherwise you will be kicked.", targetUsername),
+		Entities: []tgbotapi.MessageEntity{
+			{
+				Type:   "mention",
+				Offset: 7,
+				Length: len(targetUsername) + 1,
+			},
+		},
+	}
+
+	b.handleMessage(msg)
+
+	// Since user is already banned, message should be immediately deleted and NOT kept in DB
+	msgs, _ := b.db.GetShieldyMessagesForUser(chatID, targetUserID, targetUsername)
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 Shieldy messages for already banned user, got %d", len(msgs))
+	}
+}
+
+func TestDeleteShieldyMessage_OnProfileKickBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	chatID := int64(-10012345)
+	targetUserID := int64(6000000003)
+	targetUsername := "bio_spammer"
+
+	user, _, _ := b.db.GetOrCreateUser(targetUserID, targetUsername, "Bio", "Spammer", 0)
+
+	// Remember Shieldy message
+	shieldyText := fmt.Sprintf("Hello, @%s! Please, press the button below within the time amount specified, otherwise you will be kicked.", targetUsername)
+	_ = b.db.SaveShieldyMessage(chatID, 557, targetUserID, targetUsername, shieldyText, time.Now())
+
+	// Execute ActionBanUser with profile reason
+	actions := []detector.Action{
+		{
+			Type:   detector.ActionBanUser,
+			Reason: "Detection trigger (new_user_spam_bio): matched spam bio keyword",
+		},
+	}
+
+	alertMsg := &db.Message{
+		ChatID:    chatID,
+		MessageID: 0,
+		UserID:    targetUserID,
+		Text:      "[Trigger]: new_user_spam_bio",
+		CreatedAt: time.Now(),
+	}
+
+	b.ExecuteActions(chatID, user, alertMsg, actions)
+
+	// Verify Shieldy message was deleted from DB
+	msgs, _ := b.db.GetShieldyMessagesForUser(chatID, targetUserID, targetUsername)
+	if len(msgs) != 0 {
+		t.Errorf("expected Shieldy message to be deleted after profile kick/ban, got %d", len(msgs))
+	}
+}
+

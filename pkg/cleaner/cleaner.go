@@ -38,6 +38,9 @@ func (c *RetentionCleaner) RunOnce() (oldPruned int64, userPruned int64, err err
 		return oldPruned, 0, err
 	}
 
+	_, _ = c.db.PruneOldShieldyMessages(c.retentionDays)
+	_, _ = c.db.PruneOldUserJoins(c.retentionDays)
+
 	return oldPruned, userPruned, nil
 }
 

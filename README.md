@@ -30,6 +30,8 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
 
 3. **Shieldy Bot Verification & Ban Protection**:
    - Seamlessly integrates with Shieldy captcha bot: when a new user's initial messages match `"I am not a bot"`, they receive **+5 reputation** points.
+   - Automatically tracks and remembers Shieldy captcha challenge messages (`"please, press the button below within the time amount specified, otherwise you will be kicked."`).
+   - If a user is kick-banned due to their profile (e.g. spam bio, blacklist keyword, anomalous username, or existing ban), the bot automatically retrieves and deletes the corresponding Shieldy challenge message from the group to keep the chat clean.
    - Automatically exempts verified users and `"I am not a bot"` messages from triggering the High-ID CJK spam detection trigger.
    - Automatically schedules a **6-minute delayed re-check** upon issuing bans to detect if Shieldy or Telegram altered a permanent ban into a temporary timed ban, re-issuing permanent bans if necessary.
 

@@ -3,6 +3,7 @@ package bot
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/angch/gogcbot/pkg/detector"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
+
+var shieldyUsernameRegex = regexp.MustCompile(`@([a-zA-Z0-9_]{4,})`)
 
 func (b *Bot) handleUpdate(update tgbotapi.Update) {
 	if update.CallbackQuery != nil {
@@ -111,15 +114,23 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Ignore messages from bots themselves
-	if msg.From.IsBot {
-		return
-	}
-
 	chat := msg.Chat
 	// If message is in a supergroup/group/channel, track the group
 	if chat.IsGroup() || chat.IsSuperGroup() || chat.IsChannel() {
 		_ = b.db.SaveGroup(chat.ID, chat.Title, chat.Type)
+	}
+
+	text := extractMessageText(msg)
+
+	// Check if message is a Shieldy captcha challenge message
+	if detector.IsShieldyChallengeText(text) {
+		b.handleShieldyChallengeMessage(msg, text)
+		return
+	}
+
+	// Ignore messages from other bots themselves
+	if msg.From.IsBot {
+		return
 	}
 
 	// Get or create user profile
@@ -195,8 +206,6 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	// Detect links & media
 	hasMedia := msg.Photo != nil || msg.Video != nil || msg.Document != nil || msg.Audio != nil || msg.Animation != nil || msg.Sticker != nil || msg.Voice != nil || msg.VideoNote != nil
 	hasLinks := containsLinks(msg)
-
-	text := extractMessageText(msg)
 
 	groupName := chat.Title
 	if groupName == "" {
@@ -616,6 +625,7 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle, chatType string, tgUser
 		if joinMsg != nil {
 			_ = b.DeleteGroupMessage(chatID, joinMsg.MessageID)
 		}
+		b.DeleteShieldyMessagesForUser(chatID, user.UserID, user.Username)
 		_ = b.BanUserInGroup(chatID, user.UserID)
 		return
 	}
@@ -647,6 +657,9 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle, chatType string, tgUser
 				_ = b.DeleteGroupMessage(chatID, joinMsg.MessageID)
 			}
 
+			// Clean up any Shieldy challenge messages for this banned user on join
+			b.DeleteShieldyMessagesForUser(chatID, user.UserID, user.Username)
+
 			msgID := 0
 			if joinMsg != nil {
 				msgID = joinMsg.MessageID
@@ -663,4 +676,93 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle, chatType string, tgUser
 			return
 		}
 	}
+}
+
+func (b *Bot) handleShieldyChallengeMessage(msg *tgbotapi.Message, text string) {
+	if msg == nil || msg.Chat == nil {
+		return
+	}
+
+	targetUserID, targetUsername := b.ExtractTargetUserFromShieldyMessage(msg)
+	log.Printf("[Shieldy] Remembered Shieldy challenge message ID %d in chat %d (%s) (Target: User %d, @%s): %q",
+		msg.MessageID, msg.Chat.ID, msg.Chat.Title, targetUserID, targetUsername, text)
+
+	_ = b.db.SaveShieldyMessage(msg.Chat.ID, msg.MessageID, targetUserID, targetUsername, text, msg.Time())
+
+	// If the target user was already banned (e.g. banned on join due to profile triggers),
+	// immediately delete the redundant Shieldy challenge message.
+	if targetUserID != 0 {
+		if u, err := b.db.GetUserByID(targetUserID); err == nil && u != nil && u.IsBanned {
+			log.Printf("[Shieldy] Target user %d is already banned (profile kick/ban). Immediately deleting Shieldy message %d in chat %d...",
+				targetUserID, msg.MessageID, msg.Chat.ID)
+			_ = b.DeleteGroupMessage(msg.Chat.ID, msg.MessageID)
+			_ = b.db.DeleteShieldyMessage(msg.Chat.ID, msg.MessageID)
+			return
+		}
+	}
+	if targetUsername != "" {
+		if u, err := b.db.GetUserByUsername(targetUsername); err == nil && u != nil && u.IsBanned {
+			log.Printf("[Shieldy] Target user @%s (ID %d) is already banned (profile kick/ban). Immediately deleting Shieldy message %d in chat %d...",
+				targetUsername, u.UserID, msg.MessageID, msg.Chat.ID)
+			_ = b.DeleteGroupMessage(msg.Chat.ID, msg.MessageID)
+			_ = b.db.DeleteShieldyMessage(msg.Chat.ID, msg.MessageID)
+			return
+		}
+	}
+}
+
+// ExtractTargetUserFromShieldyMessage extracts target user details (ID, username) from a Shieldy challenge message.
+func (b *Bot) ExtractTargetUserFromShieldyMessage(msg *tgbotapi.Message) (targetUserID int64, targetUsername string) {
+	if msg == nil {
+		return 0, ""
+	}
+
+	// 1. Check message entities for text mentions or username mentions
+	for _, ent := range msg.Entities {
+		if ent.Type == "text_mention" && ent.User != nil {
+			targetUserID = ent.User.ID
+			targetUsername = ent.User.UserName
+			return targetUserID, targetUsername
+		}
+		if ent.Type == "mention" && len(msg.Text) >= ent.Offset+ent.Length {
+			mentionText := msg.Text[ent.Offset : ent.Offset+ent.Length]
+			targetUsername = strings.TrimPrefix(mentionText, "@")
+			if u, err := b.db.GetUserByUsername(targetUsername); err == nil && u != nil {
+				targetUserID = u.UserID
+				return targetUserID, targetUsername
+			}
+		}
+	}
+
+	// 2. Check reply to message
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil && !msg.ReplyToMessage.From.IsBot {
+		targetUserID = msg.ReplyToMessage.From.ID
+		targetUsername = msg.ReplyToMessage.From.UserName
+		return targetUserID, targetUsername
+	}
+
+	// 3. Regex match for @username in text
+	text := msg.Text
+	if text == "" && msg.Caption != "" {
+		text = msg.Caption
+	}
+	if matches := shieldyUsernameRegex.FindStringSubmatch(text); len(matches) > 1 {
+		targetUsername = matches[1]
+		if u, err := b.db.GetUserByUsername(targetUsername); err == nil && u != nil {
+			targetUserID = u.UserID
+			return targetUserID, targetUsername
+		}
+	}
+
+	// 4. Fallback: Check recent user join in this chat (within last 3 minutes)
+	if msg.Chat != nil && msg.Chat.ID != 0 {
+		if recentJoins, err := b.db.GetRecentChatJoins(msg.Chat.ID, 3*time.Minute); err == nil && len(recentJoins) > 0 {
+			targetUserID = recentJoins[0].UserID
+			if u, err := b.db.GetUserByID(targetUserID); err == nil && u != nil {
+				targetUsername = u.Username
+			}
+		}
+	}
+
+	return targetUserID, targetUsername
 }
