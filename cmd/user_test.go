@@ -56,7 +56,10 @@ func TestUserCmd(t *testing.T) {
 	_ = database.LogUserJoin(spammerID, -100999, "Spam Target Group", "supergroup")
 
 	_, _ = database.AdjustReputation(spammerID, -20, "Detection trigger (new_user_spam_bio)", 0)
-	fp, _ := database.CreateFlaggedPost(-100999, 42, spammerID, "Spam bio detected")
+	fp, err := database.CreateFlaggedPost(-100999, 42, spammerID, "Spam bio detected")
+	if err != nil || fp == nil {
+		t.Fatalf("failed to create flagged post: %v", err)
+	}
 	_ = database.ResolveFlaggedPost(fp.ID, "banned", 0)
 	_ = database.SetUserBanned(spammerID, true)
 

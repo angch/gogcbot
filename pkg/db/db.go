@@ -1689,7 +1689,7 @@ type UserReportOptions struct {
 }
 
 // GetUserDirectoryReport retrieves and classifies all known users into good and bad users with rich metadata.
-func (d *DB) GetUserDirectoryReport(superAdminID int64) (goodUsers []UserReportItem, badUsers []UserReportItem, err error) {
+func (d *DB) GetUserDirectoryReport(superAdminID int64) ([]UserReportItem, []UserReportItem, error) {
 	// 1. Fetch all users
 	rows, err := d.Query(`
 		SELECT user_id, username, first_name, last_name, reputation, warn_count, is_banned, is_admin, created_at, updated_at
@@ -1700,6 +1700,9 @@ func (d *DB) GetUserDirectoryReport(superAdminID int64) (goodUsers []UserReportI
 		return nil, nil, fmt.Errorf("failed to query users: %w", err)
 	}
 	defer rows.Close()
+
+	goodUsers := make([]UserReportItem, 0)
+	badUsers := make([]UserReportItem, 0)
 
 	var allUsers []User
 	userMap := make(map[int64]*User)

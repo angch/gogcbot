@@ -318,6 +318,9 @@ func truncateText(text string, maxLen int) string {
 // SendTriggerBanAlert sends a notification message to the management monitoring channel (b.cfg.ModerationGroupID)
 // whenever a user ban is triggered by an automated detection trigger.
 func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, msg *db.Message, reason string) error {
+	if user == nil {
+		return nil
+	}
 	modGroupID := b.cfg.ModerationGroupID
 	if modGroupID == 0 {
 		log.Printf("[Bot] Warning: ModerationGroupID not set. Cannot send trigger ban alert for user %d in chat %d", user.UserID, chatID)
@@ -409,6 +412,9 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, msg *db.Message, 
 // SendFirstEmptyMessageInfo sends a silent informational message to the moderation channel
 // when a brand new user's first recorded message is empty.
 func (b *Bot) SendFirstEmptyMessageInfo(chatID int64, msg *db.Message, user *db.User, groupTitle string) error {
+	if user == nil || msg == nil {
+		return nil
+	}
 	modGroupID := b.cfg.ModerationGroupID
 	if modGroupID == 0 {
 		return nil
@@ -463,7 +469,7 @@ func (b *Bot) SendFirstEmptyMessageInfo(chatID int64, msg *db.Message, user *db.
 
 // ExecuteActions executes a set of actions returned by detection triggers against a chat message and user.
 func (b *Bot) ExecuteActions(chatID int64, user *db.User, msg *db.Message, actions []detector.Action) {
-	if msg == nil {
+	if msg == nil || user == nil {
 		return
 	}
 	messageID := msg.MessageID

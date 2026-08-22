@@ -77,7 +77,7 @@ func NewBot(cfg *config.Config, database *db.DB) (*Bot, error) {
 		}
 	}
 
-	if err != nil {
+	if err != nil || api == nil {
 		return nil, fmt.Errorf("failed to authenticate Telegram Bot API after %d attempts: %w\n-> Action: Check your Telegram Bot Token with @BotFather and ensure active internet connectivity", maxLoginRetries, err)
 	}
 

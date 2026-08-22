@@ -15,6 +15,9 @@ import (
 )
 
 func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
+	if msg == nil || user == nil {
+		return
+	}
 	cmd, args := parseCommand(msg)
 	if cmd == "" {
 		return

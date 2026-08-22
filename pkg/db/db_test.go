@@ -1090,7 +1090,10 @@ func TestGetUserFullDump(t *testing.T) {
 	})
 
 	_, _ = database.AdjustReputation(userID, -20, "Spam detected", 0)
-	fp, _ := database.CreateFlaggedPost(-1001, 10, userID, "Spam message")
+	fp, err := database.CreateFlaggedPost(-1001, 10, userID, "Spam message")
+	if err != nil || fp == nil {
+		t.Fatalf("failed to create flagged post: %v", err)
+	}
 	_ = database.ResolveFlaggedPost(fp.ID, "banned", 0)
 
 	// 1. Search by @username

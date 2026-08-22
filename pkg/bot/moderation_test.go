@@ -99,7 +99,10 @@ func TestSendTriggerBanAlert(t *testing.T) {
 	b, cleanup := setupTestBot(t)
 	defer cleanup()
 
-	user, _, _ := b.db.GetOrCreateUser(998877, "spammer", "Spam", "User", 0)
+	user, _, err := b.db.GetOrCreateUser(998877, "spammer", "Spam", "User", 0)
+	if err != nil || user == nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
 	msg := &db.Message{
 		ChatID:    -1001,
 		MessageID: 42,
@@ -135,7 +138,10 @@ func TestExecuteActions_BanUser(t *testing.T) {
 	defer cleanup()
 
 	b.cfg.ModerationGroupID = -100998877
-	user, _, _ := b.db.GetOrCreateUser(112233, "badactor", "Bad", "Actor", 0)
+	user, _, err := b.db.GetOrCreateUser(112233, "badactor", "Bad", "Actor", 0)
+	if err != nil || user == nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
 	msg := &db.Message{
 		ChatID:    -1001,
 		MessageID: 101,
@@ -161,7 +167,10 @@ func TestSendFirstEmptyMessageInfo(t *testing.T) {
 	b, cleanup := setupTestBot(t)
 	defer cleanup()
 
-	user, _, _ := b.db.GetOrCreateUser(334455, "emptyuser", "Empty", "User", 0)
+	user, _, err := b.db.GetOrCreateUser(334455, "emptyuser", "Empty", "User", 0)
+	if err != nil || user == nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
 	msg := &db.Message{
 		ChatID:    -1001,
 		MessageID: 10,
@@ -1483,7 +1492,10 @@ func TestSendPrivateMessageMirror_ModGroupIDZero(t *testing.T) {
 	defer cleanup()
 
 	b.cfg.ModerationGroupID = 0
-	user, _, _ := b.db.GetOrCreateUser(123456, "pmuser", "PM", "User", 0)
+	user, _, err := b.db.GetOrCreateUser(123456, "pmuser", "PM", "User", 0)
+	if err != nil || user == nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
 
 	msg := &tgbotapi.Message{
 		MessageID: 55,
@@ -1527,7 +1539,10 @@ func TestSendPrivateMessageMirror_Success(t *testing.T) {
 	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
 		return tgbotapi.ChatMember{Status: "left"}, nil
 	})
-	user, _, _ := b.db.GetOrCreateUser(234567, "tester", "Test", "User", 10)
+	user, _, err := b.db.GetOrCreateUser(234567, "tester", "Test", "User", 10)
+	if err != nil || user == nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
 
 	// Sub-test 1: Regular text message
 	msg1 := &tgbotapi.Message{
@@ -1874,7 +1889,10 @@ func TestSendPrivateMessageMirror_KnownBotAdminSkipped(t *testing.T) {
 	}
 
 	// Case 2: Promoted Bot Admin (IsAdmin == true)
-	botAdmin, _, _ := b.db.GetOrCreateUser(22222, "botadmin", "Bot", "Admin", 100)
+	botAdmin, _, err := b.db.GetOrCreateUser(22222, "botadmin", "Bot", "Admin", 100)
+	if err != nil || botAdmin == nil {
+		t.Fatalf("failed to create bot admin: %v", err)
+	}
 	_ = b.db.SetUserAdmin(22222, true)
 	botAdmin.IsAdmin = true
 	msg2 := &tgbotapi.Message{
@@ -1889,7 +1907,10 @@ func TestSendPrivateMessageMirror_KnownBotAdminSkipped(t *testing.T) {
 	}
 
 	// Case 3: Mod Group Member
-	modMember, _, _ := b.db.GetOrCreateUser(33333, "modmember", "Mod", "Member", 50)
+	modMember, _, err := b.db.GetOrCreateUser(33333, "modmember", "Mod", "Member", 50)
+	if err != nil || modMember == nil {
+		t.Fatalf("failed to create mod member: %v", err)
+	}
 	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
 		if config.UserID == 33333 {
 			return tgbotapi.ChatMember{Status: "member"}, nil
@@ -1908,7 +1929,10 @@ func TestSendPrivateMessageMirror_KnownBotAdminSkipped(t *testing.T) {
 	}
 
 	// Case 4: Regular non-admin user (should be mirrored)
-	regularUser, _, _ := b.db.GetOrCreateUser(44444, "regular", "Regular", "User", 10)
+	regularUser, _, err := b.db.GetOrCreateUser(44444, "regular", "Regular", "User", 10)
+	if err != nil || regularUser == nil {
+		t.Fatalf("failed to create regular user: %v", err)
+	}
 	msg4 := &tgbotapi.Message{
 		MessageID: 304,
 		Chat:      &tgbotapi.Chat{ID: 44444, Type: "private"},
@@ -1928,7 +1952,10 @@ func TestHandleMessage_PrivateMessage_BotAdmin_SkippedFromMirroring(t *testing.T
 	b.cfg.ModerationGroupID = -100998877
 	b.cfg.SuperAdminID = 55555
 
-	adminUser, _, _ := b.db.GetOrCreateUser(55555, "superadmin", "Super", "Admin", 100)
+	adminUser, _, err := b.db.GetOrCreateUser(55555, "superadmin", "Super", "Admin", 100)
+	if err != nil || adminUser == nil {
+		t.Fatalf("failed to create admin user: %v", err)
+	}
 
 	msg := &tgbotapi.Message{
 		MessageID: 401,

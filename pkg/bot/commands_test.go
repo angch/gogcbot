@@ -514,8 +514,14 @@ func TestCmdFetchProfile(t *testing.T) {
 	superAdminID := int64(111222)
 	b.cfg.SuperAdminID = superAdminID
 
-	user, _, _ := b.db.GetOrCreateUser(superAdminID, "superadmin", "Super", "Admin", 100)
-	targetUser, _, _ := b.db.GetOrCreateUser(333444, "target", "Target", "User", 50)
+	user, _, err := b.db.GetOrCreateUser(superAdminID, "superadmin", "Super", "Admin", 100)
+	if err != nil || user == nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	targetUser, _, err := b.db.GetOrCreateUser(333444, "target", "Target", "User", 50)
+	if err != nil || targetUser == nil {
+		t.Fatalf("failed to create target user: %v", err)
+	}
 
 	msg := &tgbotapi.Message{
 		MessageID: 10,
@@ -709,10 +715,16 @@ func TestCmdListSpamBios(t *testing.T) {
 	superAdminID := int64(111222)
 	b.cfg.SuperAdminID = superAdminID
 
-	adminUser, _, _ := b.db.GetOrCreateUser(superAdminID, "superadmin", "Super", "Admin", 100)
+	adminUser, _, err := b.db.GetOrCreateUser(superAdminID, "superadmin", "Super", "Admin", 100)
+	if err != nil || adminUser == nil {
+		t.Fatalf("failed to create admin user: %v", err)
+	}
 
 	// Create an unbanned user with exact spam bio
-	targetUser, _, _ := b.db.GetOrCreateUser(888999, "spambot", "Spam", "Bot", 0)
+	targetUser, _, err := b.db.GetOrCreateUser(888999, "spambot", "Spam", "Bot", 0)
+	if err != nil || targetUser == nil {
+		t.Fatalf("failed to create target user: %v", err)
+	}
 	_ = b.db.SaveUserProfile(&db.UserProfile{
 		UserID:     targetUser.UserID,
 		Username:   "spambot",
@@ -917,8 +929,14 @@ func TestCmdUserInfo_WithJoins(t *testing.T) {
 	superAdminID := int64(111222)
 	b.cfg.SuperAdminID = superAdminID
 
-	adminUser, _, _ := b.db.GetOrCreateUser(superAdminID, "superadmin", "Super", "Admin", 100)
-	targetUser, _, _ := b.db.GetOrCreateUser(333444, "bob", "Bob", "Builder", 80)
+	adminUser, _, err := b.db.GetOrCreateUser(superAdminID, "superadmin", "Super", "Admin", 100)
+	if err != nil || adminUser == nil {
+		t.Fatalf("failed to create admin user: %v", err)
+	}
+	targetUser, _, err := b.db.GetOrCreateUser(333444, "bob", "Bob", "Builder", 80)
+	if err != nil || targetUser == nil {
+		t.Fatalf("failed to create target user: %v", err)
+	}
 
 	// Case 1: No joins recorded yet
 	msg1 := &tgbotapi.Message{
