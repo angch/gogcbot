@@ -130,7 +130,7 @@ func DefaultConfig() Config {
 				MaxReputation: 5,
 				MaxUserPosts:  5,
 				MinScore:      3,
-				FlagOnly:      true,
+				FlagOnly:      false,
 				RepPenalty:    20,
 			},
 			ProfileNameKeywordBan: detector.ProfileNameKeywordBanConfig{
@@ -237,7 +237,7 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.username_anomaly.max_reputation", 5)
 	v.SetDefault("detector.username_anomaly.max_user_posts", 5)
 	v.SetDefault("detector.username_anomaly.min_score", 3)
-	v.SetDefault("detector.username_anomaly.flag_only", true)
+	v.SetDefault("detector.username_anomaly.flag_only", false)
 	v.SetDefault("detector.username_anomaly.rep_penalty", 20)
 
 	v.SetDefault("detector.profile_name_keyword_ban.enabled", true)

@@ -80,7 +80,7 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
 
 11. **Auto-Generated Username Anomaly Detection (`username_anomaly`)**:
     - **Algorithmic Handle Scoring**: Detects automated/farmed Telegram handles for new high-ID users using mixed-case patterns, interleaved digit sequences (e.g. `nykrr_v9cl2t`), and Shannon entropy gated with low vowel ratios (e.g. `qtdulcljcptk6950`).
-    - Configurable score thresholds (`min_score: 3`) and `flag_only` mode.
+    - **Instant Kickban & Message Cleanup**: Immediately deletes messages, permanently bans the user across all monitored groups, deducts reputation points (-20), and dispatches a trigger ban notification instead of asking moderators. Configurable score thresholds (`min_score: 3`) and optional `flag_only` mode.
 
 12. **Profile Name Spam Keyword Ban (`profile_name_keyword_ban`)**:
     - **Homoglyph Normalization**: Folds visually confusable digits and letters (`o/O/零/〇 -> 0`, `l/L -> 1`) to catch evasive name variations (e.g. `六o0壹天` or `玖Oo壹天` hitting `0壹天`).

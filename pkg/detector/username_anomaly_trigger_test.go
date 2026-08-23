@@ -109,7 +109,7 @@ func TestUsernameAnomalyTrigger_Evaluate(t *testing.T) {
 		MaxReputation: 5,
 		MaxUserPosts:  5,
 		MinScore:      3,
-		FlagOnly:      true,
+		FlagOnly:      false,
 	}
 	trig := NewUsernameAnomalyTrigger(cfg)
 
@@ -178,11 +178,54 @@ func TestUsernameAnomalyTrigger_Evaluate(t *testing.T) {
 			if res.Triggered != tt.wantTriggered {
 				t.Fatalf("Triggered = %v, want %v (reason: %s)", res.Triggered, tt.wantTriggered, res.Reason)
 			}
-			// FlagOnly should emit exactly one action: flag_message.
-			if res.Triggered && (len(res.Actions) != 1 || res.Actions[0].Type != ActionFlagMessage) {
-				t.Errorf("FlagOnly actions wrong: %#v", res.Actions)
+			// Default mode (immediate kickban) should emit 3 actions: delete, ban, adjust reputation.
+			if res.Triggered {
+				if len(res.Actions) != 3 {
+					t.Fatalf("Kickban actions count wrong: got %d, want 3 (%#v)", len(res.Actions), res.Actions)
+				}
+				var hasDelete, hasBan, hasRep bool
+				for _, a := range res.Actions {
+					switch a.Type {
+					case ActionDeleteMessage:
+						hasDelete = true
+					case ActionBanUser:
+						hasBan = true
+					case ActionAdjustReputation:
+						hasRep = true
+					case ActionFlagMessage:
+						t.Errorf("Kickban mode should not emit ActionFlagMessage")
+					}
+				}
+				if !hasDelete || !hasBan || !hasRep {
+					t.Errorf("Kickban actions incomplete: %#v", res.Actions)
+				}
 			}
 		})
+	}
+}
+
+func TestUsernameAnomalyTrigger_FlagOnlyMode(t *testing.T) {
+	cfg := UsernameAnomalyTriggerConfig{
+		Enabled:       true,
+		MinHighUserID: 1000000000,
+		MaxReputation: 5,
+		MaxUserPosts:  5,
+		MinScore:      3,
+		FlagOnly:      true,
+	}
+	trig := NewUsernameAnomalyTrigger(cfg)
+	res, err := trig.Evaluate(&TriggerContext{
+		IsNewUser: true,
+		User:      &db.User{UserID: 5000000000, Reputation: 0, Username: "UCRkGpqBYfNI"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Triggered {
+		t.Fatal("expected trigger in flag-only mode")
+	}
+	if len(res.Actions) != 1 || res.Actions[0].Type != ActionFlagMessage {
+		t.Fatalf("FlagOnly mode should emit exactly 1 flag_message action, got %#v", res.Actions)
 	}
 }
 
@@ -205,7 +248,7 @@ func TestUsernameAnomalyTrigger_BanMode(t *testing.T) {
 		MinHighUserID: 1000000000,
 		MaxUserPosts:  5,
 		MinScore:      3,
-		FlagOnly:      false, // ban mode
+		FlagOnly:      false, // kickban mode
 	}
 	trig := NewUsernameAnomalyTrigger(cfg)
 	res, err := trig.Evaluate(&TriggerContext{
@@ -218,8 +261,8 @@ func TestUsernameAnomalyTrigger_BanMode(t *testing.T) {
 	if !res.Triggered {
 		t.Fatal("expected trigger in ban mode")
 	}
-	if len(res.Actions) != 4 {
-		t.Fatalf("ban mode should emit 4 actions, got %d", len(res.Actions))
+	if len(res.Actions) != 3 {
+		t.Fatalf("ban mode should emit 3 actions, got %d", len(res.Actions))
 	}
 	var hasDelete, hasBan, hasRep, hasFlag bool
 	for _, a := range res.Actions {
@@ -234,7 +277,10 @@ func TestUsernameAnomalyTrigger_BanMode(t *testing.T) {
 			hasFlag = true
 		}
 	}
-	if !hasDelete || !hasBan || !hasRep || !hasFlag {
+	if !hasDelete || !hasBan || !hasRep {
 		t.Errorf("ban mode actions incomplete: %#v", res.Actions)
+	}
+	if hasFlag {
+		t.Errorf("ban mode should not emit ActionFlagMessage")
 	}
 }

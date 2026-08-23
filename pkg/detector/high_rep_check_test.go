@@ -64,7 +64,7 @@ func buildStandardTestDetector() *Detector {
 			MaxReputation: 5,
 			MaxUserPosts:  5,
 			MinScore:      3,
-			FlagOnly:      true,
+			FlagOnly:      false,
 			RepPenalty:    20,
 		}),
 		NewProfileNameKeywordBanTrigger(ProfileNameKeywordBanConfig{

@@ -16,7 +16,7 @@ type UsernameAnomalyTriggerConfig struct {
 	// See UsernameAnomalyScore. Default 3.
 	MinScore int `mapstructure:"min_score" yaml:"min_score"`
 	// FlagOnly emits only a flag/report action instead of auto-banning.
-	// Recommended true until the rule is battle-tested.
+	// Default false (immediate kickban).
 	FlagOnly   bool `mapstructure:"flag_only" yaml:"flag_only"`
 	RepPenalty int  `mapstructure:"rep_penalty" yaml:"rep_penalty"`
 }
@@ -71,18 +71,30 @@ func (t *UsernameAnomalyTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, 
 
 	reason := "Detection trigger (username_anomaly): High-ID new user with low/no rep has an auto-generated style username"
 
-	actions := []Action{
-		{
-			Type:   ActionFlagMessage,
-			Reason: reason,
-		},
-	}
-	if !t.cfg.FlagOnly {
-		actions = append(actions,
-			Action{Type: ActionDeleteMessage, Reason: reason},
-			Action{Type: ActionBanUser, Reason: reason},
-			Action{Type: ActionAdjustReputation, RepDelta: -repPenalty, Reason: reason},
-		)
+	var actions []Action
+	if t.cfg.FlagOnly {
+		actions = []Action{
+			{
+				Type:   ActionFlagMessage,
+				Reason: reason,
+			},
+		}
+	} else {
+		actions = []Action{
+			{
+				Type:   ActionDeleteMessage,
+				Reason: reason,
+			},
+			{
+				Type:   ActionBanUser,
+				Reason: reason,
+			},
+			{
+				Type:     ActionAdjustReputation,
+				RepDelta: -repPenalty,
+				Reason:   reason,
+			},
+		}
 	}
 
 	return &TriggerResult{
