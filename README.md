@@ -88,7 +88,7 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
 
 13. **Primary & Secondary Group Hierarchy & Cross-Group Join Rule (`secondary_group_not_in_primary`)**:
     - **Primary vs. Secondary Groups**: Categorizes monitored Telegram groups into Primary Groups (`is_primary = true`) and Secondary Groups (`is_primary = false`).
-    - **Cross-Group Membership Gate on Join**: When a user joins any secondary group, the bot checks if they are currently an active member in the primary group(s). If they are not a member of the primary group, the bot immediately:
+    - **Cross-Group Membership Gate on Join, Message & Rescan**: When a user joins any secondary group, sends a message in a secondary group, or is audited during user rescans (`/rescanusers` or `gogcbot rescan-users`), the bot checks if they are currently an active member in the primary group(s). If they are not a member of the primary group, the bot immediately:
       - Issues a permanent ban across **all** monitored channels and groups (`BanUserAcrossAllGroups`).
       - Deletes the join service message and any Shieldy captcha challenges.
       - Deducts reputation points (-20).
