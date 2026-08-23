@@ -1469,22 +1469,69 @@ func TestCmdRescanUsers_TelegramCommand(t *testing.T) {
 
 	adminUser, _, _ := b.db.GetOrCreateUser(adminID, "admin", "Admin", "User", 100)
 
-	msg := &tgbotapi.Message{
-		MessageID: 101,
-		Chat: &tgbotapi.Chat{
-			ID:    b.cfg.ModerationGroupID,
-			Title: "Mod Group",
-			Type:  "supergroup",
-		},
-		From: &tgbotapi.User{
-			ID:       adminID,
-			UserName: "admin",
-		},
-		Text: "/rescanusers force dryrun",
-	}
+	spammerID := int64(888111222)
+	_, _, _ = b.db.GetOrCreateUser(spammerID, "rescan_target", "Spammer", "", 0)
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:    spammerID,
+		Username:  "rescan_target",
+		FirstName: "Spammer",
+		Bio:       "兼职代发 6折加油卡 沃尔玛卡",
+		FetchedAt: time.Now().Add(-30 * time.Hour),
+	})
 
-	// Should execute without panic or error
-	b.handleCommand(msg, adminUser)
+	t.Run("Default /rescan is dry-run", func(t *testing.T) {
+		msg := &tgbotapi.Message{
+			MessageID: 101,
+			Chat: &tgbotapi.Chat{
+				ID:    b.cfg.ModerationGroupID,
+				Title: "Mod Group",
+				Type:  "supergroup",
+			},
+			From: &tgbotapi.User{
+				ID:       adminID,
+				UserName: "admin",
+			},
+			Text: "/rescan force",
+		}
+
+		b.handleCommand(msg, adminUser)
+
+		// Wait briefly for background goroutine
+		time.Sleep(150 * time.Millisecond)
+
+		// Verify user is NOT banned in DB (dry-run by default)
+		u, err := b.db.GetUserByID(spammerID)
+		if err != nil || u.IsBanned {
+			t.Errorf("expected user %d NOT to be banned during default /rescan dry-run", spammerID)
+		}
+	})
+
+	t.Run("/rescan live executes bans", func(t *testing.T) {
+		msg := &tgbotapi.Message{
+			MessageID: 102,
+			Chat: &tgbotapi.Chat{
+				ID:    b.cfg.ModerationGroupID,
+				Title: "Mod Group",
+				Type:  "supergroup",
+			},
+			From: &tgbotapi.User{
+				ID:       adminID,
+				UserName: "admin",
+			},
+			Text: "/rescan force live",
+		}
+
+		b.handleCommand(msg, adminUser)
+
+		// Wait briefly for background goroutine
+		time.Sleep(150 * time.Millisecond)
+
+		// Verify user is banned in DB in live mode
+		u, err := b.db.GetUserByID(spammerID)
+		if err != nil || !u.IsBanned {
+			t.Errorf("expected user %d to be banned after /rescan live", spammerID)
+		}
+	})
 }
 
 func TestSendPrivateMessageMirror_ModGroupIDZero(t *testing.T) {

@@ -610,6 +610,16 @@ func FormatUserTriggerAlertSnippet(triggerID string, user *db.User, profile *db.
 	return strings.Join(parts, "\n")
 }
 
+// RescanMatch records details of a rule match detected during a rescan.
+type RescanMatch struct {
+	User          db.User           `json:"user"`
+	Profile       *db.UserProfile   `json:"profile,omitempty"`
+	TriggeredRule string            `json:"triggered_rule"`
+	Reason        string            `json:"reason"`
+	Actions       []detector.Action `json:"actions,omitempty"`
+	ActionSummary string            `json:"action_summary"`
+}
+
 // RescanOptions configures parameters for manual or scheduled rescanning of low reputation users.
 type RescanOptions struct {
 	MaxReputation int           `json:"max_reputation"`
@@ -621,11 +631,51 @@ type RescanOptions struct {
 
 // RescanResult contains summary metrics of a rescan run.
 type RescanResult struct {
-	TotalCandidates int `json:"total_candidates"`
-	ScannedCount    int `json:"scanned_count"`
-	BannedCount     int `json:"banned_count"`
-	CleanCount      int `json:"clean_count"`
-	ErrorCount      int `json:"error_count"`
+	TotalCandidates int           `json:"total_candidates"`
+	ScannedCount    int           `json:"scanned_count"`
+	BannedCount     int           `json:"banned_count"`
+	CleanCount      int           `json:"clean_count"`
+	ErrorCount      int           `json:"error_count"`
+	Matches         []RescanMatch `json:"matches,omitempty"`
+}
+
+// FormatActionsSummary returns a concise, human-readable summary of detector actions.
+func FormatActionsSummary(actions []detector.Action) string {
+	var parts []string
+	hasBan := false
+	hasFlag := false
+	hasDelete := false
+	var repDelta int
+
+	for _, a := range actions {
+		switch a.Type {
+		case detector.ActionBanUser:
+			hasBan = true
+		case detector.ActionFlagMessage:
+			hasFlag = true
+		case detector.ActionDeleteMessage:
+			hasDelete = true
+		case detector.ActionAdjustReputation:
+			repDelta = a.RepDelta
+		}
+	}
+
+	if hasBan {
+		parts = append(parts, "🔨 Ban User Across Monitored Groups")
+	}
+	if hasFlag {
+		parts = append(parts, "🛡️ Flag for Moderator Review")
+	}
+	if hasDelete {
+		parts = append(parts, "🗑️ Delete Message")
+	}
+	if repDelta != 0 {
+		parts = append(parts, fmt.Sprintf("Rep: %+d", repDelta))
+	}
+	if len(parts) == 0 {
+		return "No action"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // RescanProgressFunc is called as each user is evaluated during a rescan.
@@ -729,6 +779,15 @@ func (b *Bot) RescanLowRepUsers(ctx context.Context, opts RescanOptions, progres
 		if triggeredRes != nil {
 			res.BannedCount++
 			log.Printf("[Rescan Trigger] Rule '%s' fired for user %d (@%s): %s", triggeredRule, userCopy.UserID, userCopy.Username, reason)
+
+			res.Matches = append(res.Matches, RescanMatch{
+				User:          userCopy,
+				Profile:       profile,
+				TriggeredRule: triggeredRule,
+				Reason:        reason,
+				Actions:       triggeredRes.Actions,
+				ActionSummary: FormatActionsSummary(triggeredRes.Actions),
+			})
 
 			if !opts.DryRun {
 				alertMsg := &db.Message{

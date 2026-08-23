@@ -56,11 +56,11 @@ func TestRescanUsersCmd(t *testing.T) {
 
 	cfgFile = cfgPath
 
-	t.Run("Execute rescan-users dry-run", func(t *testing.T) {
+	t.Run("Execute rescan-users default (dry-run)", func(t *testing.T) {
 		buf := new(bytes.Buffer)
 		rootCmd.SetOut(buf)
 		rootCmd.SetErr(buf)
-		rootCmd.SetArgs([]string{"rescan-users", "--config", cfgPath, "--dry-run", "--delay-ms", "1"})
+		rootCmd.SetArgs([]string{"rescan-users", "--config", cfgPath, "--delay-ms", "1"})
 
 		err := rootCmd.Execute()
 		if err != nil {
@@ -70,6 +70,29 @@ func TestRescanUsersCmd(t *testing.T) {
 		output := buf.String()
 		if !strings.Contains(output, "User Rescan Summary") {
 			t.Errorf("expected User Rescan Summary in output, got: %s", output)
+		}
+		if !strings.Contains(output, "Dry Run Mode         : true") {
+			t.Errorf("expected Dry Run Mode to be true by default, got: %s", output)
+		}
+		if !strings.Contains(output, "Possible Actions on Matches") {
+			t.Errorf("expected Possible Actions on Matches in dry-run output, got: %s", output)
+		}
+	})
+
+	t.Run("Execute rescan-users with --live", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		rootCmd.SetOut(buf)
+		rootCmd.SetErr(buf)
+		rootCmd.SetArgs([]string{"rescan-users", "--config", cfgPath, "--live", "--delay-ms", "1"})
+
+		err := rootCmd.Execute()
+		if err != nil {
+			t.Fatalf("rescan-users failed: %v", err)
+		}
+
+		output := buf.String()
+		if !strings.Contains(output, "Dry Run Mode         : false") {
+			t.Errorf("expected Dry Run Mode to be false with --live, got: %s", output)
 		}
 	})
 }

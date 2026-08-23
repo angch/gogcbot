@@ -611,11 +611,18 @@ func (b *Bot) cmdRescanUsers(msg *tgbotapi.Message, args string, isAuthorized bo
 		MaxReputation: 20,
 		Hours:         24,
 		Delay:         100 * time.Millisecond,
+		DryRun:        true, // Default to dry-run (simulation mode)
 	}
 
 	lowerArgs := strings.ToLower(args)
 	if strings.Contains(lowerArgs, "force") || strings.Contains(lowerArgs, "all") {
 		opts.Force = true
+	}
+	if strings.Contains(lowerArgs, "live") || strings.Contains(lowerArgs, "exec") ||
+		strings.Contains(lowerArgs, "execute") || strings.Contains(lowerArgs, "apply") ||
+		strings.Contains(lowerArgs, "ban") || strings.Contains(lowerArgs, "nodryrun") ||
+		strings.Contains(lowerArgs, "no-dry-run") || strings.Contains(lowerArgs, "nodry") {
+		opts.DryRun = false
 	}
 	if strings.Contains(lowerArgs, "dryrun") || strings.Contains(lowerArgs, "dry") {
 		opts.DryRun = true
@@ -654,9 +661,9 @@ func (b *Bot) cmdRescanUsers(msg *tgbotapi.Message, args string, isAuthorized bo
 		return
 	}
 
-	modeStr := ""
-	if opts.DryRun {
-		modeStr = " (DRY RUN - No bans will be executed)"
+	modeStr := " (DRY RUN - Simulation Only, no bans will be executed)"
+	if !opts.DryRun {
+		modeStr = " (LIVE MODE - Actions and bans will be executed)"
 	}
 	b.replyText(msg, fmt.Sprintf("🔍 **Starting user rescan** for `%d` candidate users%s...\n• Max Reputation: `%d`\n• Scan Age Threshold: `>%d hours` (Force: `%t`)\n\nRunning in background. Summary will be reported when finished.", len(candidates), modeStr, opts.MaxReputation, opts.Hours, opts.Force))
 
@@ -670,17 +677,70 @@ func (b *Bot) cmdRescanUsers(msg *tgbotapi.Message, args string, isAuthorized bo
 			return
 		}
 
-		b.replyText(msg, fmt.Sprintf(
-			"✅ **User Rescan Complete**!\n\n"+
-				"📊 **Summary**:\n"+
+		var report strings.Builder
+		if opts.DryRun {
+			report.WriteString("✅ **User Rescan Complete (DRY RUN)**!\n\n")
+		} else {
+			report.WriteString("✅ **User Rescan Complete (LIVE)**!\n\n")
+		}
+
+		modeDisplay := "DRY RUN (Simulation - No actions executed)"
+		if !opts.DryRun {
+			modeDisplay = "LIVE (Actions & Bans Executed)"
+		}
+
+		report.WriteString(fmt.Sprintf(
+			"📊 **Summary**:\n"+
 				"• Total Candidates: `%d`\n"+
 				"• Scanned: `%d`\n"+
-				"• 🚫 Banned (Triggered Join Rules): `%d`\n"+
+				"• ⚠️ Trigger Matches: `%d`\n"+
 				"• ✨ Clean: `%d`\n"+
 				"• ⚠️ Errors / Not Found: `%d`\n"+
-				"• Dry Run: `%t`",
-			res.TotalCandidates, res.ScannedCount, res.BannedCount, res.CleanCount, res.ErrorCount, opts.DryRun,
+				"• Mode: `%s`\n\n",
+			res.TotalCandidates, res.ScannedCount, len(res.Matches), res.CleanCount, res.ErrorCount, modeDisplay,
 		))
+
+		if len(res.Matches) > 0 {
+			if opts.DryRun {
+				report.WriteString(fmt.Sprintf("🎯 **Possible Actions on Matches (%d)**:\n", len(res.Matches)))
+			} else {
+				report.WriteString(fmt.Sprintf("🔨 **Executed Actions on Matches (%d)**:\n", len(res.Matches)))
+			}
+
+			maxShow := 15
+			for i, m := range res.Matches {
+				if i >= maxShow {
+					report.WriteString(fmt.Sprintf("\n... and `%d` more matching users.\n", len(res.Matches)-maxShow))
+					break
+				}
+				userTag := fmt.Sprintf("`%d`", m.User.UserID)
+				if m.User.Username != "" {
+					userTag = fmt.Sprintf("@%s (`%d`)", m.User.Username, m.User.UserID)
+				}
+				displayName := strings.TrimSpace(m.User.FirstName + " " + m.User.LastName)
+				if displayName != "" {
+					userTag += fmt.Sprintf(" - %s", displayName)
+				}
+
+				actionLabel := "Proposed Action"
+				if !opts.DryRun {
+					actionLabel = "Executed Action"
+				}
+
+				report.WriteString(fmt.Sprintf(
+					"%d. **%s**\n   • Rule: `%s`\n   • Reason: %s\n   • %s: %s\n\n",
+					i+1, userTag, m.TriggeredRule, m.Reason, actionLabel, m.ActionSummary,
+				))
+			}
+
+			if opts.DryRun {
+				report.WriteString("💡 **To execute these actions live**, run:\n`/rescan live` (or `/rescan live force` to rescan all)")
+			}
+		} else {
+			report.WriteString("🎉 No rule violations or spam accounts found among scanned candidates.")
+		}
+
+		b.replyText(msg, report.String())
 	}()
 }
 
@@ -1641,6 +1701,6 @@ func getHelpText() string {
 		"• `/getdb` - Download a copy of the current SQLite3 database (Admin direct message only)\n" +
 		"• `/fetchprofile <user|@username>` - Fetch fresh Telegram profile (bio & picture) & cache in DB\n" +
 		"• `/backfillprofiles [force]` - Backfill bios and profile photos for tracked users in background\n" +
-		"• `/rescanusers [force] [dryrun] [maxrep <n>]` - Rescan low-rep users (>24h since last scan) & trigger join ban rules\n" +
+		"• `/rescanusers [live] [force] [maxrep <n>]` - Rescan low-rep users (>24h since last scan, dry-run by default; use 'live' to execute)\n" +
 		"• `/bancheck [dryrun]` - Verify all banned users across monitored channels/groups (<= 1 req/sec) & enforce missing bans"
 }
