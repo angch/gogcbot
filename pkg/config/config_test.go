@@ -161,6 +161,12 @@ func TestDefaultConfig_DefaultInitialZero(t *testing.T) {
 	if cfg.Detector.RedPacketName.MinHighUserID != 1000000000 {
 		t.Errorf("Expected MinHighUserID 1000000000, got %d", cfg.Detector.RedPacketName.MinHighUserID)
 	}
+	if !cfg.Detector.UsernameAnomaly.Enabled {
+		t.Errorf("Expected Detector.UsernameAnomaly.Enabled to be true by default")
+	}
+	if !cfg.Detector.UsernameAnomaly.FlagOnly {
+		t.Errorf("Expected Detector.UsernameAnomaly.FlagOnly to be true by default (moderator review mode)")
+	}
 	if !cfg.Shieldy.Enabled {
 		t.Errorf("Expected Shieldy.Enabled to be true by default")
 	}

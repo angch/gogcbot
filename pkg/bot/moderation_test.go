@@ -2926,6 +2926,3 @@ func TestHandleMessage_SecondaryGroup_UserNotInPrimaryGroup_TriggersBan(t *testi
 		t.Errorf("expected user %d to be banned after posting in secondary group without primary group membership", userID)
 	}
 }
-
-
-

@@ -16,7 +16,7 @@ type UsernameAnomalyTriggerConfig struct {
 	// See UsernameAnomalyScore. Default 3.
 	MinScore int `mapstructure:"min_score" yaml:"min_score"`
 	// FlagOnly emits only a flag/report action instead of auto-banning.
-	// Default false (immediate kickban).
+	// Default true (flags message for moderator review/ban instead of immediate kickban).
 	FlagOnly   bool `mapstructure:"flag_only" yaml:"flag_only"`
 	RepPenalty int  `mapstructure:"rep_penalty" yaml:"rep_penalty"`
 }

@@ -80,7 +80,7 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
 
 11. **Auto-Generated Username Anomaly Detection (`username_anomaly`)**:
     - **Algorithmic Handle Scoring**: Detects automated/farmed Telegram handles for new high-ID users using mixed-case patterns, interleaved digit sequences (e.g. `nykrr_v9cl2t`), and Shannon entropy gated with low vowel ratios (e.g. `qtdulcljcptk6950`).
-    - **Instant Kickban & Message Cleanup**: Immediately deletes messages, permanently bans the user across all monitored groups, deducts reputation points (-20), and dispatches a trigger ban notification instead of asking moderators. Configurable score thresholds (`min_score: 3`) and optional `flag_only` mode.
+    - **Moderator Review & Flagging**: Flags suspicious posts to the Private Moderation Group for human moderator review and action (`flag_only: true` by default). Configurable score thresholds (`min_score: 3`) and optional immediate kickban mode (`flag_only: false`).
 
 12. **Profile Name Spam Keyword Ban (`profile_name_keyword_ban`)**:
     - **Homoglyph Normalization**: Folds visually confusable digits and letters (`o/O/零/〇 -> 0`, `l/L -> 1`) to catch evasive name variations (e.g. `六o0壹天` or `玖Oo壹天` hitting `0壹天`).
@@ -165,6 +165,11 @@ CGO_ENABLED=0 go build -o gogcbot main.go
 ./gogcbot bancheck --config config.yaml
 ./gogcbot bancheck --config config.yaml --dry-run
 ./gogcbot bancheck --config config.yaml --delay-ms 1000
+
+# 11. Seed members from monitored groups via MTProto into users & user_joins tables
+./gogcbot seedmembers --config config.yaml --api-id 12345678 --api-hash "your_api_hash"
+./gogcbot seedmembers --config config.yaml --dry-run
+TG_API_ID=12345678 TG_API_HASH="your_api_hash" ./gogcbot seedmembers --config config.yaml
 ```
 
 ### OS System Service Management (Windows Service / Systemd / launchd)

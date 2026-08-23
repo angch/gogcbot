@@ -1539,18 +1539,34 @@ func TestUserJoins(t *testing.T) {
 		t.Errorf("expected 2 joins with limit 2, got %d", len(joinsLimited))
 	}
 
-	// 5. Test GetUserFullDump with joins
+	// 5. Test EnsureUserJoin idempotency
+	if err := database.EnsureUserJoin(userID, -100333, "Gamma Group", "group"); err != nil {
+		t.Fatalf("EnsureUserJoin failed: %v", err)
+	}
+	count, _ = database.GetUserJoinCount(userID)
+	if count != 3 {
+		t.Errorf("expected count to remain 3 after duplicate EnsureUserJoin, got %d", count)
+	}
+	if err := database.EnsureUserJoin(userID, -100444, "Delta Group", "supergroup"); err != nil {
+		t.Fatalf("EnsureUserJoin new chat failed: %v", err)
+	}
+	count, _ = database.GetUserJoinCount(userID)
+	if count != 4 {
+		t.Errorf("expected count to become 4 after new EnsureUserJoin, got %d", count)
+	}
+
+	// 6. Test GetUserFullDump with joins
 	dump, err := database.GetUserFullDump("joiner", 0)
 	if err != nil {
 		t.Fatalf("failed to get user full dump: %v", err)
 	}
-	if len(dump.ChannelJoins) != 3 {
-		t.Errorf("expected 3 channel joins in full dump, got %d", len(dump.ChannelJoins))
+	if len(dump.ChannelJoins) != 4 {
+		t.Errorf("expected 4 channel joins in full dump, got %d", len(dump.ChannelJoins))
 	}
 
-	// 6. Test FormatUserDump includes channel joins section
+	// 7. Test FormatUserDump includes channel joins section
 	formatted := FormatUserDump(dump)
-	if !strings.Contains(formatted, "## 🚪 Channel & Group Joins (Total Logs: 3)") {
+	if !strings.Contains(formatted, "## 🚪 Channel & Group Joins (Total Logs: 4)") {
 		t.Errorf("expected Channel & Group Joins section in formatted dump, got: %s", formatted)
 	}
 	if !strings.Contains(formatted, "Alpha Channel") || !strings.Contains(formatted, "Beta Group") {
@@ -1793,5 +1809,3 @@ func TestGroup_PrimaryAndSecondaryOperations(t *testing.T) {
 		t.Errorf("expected 3 all groups, got %d", len(allGroups))
 	}
 }
-
-

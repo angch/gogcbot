@@ -109,7 +109,7 @@ func TestUsernameAnomalyTrigger_Evaluate(t *testing.T) {
 		MaxReputation: 5,
 		MaxUserPosts:  5,
 		MinScore:      3,
-		FlagOnly:      false,
+		FlagOnly:      true,
 	}
 	trig := NewUsernameAnomalyTrigger(cfg)
 
@@ -178,26 +178,10 @@ func TestUsernameAnomalyTrigger_Evaluate(t *testing.T) {
 			if res.Triggered != tt.wantTriggered {
 				t.Fatalf("Triggered = %v, want %v (reason: %s)", res.Triggered, tt.wantTriggered, res.Reason)
 			}
-			// Default mode (immediate kickban) should emit 3 actions: delete, ban, adjust reputation.
+			// Default mode (flag for moderator review) should emit ActionFlagMessage.
 			if res.Triggered {
-				if len(res.Actions) != 3 {
-					t.Fatalf("Kickban actions count wrong: got %d, want 3 (%#v)", len(res.Actions), res.Actions)
-				}
-				var hasDelete, hasBan, hasRep bool
-				for _, a := range res.Actions {
-					switch a.Type {
-					case ActionDeleteMessage:
-						hasDelete = true
-					case ActionBanUser:
-						hasBan = true
-					case ActionAdjustReputation:
-						hasRep = true
-					case ActionFlagMessage:
-						t.Errorf("Kickban mode should not emit ActionFlagMessage")
-					}
-				}
-				if !hasDelete || !hasBan || !hasRep {
-					t.Errorf("Kickban actions incomplete: %#v", res.Actions)
+				if len(res.Actions) != 1 || res.Actions[0].Type != ActionFlagMessage {
+					t.Fatalf("FlagOnly actions wrong: got %#v, want exactly 1 ActionFlagMessage", res.Actions)
 				}
 			}
 		})

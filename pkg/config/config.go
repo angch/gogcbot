@@ -42,10 +42,10 @@ type DetectorConfig struct {
 	NewUserSpamBio        detector.NewUserSpamBioTriggerConfig  `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
 	RedPacketName         detector.RedPacketNameTriggerConfig   `mapstructure:"red_packet_name" yaml:"red_packet_name"`
 	NewUserRedPacket      detector.RedPacketNameTriggerConfig   `mapstructure:"new_user_red_packet" yaml:"new_user_red_packet,omitempty"`
-	UsernameAnomaly       detector.UsernameAnomalyTriggerConfig  `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
-	ProfileNameKeywordBan detector.ProfileNameKeywordBanConfig   `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
-	NonsenseBio           detector.NonsenseBioTriggerConfig      `mapstructure:"nonsense_bio" yaml:"nonsense_bio,omitempty"`
-	SecondaryGroup        detector.SecondaryGroupTriggerConfig   `mapstructure:"secondary_group" yaml:"secondary_group,omitempty"`
+	UsernameAnomaly       detector.UsernameAnomalyTriggerConfig `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
+	ProfileNameKeywordBan detector.ProfileNameKeywordBanConfig  `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
+	NonsenseBio           detector.NonsenseBioTriggerConfig     `mapstructure:"nonsense_bio" yaml:"nonsense_bio,omitempty"`
+	SecondaryGroup        detector.SecondaryGroupTriggerConfig  `mapstructure:"secondary_group" yaml:"secondary_group,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -130,7 +130,7 @@ func DefaultConfig() Config {
 				MaxReputation: 5,
 				MaxUserPosts:  5,
 				MinScore:      3,
-				FlagOnly:      false,
+				FlagOnly:      true,
 				RepPenalty:    20,
 			},
 			ProfileNameKeywordBan: detector.ProfileNameKeywordBanConfig{
@@ -237,7 +237,7 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.username_anomaly.max_reputation", 5)
 	v.SetDefault("detector.username_anomaly.max_user_posts", 5)
 	v.SetDefault("detector.username_anomaly.min_score", 3)
-	v.SetDefault("detector.username_anomaly.flag_only", false)
+	v.SetDefault("detector.username_anomaly.flag_only", true)
 	v.SetDefault("detector.username_anomaly.rep_penalty", 20)
 
 	v.SetDefault("detector.profile_name_keyword_ban.enabled", true)

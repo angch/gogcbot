@@ -733,4 +733,3 @@ func (b *Bot) CheckSecondaryGroupAndPrimaryMembership(chatID int64, userID int64
 	primaryNames = strings.Join(names, ", ")
 	return isSecondary, isMemberOfPrimary, primaryNames
 }
-

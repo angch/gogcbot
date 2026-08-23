@@ -1286,6 +1286,19 @@ func (d *DB) LogUserJoinWithTime(userID int64, chatID int64, chatTitle, chatType
 	return err
 }
 
+// EnsureUserJoin records a channel or group join event for a user if one does not already exist for that (userID, chatID).
+func (d *DB) EnsureUserJoin(userID int64, chatID int64, chatTitle, chatType string) error {
+	var count int
+	err := d.QueryRow(`SELECT COUNT(*) FROM user_joins WHERE user_id = ? AND chat_id = ?`, userID, chatID).Scan(&count)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	return d.LogUserJoin(userID, chatID, chatTitle, chatType)
+}
+
 // GetUserJoins retrieves recent channel/group joins for a user, ordered from most recent to oldest.
 func (d *DB) GetUserJoins(userID int64, limit int) ([]UserJoin, error) {
 	query := `

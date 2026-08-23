@@ -19,3 +19,7 @@ test_config.yaml
 # Temporary & Editor files
 *~
 dev.sh
+
+# MTProto Sessions & Dumps
+session_dump.json
+existing_members.json
