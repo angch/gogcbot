@@ -492,7 +492,7 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, msg *db.Message, actio
 				log.Printf("[Bot Action Error] Failed to send trigger ban alert: %v", err)
 			}
 			// If kick-ban is due to user profile (not message), delete any Shieldy captcha challenge message
-			if detector.IsProfileBanReason(act.Reason) || (msg != nil && strings.HasPrefix(msg.Text, "[Trigger]:")) {
+			if detector.IsProfileBanReason(act.Reason) || strings.HasPrefix(msg.Text, "[Trigger]:") {
 				b.DeleteShieldyMessagesForUser(chatID, user.UserID, user.Username)
 			}
 

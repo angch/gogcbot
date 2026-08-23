@@ -41,7 +41,7 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 	case "start":
 		b.cmdStart(msg)
 	case "help":
-		b.cmdHelp(msg, isSuperAdmin, isModGroup)
+		b.cmdHelp(msg)
 	case "status":
 		b.cmdStatus(msg)
 	case "setsuperadmin":
@@ -127,8 +127,8 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 	b.replyText(msg, "👋 **Welcome to GoGCBot!**\n\nI am a Telegram group management and reputation bot.\nUse /help to view available commands.")
 }
 
-func (b *Bot) cmdHelp(msg *tgbotapi.Message, isSuperAdmin, isModGroup bool) {
-	b.replyText(msg, getHelpText(isSuperAdmin, isModGroup))
+func (b *Bot) cmdHelp(msg *tgbotapi.Message) {
+	b.replyText(msg, getHelpText())
 }
 
 func (b *Bot) cmdStatus(msg *tgbotapi.Message) {
@@ -1195,7 +1195,8 @@ func (b *Bot) cmdListUnknownUsers(msg *tgbotapi.Message, args string, isAuthoriz
 			sb.WriteString("**Action Details**:\n")
 
 			for _, logLine := range actionLogs {
-				sb.WriteString(logLine + "\n")
+				sb.WriteString(logLine)
+				sb.WriteString("\n")
 			}
 
 			summaryMsg := sb.String()
@@ -1213,11 +1214,6 @@ func (b *Bot) cmdListUnknownUsers(msg *tgbotapi.Message, args string, isAuthoriz
 
 	output := formatUnknownUsersTable(items, keyword)
 	b.replyText(msg, output)
-}
-
-// cmdListSpamBios is a backwards-compatible alias for cmdListUnknownUsers.
-func (b *Bot) cmdListSpamBios(msg *tgbotapi.Message, args string, isAuthorized bool) {
-	b.cmdListUnknownUsers(msg, args, isAuthorized)
 }
 
 // formatUnknownUsersTable formats the slice of UnknownUserItem into a compact monospace table for Telegram output.
@@ -1284,11 +1280,6 @@ func formatUnknownUsersTable(items []db.UnknownUserItem, keyword string) string 
 	sb.WriteString("💡 **Actions**: `/listunknownusers ban` to ban all matching • `/ban <id>` to ban individual user")
 
 	return sb.String()
-}
-
-// formatSpamBioTable is an alias for formatUnknownUsersTable for backwards compatibility.
-func formatSpamBioTable(items []db.SpamBioUserItem, keyword string) string {
-	return formatUnknownUsersTable(items, keyword)
 }
 
 func runeVisualWidth(r rune) int {
@@ -1622,7 +1613,7 @@ func boolStatus(val bool) string {
 	return "❌ Missing"
 }
 
-func getHelpText(isSuperAdmin, isModGroup bool) string {
+func getHelpText() string {
 	return "🤖 **GoGCBot Commands & Usage**\n\n" +
 		"**General Commands**:\n" +
 		"• `/start` - Start bot interaction\n" +

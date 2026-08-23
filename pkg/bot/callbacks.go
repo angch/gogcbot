@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/angch/gogcbot/pkg/db"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
@@ -69,7 +68,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		_ = b.db.ResolveFlaggedPost(flagID, "approved", modUser.ID)
 
 		b.answerCallback(cb.ID, "✅ Approved post & rewarded user +5 Rep!", false)
-		b.updateModCardText(cb.Message, flag, user, "✅ Approved", modIdentifier, fmt.Sprintf("Approved by %s. Bonus +5 Rep awarded (New Rep: %d).", modIdentifier, newRep))
+		b.updateModCardText(cb.Message, "✅ Approved", modIdentifier, fmt.Sprintf("Approved by %s. Bonus +5 Rep awarded (New Rep: %d).", modIdentifier, newRep))
 
 	case "delete":
 		if err := b.DeleteGroupMessage(flag.GroupChatID, flag.GroupMessageID); err != nil {
@@ -80,7 +79,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		_ = b.db.ResolveFlaggedPost(flagID, "deleted", modUser.ID)
 
 		b.answerCallback(cb.ID, "🗑️ Post deleted & -10 Rep deducted.", false)
-		b.updateModCardText(cb.Message, flag, user, "🗑️ Deleted", modIdentifier, fmt.Sprintf("Post deleted by %s. Deducted -10 Rep (New Rep: %d).", modIdentifier, newRep))
+		b.updateModCardText(cb.Message, "🗑️ Deleted", modIdentifier, fmt.Sprintf("Post deleted by %s. Deducted -10 Rep (New Rep: %d).", modIdentifier, newRep))
 
 	case "warn":
 		_ = b.DeleteGroupMessage(flag.GroupChatID, flag.GroupMessageID)
@@ -89,7 +88,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		_ = b.db.ResolveFlaggedPost(flagID, "warned", modUser.ID)
 
 		b.answerCallback(cb.ID, "⚠️ User warned, post deleted & -20 Rep deducted.", false)
-		b.updateModCardText(cb.Message, flag, user, "⚠️ Warned", modIdentifier, fmt.Sprintf("Warned by %s. Total Warnings: %d. Deducted -20 Rep (New Rep: %d).", modIdentifier, warns, newRep))
+		b.updateModCardText(cb.Message, "⚠️ Warned", modIdentifier, fmt.Sprintf("Warned by %s. Total Warnings: %d. Deducted -20 Rep (New Rep: %d).", modIdentifier, warns, newRep))
 
 	case "mute":
 		_ = b.DeleteGroupMessage(flag.GroupChatID, flag.GroupMessageID)
@@ -102,7 +101,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		_ = b.db.ResolveFlaggedPost(flagID, "muted", modUser.ID)
 
 		b.answerCallback(cb.ID, "🔇 User muted 24h, post deleted & -30 Rep.", false)
-		b.updateModCardText(cb.Message, flag, user, "🔇 Muted 24h", modIdentifier, fmt.Sprintf("Muted 24h by %s (%s). Deducted -30 Rep (New Rep: %d).", modIdentifier, muteResult, newRep))
+		b.updateModCardText(cb.Message, "🔇 Muted 24h", modIdentifier, fmt.Sprintf("Muted 24h by %s (%s). Deducted -30 Rep (New Rep: %d).", modIdentifier, muteResult, newRep))
 
 	case "ban":
 		_ = b.DeleteGroupMessage(flag.GroupChatID, flag.GroupMessageID)
@@ -115,7 +114,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		_ = b.db.ResolveFlaggedPost(flagID, "banned", modUser.ID)
 
 		b.answerCallback(cb.ID, "🚫 User banned across all monitored groups!", false)
-		b.updateModCardText(cb.Message, flag, user, "🚫 Banned User", modIdentifier, fmt.Sprintf("Banned by %s (%s). Deducted -50 Rep (New Rep: %d).", modIdentifier, banResult, newRep))
+		b.updateModCardText(cb.Message, "🚫 Banned User", modIdentifier, fmt.Sprintf("Banned by %s (%s). Deducted -50 Rep (New Rep: %d).", modIdentifier, banResult, newRep))
 
 	case "rep_plus":
 		newRep, _ := b.db.AdjustReputation(user.UserID, 10, "Manual mod adjustment (+10)", modUser.ID)
@@ -146,7 +145,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	case "dismiss":
 		_ = b.db.ResolveFlaggedPost(flagID, "dismissed", modUser.ID)
 		b.answerCallback(cb.ID, "❌ Flag dismissed.", false)
-		b.updateModCardText(cb.Message, flag, user, "❌ Dismissed", modIdentifier, fmt.Sprintf("Dismissed by %s without action.", modIdentifier))
+		b.updateModCardText(cb.Message, "❌ Dismissed", modIdentifier, fmt.Sprintf("Dismissed by %s without action.", modIdentifier))
 	}
 }
 
@@ -156,7 +155,7 @@ func (b *Bot) answerCallback(callbackID string, text string, showAlert bool) {
 	_, _ = b.Request(cbConfig)
 }
 
-func (b *Bot) updateModCardText(modMsg *tgbotapi.Message, flag *db.FlaggedPost, user *db.User, statusLabel string, modIdentifier string, detail string) {
+func (b *Bot) updateModCardText(modMsg *tgbotapi.Message, statusLabel, modIdentifier, detail string) {
 	updatedText := fmt.Sprintf(
 		"%s\n\n"+
 			"━━━━━━━━━━━━━━━━━━━━━━\n"+
