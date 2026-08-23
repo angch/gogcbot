@@ -691,5 +691,46 @@ func BuildDetector(cfg *config.Config, database *db.DB) *detector.Detector {
 		det.RegisterTrigger(detector.NewNonsenseBioTrigger(cfg.Detector.NonsenseBio))
 	}
 
+	if cfg.Detector.SecondaryGroup.Enabled {
+		det.RegisterTrigger(detector.NewSecondaryGroupTrigger(cfg.Detector.SecondaryGroup))
+	}
+
 	return det
 }
+
+// CheckSecondaryGroupAndPrimaryMembership verifies if the given chat is a secondary group,
+// and if so, whether the user is an active member in any configured primary group.
+func (b *Bot) CheckSecondaryGroupAndPrimaryMembership(chatID int64, userID int64) (isSecondary bool, isMemberOfPrimary bool, primaryNames string) {
+	if chatID == 0 || (b.cfg.ModerationGroupID != 0 && chatID == b.cfg.ModerationGroupID) {
+		return false, false, ""
+	}
+	if b.db == nil {
+		return false, false, ""
+	}
+	grp, err := b.db.GetGroup(chatID)
+	if err != nil || grp == nil || grp.IsPrimary || !grp.IsMonitored {
+		return false, false, ""
+	}
+	primaryGroups, err := b.db.GetPrimaryGroups()
+	if err != nil || len(primaryGroups) == 0 {
+		return false, false, ""
+	}
+	isSecondary = true
+	var names []string
+	for _, pg := range primaryGroups {
+		names = append(names, fmt.Sprintf("'%s' (%d)", pg.Title, pg.ChatID))
+		cm, err := b.GetChatMember(tgbotapi.GetChatMemberConfig{
+			ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+				ChatID: pg.ChatID,
+				UserID: userID,
+			},
+		})
+		if err == nil && (cm.Status == "member" || cm.Status == "administrator" || cm.Status == "creator" || cm.Status == "restricted") {
+			isMemberOfPrimary = true
+			break
+		}
+	}
+	primaryNames = strings.Join(names, ", ")
+	return isSecondary, isMemberOfPrimary, primaryNames
+}
+

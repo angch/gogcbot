@@ -86,10 +86,20 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
     - **Homoglyph Normalization**: Folds visually confusable digits and letters (`o/O/零/〇 -> 0`, `l/L -> 1`) to catch evasive name variations (e.g. `六o0壹天` or `玖Oo壹天` hitting `0壹天`).
     - Evaluates display names against calibrated blocklists for new high-ID users with low reputation.
 
-13. **Unified Detection Pipeline & Lifecycle Integration**:
+13. **Primary & Secondary Group Hierarchy & Cross-Group Join Rule (`secondary_group_not_in_primary`)**:
+    - **Primary vs. Secondary Groups**: Categorizes monitored Telegram groups into Primary Groups (`is_primary = true`) and Secondary Groups (`is_primary = false`).
+    - **Cross-Group Membership Gate on Join**: When a user joins any secondary group, the bot checks if they are currently an active member in the primary group(s). If they are not a member of the primary group, the bot immediately:
+      - Issues a permanent ban across **all** monitored channels and groups (`BanUserAcrossAllGroups`).
+      - Deletes the join service message and any Shieldy captcha challenges.
+      - Deducts reputation points (-20).
+      - Dispatches a trigger ban notification to the Private Moderation Group.
+    - **Exemptions**: Bot administrators and whitelisted users with maximum reputation (>= 100) are exempt.
+    - **Commands**: Configure group roles on the fly via `/setprimarygroup [chat_id]` and `/setsecondarygroup [chat_id]`, with role badges (`[⭐ Primary]` / `[Secondary]`) displayed in `/listgroups`.
+
+14. **Unified Detection Pipeline & Lifecycle Integration**:
     - Centralized modular detection engine evaluating across all lifecycle entrypoints: **Message Processing**, **Chat/Channel Join Events**, and **Offline Rescan Audits** (`/rescanusers`).
 
-14. **High-Reputation Rule Validation Internal Check**:
+15. **High-Reputation Rule Validation Internal Check**:
     - Built-in validation suite (`detector.ValidateAgainstHighRepUsers`) ensuring any new or modified detection rules/triggers never match against established community members with reputation > 40 across profile data, join/rescan contexts, and message history.
 
 ---
@@ -258,7 +268,9 @@ shieldy:
 | `/setmodgroup` | Super Admin | Set current group as Private Moderation Group |
 | `/addgroup` | Admin/Mod | Add current group to monitored groups |
 | `/removegroup` | Admin/Mod | Remove current group from monitored groups |
-| `/listgroups` | Admin/Mod | List all monitored groups |
+| `/setprimarygroup [chat_id]` | Admin/Mod | Set group as Primary Group |
+| `/setsecondarygroup [chat_id]` | Admin/Mod | Set group as Secondary Group |
+| `/listgroups` | Admin/Mod | List all monitored groups with Primary/Secondary badges |
 | `/rep <user> [delta]` | Admin/Mod | Check or adjust user reputation |
 | `/warn <user>` | Admin/Mod | Warn user, delete message, deduct rep |
 | `/resetwarns <user>` | Admin/Mod | Reset warning count for user to 0 |

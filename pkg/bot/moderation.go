@@ -539,6 +539,12 @@ func (b *Bot) EvaluateUserContext(user *db.User, profile *db.UserProfile, chatID
 		tCtx.HasPhoto = profile.HasPhoto
 		tCtx.PhotoCount = profile.PhotoCount
 	}
+	if chatID != 0 && user != nil {
+		isSec, isMember, pNames := b.CheckSecondaryGroupAndPrimaryMembership(chatID, user.UserID)
+		tCtx.IsSecondaryGroup = isSec
+		tCtx.IsMemberOfPrimaryGroup = isMember
+		tCtx.PrimaryGroupNames = pNames
+	}
 	return b.Detector().Evaluate(tCtx)
 }
 

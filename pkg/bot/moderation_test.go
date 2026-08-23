@@ -2562,3 +2562,268 @@ func TestDeleteShieldyMessage_OnProfileKickBan(t *testing.T) {
 	}
 }
 
+func TestHandleUserJoined_SecondaryGroup_UserNotInPrimaryGroup_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	primaryChatID := int64(-1001072966891)
+	secondaryChatID := int64(-1001783678483)
+	userID := int64(888999111)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	// Setup primary group and secondary group in DB
+	_ = b.db.SaveGroupWithPrimary(primaryChatID, "Golang Malaysia Main", "supergroup", true)
+	_ = b.db.SaveGroupWithPrimary(secondaryChatID, "Golang Malaysia Overflow", "supergroup", false)
+
+	// Mock GetChatMember: user is NOT in primary group (status "left")
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		if config.ChatID == primaryChatID && config.UserID == userID {
+			return tgbotapi.ChatMember{
+				Status: "left",
+				User:   &tgbotapi.User{ID: userID, UserName: "intruder_user"},
+			}, nil
+		}
+		return tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "intruder_user"},
+		}, nil
+	})
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    secondaryChatID,
+			Title: "Golang Malaysia Overflow",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "intruder_user", FirstName: "Intruder", LastName: "User"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "intruder_user", FirstName: "Intruder", LastName: "User"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	// User should be banned in DB and penalized
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after joining secondary group without primary group membership", userID)
+	}
+	if u.Reputation >= 0 {
+		t.Errorf("expected user %d reputation to be penalized (< 0), got %d", userID, u.Reputation)
+	}
+}
+
+func TestHandleUserJoined_SecondaryGroup_UserInPrimaryGroup_Allowed(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	primaryChatID := int64(-1001072966891)
+	secondaryChatID := int64(-1001783678483)
+	userID := int64(888999222)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	// Setup primary group and secondary group in DB
+	_ = b.db.SaveGroupWithPrimary(primaryChatID, "Golang Malaysia Main", "supergroup", true)
+	_ = b.db.SaveGroupWithPrimary(secondaryChatID, "Golang Malaysia Overflow", "supergroup", false)
+
+	// Mock GetChatMember: user IS in primary group (status "member")
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		if config.ChatID == primaryChatID && config.UserID == userID {
+			return tgbotapi.ChatMember{
+				Status: "member",
+				User:   &tgbotapi.User{ID: userID, UserName: "legit_user"},
+			}, nil
+		}
+		return tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "legit_user"},
+		}, nil
+	})
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    secondaryChatID,
+			Title: "Golang Malaysia Overflow",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "legit_user", FirstName: "Legit", LastName: "User"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "legit_user", FirstName: "Legit", LastName: "User"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if u.IsBanned {
+		t.Errorf("expected legit user %d (member of primary group) NOT to be banned in secondary group", userID)
+	}
+}
+
+func TestHandleUserJoined_PrimaryGroup_Allowed(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	primaryChatID := int64(-1001072966891)
+	secondaryChatID := int64(-1001783678483)
+	userID := int64(888999333)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	// Setup primary group and secondary group in DB
+	_ = b.db.SaveGroupWithPrimary(primaryChatID, "Golang Malaysia Main", "supergroup", true)
+	_ = b.db.SaveGroupWithPrimary(secondaryChatID, "Golang Malaysia Overflow", "supergroup", false)
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    primaryChatID,
+			Title: "Golang Malaysia Main",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: userID, UserName: "new_primary_joiner", FirstName: "New", LastName: "Member"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: userID, UserName: "new_primary_joiner", FirstName: "New", LastName: "Member"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if u.IsBanned {
+		t.Errorf("expected new user %d joining primary group NOT to be banned", userID)
+	}
+}
+
+func TestHandleUserJoined_SecondaryGroup_AdminExempt(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	primaryChatID := int64(-1001072966891)
+	secondaryChatID := int64(-1001783678483)
+	adminUserID := int64(888999444)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	_ = b.db.SaveGroupWithPrimary(primaryChatID, "Golang Malaysia Main", "supergroup", true)
+	_ = b.db.SaveGroupWithPrimary(secondaryChatID, "Golang Malaysia Overflow", "supergroup", false)
+
+	// Admin user with reputation 100
+	_, _, _ = b.db.GetOrCreateUser(adminUserID, "admin_user", "Admin", "User", 100)
+	_ = b.db.SetUserAdmin(adminUserID, true)
+
+	cmu := &tgbotapi.ChatMemberUpdated{
+		Chat: tgbotapi.Chat{
+			ID:    secondaryChatID,
+			Title: "Golang Malaysia Overflow",
+			Type:  "supergroup",
+		},
+		OldChatMember: tgbotapi.ChatMember{
+			Status: "left",
+			User:   &tgbotapi.User{ID: adminUserID, UserName: "admin_user", FirstName: "Admin", LastName: "User"},
+		},
+		NewChatMember: tgbotapi.ChatMember{
+			Status: "member",
+			User:   &tgbotapi.User{ID: adminUserID, UserName: "admin_user", FirstName: "Admin", LastName: "User"},
+		},
+	}
+
+	b.handleChatMemberUpdate(cmu)
+
+	u, err := b.db.GetUserByID(adminUserID)
+	if err != nil {
+		t.Fatalf("failed to query admin user: %v", err)
+	}
+	if u.IsBanned {
+		t.Errorf("expected admin user NOT to be banned")
+	}
+}
+
+func TestCmdSetPrimaryGroup_And_CmdSetSecondaryGroup(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	adminUser := &db.User{UserID: 10104269, Username: "superadmin", IsAdmin: true}
+	b.cfg.SuperAdminID = 10104269
+
+	chat1 := int64(-1001072966891)
+	chat2 := int64(-1001783678483)
+
+	_ = b.db.SaveGroup(chat1, "Golang Malaysia", "supergroup")
+	_ = b.db.SaveGroup(chat2, "Golang Overflow", "supergroup")
+
+	// 1. /setprimarygroup in chat1
+	msg1 := &tgbotapi.Message{
+		MessageID: 1,
+		Chat:      &tgbotapi.Chat{ID: chat1, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: adminUser.UserID, UserName: adminUser.Username},
+		Text:      "/setprimarygroup",
+	}
+	b.handleCommand(msg1, adminUser)
+
+	isPrim1, _ := b.db.IsPrimaryGroup(chat1)
+	if !isPrim1 {
+		t.Errorf("expected chat1 to be primary group after /setprimarygroup")
+	}
+
+	// 2. /setsecondarygroup in chat2
+	msg2 := &tgbotapi.Message{
+		MessageID: 2,
+		Chat:      &tgbotapi.Chat{ID: chat2, Title: "Golang Overflow", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: adminUser.UserID, UserName: adminUser.Username},
+		Text:      "/setsecondarygroup",
+	}
+	b.handleCommand(msg2, adminUser)
+
+	isPrim2, _ := b.db.IsPrimaryGroup(chat2)
+	if isPrim2 {
+		t.Errorf("expected chat2 to be secondary group after /setsecondarygroup")
+	}
+
+	// 3. /setprimarygroup with explicit argument ID
+	msg3 := &tgbotapi.Message{
+		MessageID: 3,
+		Chat:      &tgbotapi.Chat{ID: -5576645586, Title: "Mod Group", Type: "group"},
+		From:      &tgbotapi.User{ID: adminUser.UserID, UserName: adminUser.Username},
+		Text:      fmt.Sprintf("/setprimarygroup %d", chat2),
+	}
+	b.handleCommand(msg3, adminUser)
+
+	isPrim2After, _ := b.db.IsPrimaryGroup(chat2)
+	if !isPrim2After {
+		t.Errorf("expected chat2 to become primary group after /setprimarygroup <id>")
+	}
+
+	// 4. /listgroups command
+	msgList := &tgbotapi.Message{
+		MessageID: 4,
+		Chat:      &tgbotapi.Chat{ID: -5576645586, Title: "Mod Group", Type: "group"},
+		From:      &tgbotapi.User{ID: adminUser.UserID, UserName: adminUser.Username},
+		Text:      "/listgroups",
+	}
+	b.handleCommand(msgList, adminUser)
+}
+
+

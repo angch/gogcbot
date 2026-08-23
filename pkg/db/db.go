@@ -50,6 +50,7 @@ type Group struct {
 	Title       string    `json:"title"`
 	Type        string    `json:"type"`
 	IsMonitored bool      `json:"is_monitored"`
+	IsPrimary   bool      `json:"is_primary"`
 	AddedAt     time.Time `json:"added_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -273,6 +274,7 @@ func (d *DB) AutoMigrate() error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_shieldy_messages_chat_user ON shieldy_messages(chat_id, target_user_id, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_shieldy_messages_created ON shieldy_messages(created_at);`,
+		`ALTER TABLE groups ADD COLUMN is_primary BOOLEAN NOT NULL DEFAULT 0;`,
 	}
 
 	for _, stmt := range migrations {
@@ -303,6 +305,7 @@ func (d *DB) InitSchema() error {
 		title TEXT NOT NULL DEFAULT '',
 		type TEXT NOT NULL DEFAULT '',
 		is_monitored BOOLEAN NOT NULL DEFAULT 1,
+		is_primary BOOLEAN NOT NULL DEFAULT 0,
 		added_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
@@ -755,13 +758,27 @@ func (d *DB) SetUserAdmin(userID int64, isAdmin bool) error {
 func (d *DB) SaveGroup(chatID int64, title, groupType string) error {
 	now := time.Now()
 	_, err := d.Exec(`
-		INSERT INTO groups (chat_id, title, type, is_monitored, added_at, updated_at)
-		VALUES (?, ?, ?, 1, ?, ?)
+		INSERT INTO groups (chat_id, title, type, is_monitored, is_primary, added_at, updated_at)
+		VALUES (?, ?, ?, 1, 0, ?, ?)
 		ON CONFLICT(chat_id) DO UPDATE SET
 			title = excluded.title,
 			type = excluded.type,
 			updated_at = excluded.updated_at
 	`, chatID, title, groupType, now, now)
+	return err
+}
+
+func (d *DB) SaveGroupWithPrimary(chatID int64, title, groupType string, isPrimary bool) error {
+	now := time.Now()
+	_, err := d.Exec(`
+		INSERT INTO groups (chat_id, title, type, is_monitored, is_primary, added_at, updated_at)
+		VALUES (?, ?, ?, 1, ?, ?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET
+			title = excluded.title,
+			type = excluded.type,
+			is_primary = excluded.is_primary,
+			updated_at = excluded.updated_at
+	`, chatID, title, groupType, isPrimary, now, now)
 	return err
 }
 
@@ -771,8 +788,18 @@ func (d *DB) SetGroupMonitored(chatID int64, monitored bool) error {
 	return err
 }
 
+func (d *DB) SetGroupPrimary(chatID int64, isPrimary bool) error {
+	now := time.Now()
+	_, err := d.Exec(`UPDATE groups SET is_primary = ?, updated_at = ? WHERE chat_id = ?`, isPrimary, now, chatID)
+	return err
+}
+
+func (d *DB) SetPrimaryGroup(chatID int64) error {
+	return d.SetGroupPrimary(chatID, true)
+}
+
 func (d *DB) GetMonitoredGroups() ([]Group, error) {
-	rows, err := d.Query(`SELECT chat_id, title, type, is_monitored, added_at, updated_at FROM groups WHERE is_monitored = 1`)
+	rows, err := d.Query(`SELECT chat_id, title, type, is_monitored, is_primary, added_at, updated_at FROM groups WHERE is_monitored = 1`)
 	if err != nil {
 		return nil, err
 	}
@@ -781,7 +808,61 @@ func (d *DB) GetMonitoredGroups() ([]Group, error) {
 	var groups []Group
 	for rows.Next() {
 		var g Group
-		if err := rows.Scan(&g.ChatID, &g.Title, &g.Type, &g.IsMonitored, &g.AddedAt, &g.UpdatedAt); err != nil {
+		if err := rows.Scan(&g.ChatID, &g.Title, &g.Type, &g.IsMonitored, &g.IsPrimary, &g.AddedAt, &g.UpdatedAt); err != nil {
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	return groups, nil
+}
+
+func (d *DB) GetAllGroups() ([]Group, error) {
+	rows, err := d.Query(`SELECT chat_id, title, type, is_monitored, is_primary, added_at, updated_at FROM groups`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var groups []Group
+	for rows.Next() {
+		var g Group
+		if err := rows.Scan(&g.ChatID, &g.Title, &g.Type, &g.IsMonitored, &g.IsPrimary, &g.AddedAt, &g.UpdatedAt); err != nil {
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	return groups, nil
+}
+
+func (d *DB) GetPrimaryGroups() ([]Group, error) {
+	rows, err := d.Query(`SELECT chat_id, title, type, is_monitored, is_primary, added_at, updated_at FROM groups WHERE is_monitored = 1 AND is_primary = 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var groups []Group
+	for rows.Next() {
+		var g Group
+		if err := rows.Scan(&g.ChatID, &g.Title, &g.Type, &g.IsMonitored, &g.IsPrimary, &g.AddedAt, &g.UpdatedAt); err != nil {
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	return groups, nil
+}
+
+func (d *DB) GetSecondaryGroups() ([]Group, error) {
+	rows, err := d.Query(`SELECT chat_id, title, type, is_monitored, is_primary, added_at, updated_at FROM groups WHERE is_monitored = 1 AND is_primary = 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var groups []Group
+	for rows.Next() {
+		var g Group
+		if err := rows.Scan(&g.ChatID, &g.Title, &g.Type, &g.IsMonitored, &g.IsPrimary, &g.AddedAt, &g.UpdatedAt); err != nil {
 			return nil, err
 		}
 		groups = append(groups, g)
@@ -790,12 +871,21 @@ func (d *DB) GetMonitoredGroups() ([]Group, error) {
 }
 
 func (d *DB) GetGroup(chatID int64) (*Group, error) {
-	row := d.QueryRow(`SELECT chat_id, title, type, is_monitored, added_at, updated_at FROM groups WHERE chat_id = ?`, chatID)
+	row := d.QueryRow(`SELECT chat_id, title, type, is_monitored, is_primary, added_at, updated_at FROM groups WHERE chat_id = ?`, chatID)
 	var g Group
-	if err := row.Scan(&g.ChatID, &g.Title, &g.Type, &g.IsMonitored, &g.AddedAt, &g.UpdatedAt); err != nil {
+	if err := row.Scan(&g.ChatID, &g.Title, &g.Type, &g.IsMonitored, &g.IsPrimary, &g.AddedAt, &g.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &g, nil
+}
+
+func (d *DB) IsPrimaryGroup(chatID int64) (bool, error) {
+	var isPrimary bool
+	err := d.QueryRow(`SELECT is_primary FROM groups WHERE chat_id = ?`, chatID).Scan(&isPrimary)
+	if err != nil {
+		return false, err
+	}
+	return isPrimary, nil
 }
 
 // Message Methods

@@ -45,6 +45,7 @@ type DetectorConfig struct {
 	UsernameAnomaly       detector.UsernameAnomalyTriggerConfig  `mapstructure:"username_anomaly" yaml:"username_anomaly,omitempty"`
 	ProfileNameKeywordBan detector.ProfileNameKeywordBanConfig   `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
 	NonsenseBio           detector.NonsenseBioTriggerConfig      `mapstructure:"nonsense_bio" yaml:"nonsense_bio,omitempty"`
+	SecondaryGroup        detector.SecondaryGroupTriggerConfig   `mapstructure:"secondary_group" yaml:"secondary_group,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -151,6 +152,10 @@ func DefaultConfig() Config {
 				FlagOnly:      true,
 				RepPenalty:    20,
 			},
+			SecondaryGroup: detector.SecondaryGroupTriggerConfig{
+				Enabled:    true,
+				RepPenalty: 20,
+			},
 		},
 		Shieldy: ShieldyConfig{
 			Enabled:             true,
@@ -243,6 +248,8 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.profile_name_keyword_ban.flag_only", true)
 	v.SetDefault("detector.profile_name_keyword_ban.rep_penalty", 20)
 	v.SetDefault("detector.profile_name_keyword_ban.blocked_keywords", []string{"0壹天", "每日", "吴压", "吾思", "兼织"})
+	v.SetDefault("detector.secondary_group.enabled", true)
+	v.SetDefault("detector.secondary_group.rep_penalty", 20)
 	v.SetDefault("shieldy.enabled", true)
 	v.SetDefault("shieldy.rep_bonus", 5)
 	v.SetDefault("shieldy.max_messages", 5)

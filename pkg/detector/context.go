@@ -20,11 +20,14 @@ type TriggerContext struct {
 	BusinessIntro        string // Telegram business intro message/title
 	HasPhoto             bool   // Whether user has profile avatar
 	PhotoCount           int    // Number of profile photos
-	IsNewUser            bool   // True if user was newly created in DB for this message
-	UserMessageCount     int    // Total posts by user in DB
-	ChatID               int64
-	GroupTitle           string
-	HasVerifiedNotBot    bool // True if user verified with "I am not a bot"
+	IsNewUser              bool   // True if user was newly created in DB for this message
+	UserMessageCount       int    // Total posts by user in DB
+	ChatID                 int64
+	GroupTitle             string
+	HasVerifiedNotBot      bool   // True if user verified with "I am not a bot"
+	IsSecondaryGroup       bool   // True if the current chat is a secondary group
+	IsMemberOfPrimaryGroup bool   // True if user is verified to be a member of the primary group(s)
+	PrimaryGroupNames      string // Descriptive titles/IDs of primary group(s) checked
 }
 
 // DisplayName returns the trimmed combined display name of the context user, or empty string.

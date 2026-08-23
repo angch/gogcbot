@@ -1706,3 +1706,92 @@ func TestShieldyMessages(t *testing.T) {
 	}
 }
 
+func TestGroup_PrimaryAndSecondaryOperations(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Save initial groups
+	primaryChatID := int64(-1001072966891)
+	secondaryChatID := int64(-1001783678483)
+
+	if err := database.SaveGroup(primaryChatID, "Golang Malaysia Main", "supergroup"); err != nil {
+		t.Fatalf("failed to save group 1: %v", err)
+	}
+	if err := database.SaveGroup(secondaryChatID, "Golang Malaysia Overflow", "supergroup"); err != nil {
+		t.Fatalf("failed to save group 2: %v", err)
+	}
+
+	// Both should default to is_primary = false
+	g1, err := database.GetGroup(primaryChatID)
+	if err != nil {
+		t.Fatalf("failed to get group 1: %v", err)
+	}
+	if g1.IsPrimary {
+		t.Errorf("expected group 1 to default to is_primary=false")
+	}
+
+	// 2. Set primary group
+	if err := database.SetGroupPrimary(primaryChatID, true); err != nil {
+		t.Fatalf("failed to set primary group: %v", err)
+	}
+
+	isPrim, err := database.IsPrimaryGroup(primaryChatID)
+	if err != nil || !isPrim {
+		t.Errorf("expected is_primary to be true for primaryChatID, got %v, err: %v", isPrim, err)
+	}
+
+	isPrim2, err := database.IsPrimaryGroup(secondaryChatID)
+	if err != nil || isPrim2 {
+		t.Errorf("expected is_primary to be false for secondaryChatID, got %v, err: %v", isPrim2, err)
+	}
+
+	// 3. Query primary and secondary groups
+	primaryGroups, err := database.GetPrimaryGroups()
+	if err != nil {
+		t.Fatalf("failed to get primary groups: %v", err)
+	}
+	if len(primaryGroups) != 1 || primaryGroups[0].ChatID != primaryChatID {
+		t.Errorf("unexpected primary groups: %+v", primaryGroups)
+	}
+
+	secondaryGroups, err := database.GetSecondaryGroups()
+	if err != nil {
+		t.Fatalf("failed to get secondary groups: %v", err)
+	}
+	if len(secondaryGroups) != 1 || secondaryGroups[0].ChatID != secondaryChatID {
+		t.Errorf("unexpected secondary groups: %+v", secondaryGroups)
+	}
+
+	// 4. SaveGroup preserves is_primary on conflict
+	if err := database.SaveGroup(primaryChatID, "Golang Malaysia Main Updated", "supergroup"); err != nil {
+		t.Fatalf("failed to update group 1: %v", err)
+	}
+	g1Updated, err := database.GetGroup(primaryChatID)
+	if err != nil {
+		t.Fatalf("failed to get updated group 1: %v", err)
+	}
+	if !g1Updated.IsPrimary || g1Updated.Title != "Golang Malaysia Main Updated" {
+		t.Errorf("expected is_primary to be preserved on SaveGroup conflict, got %+v", g1Updated)
+	}
+
+	// 5. SaveGroupWithPrimary
+	thirdChatID := int64(-100999888)
+	if err := database.SaveGroupWithPrimary(thirdChatID, "Third Group Primary", "supergroup", true); err != nil {
+		t.Fatalf("failed to save group with primary: %v", err)
+	}
+	g3, err := database.GetGroup(thirdChatID)
+	if err != nil || !g3.IsPrimary {
+		t.Errorf("expected third group to be primary, got %+v", g3)
+	}
+
+	// 6. GetAllGroups
+	allGroups, err := database.GetAllGroups()
+	if err != nil {
+		t.Fatalf("failed to get all groups: %v", err)
+	}
+	if len(allGroups) != 3 {
+		t.Errorf("expected 3 all groups, got %d", len(allGroups))
+	}
+}
+
+

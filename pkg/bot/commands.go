@@ -52,6 +52,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 		b.cmdAddGroup(msg, isAuthorized)
 	case "removegroup":
 		b.cmdRemoveGroup(msg, isAuthorized)
+	case "setprimarygroup", "setprimary":
+		b.cmdSetPrimaryGroup(msg, args, isAuthorized)
+	case "setsecondarygroup", "setsecondary":
+		b.cmdSetSecondaryGroup(msg, args, isAuthorized)
 	case "listgroups":
 		b.cmdListGroups(msg, isAuthorized)
 	case "checkperms":
@@ -97,16 +101,19 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message, user *db.User) {
 
 func parseCommand(msg *tgbotapi.Message) (string, string) {
 	cmd := msg.Command()
-	if cmd == "" && strings.HasPrefix(msg.Text, "!") {
+	if cmd == "" && (strings.HasPrefix(msg.Text, "!") || strings.HasPrefix(msg.Text, "/")) {
 		parts := strings.Fields(msg.Text[1:])
 		if len(parts) > 0 {
 			cmd = parts[0]
 		}
 	}
+	if strings.Contains(cmd, "@") {
+		cmd = strings.Split(cmd, "@")[0]
+	}
 	cmd = strings.ToLower(cmd)
 
 	args := msg.CommandArguments()
-	if args == "" && strings.HasPrefix(msg.Text, "!") {
+	if args == "" && (strings.HasPrefix(msg.Text, "!") || strings.HasPrefix(msg.Text, "/")) {
 		parts := strings.Fields(msg.Text)
 		if len(parts) > 1 {
 			args = strings.Join(parts[1:], " ")
@@ -224,6 +231,88 @@ func (b *Bot) cmdRemoveGroup(msg *tgbotapi.Message, isAuthorized bool) {
 	b.replyText(msg, fmt.Sprintf("🚫 Monitoring disabled for group `%s` (ID: `%d`).", msg.Chat.Title, msg.Chat.ID))
 }
 
+func (b *Bot) cmdSetPrimaryGroup(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	if !isAuthorized {
+		b.replyText(msg, "❌ Permission denied.")
+		return
+	}
+
+	targetChatID := msg.Chat.ID
+	targetTitle := msg.Chat.Title
+	targetType := msg.Chat.Type
+
+	args = strings.TrimSpace(args)
+	if args != "" {
+		if id, err := strconv.ParseInt(args, 10, 64); err == nil && id != 0 {
+			targetChatID = id
+			if g, err := b.db.GetGroup(id); err == nil && g != nil && g.Title != "" {
+				targetTitle = g.Title
+				targetType = g.Type
+			} else {
+				targetTitle = fmt.Sprintf("Chat %d", id)
+			}
+		}
+	}
+
+	if targetChatID == 0 || (!msg.Chat.IsGroup() && !msg.Chat.IsSuperGroup() && args == "") {
+		b.replyText(msg, "Usage: `/setprimarygroup [chat_id]` or run inside the target group.")
+		return
+	}
+
+	if err := b.db.SaveGroup(targetChatID, targetTitle, targetType); err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Error saving group: %v", err))
+		return
+	}
+	if err := b.db.SetGroupPrimary(targetChatID, true); err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Error setting primary group: %v", err))
+		return
+	}
+	_ = b.db.SetGroupMonitored(targetChatID, true)
+
+	b.replyText(msg, fmt.Sprintf("⭐ Group `%s` (ID: `%d`) is now set as a **Primary Group** (Monitored: ✅)!", targetTitle, targetChatID))
+}
+
+func (b *Bot) cmdSetSecondaryGroup(msg *tgbotapi.Message, args string, isAuthorized bool) {
+	if !isAuthorized {
+		b.replyText(msg, "❌ Permission denied.")
+		return
+	}
+
+	targetChatID := msg.Chat.ID
+	targetTitle := msg.Chat.Title
+	targetType := msg.Chat.Type
+
+	args = strings.TrimSpace(args)
+	if args != "" {
+		if id, err := strconv.ParseInt(args, 10, 64); err == nil && id != 0 {
+			targetChatID = id
+			if g, err := b.db.GetGroup(id); err == nil && g != nil && g.Title != "" {
+				targetTitle = g.Title
+				targetType = g.Type
+			} else {
+				targetTitle = fmt.Sprintf("Chat %d", id)
+			}
+		}
+	}
+
+	if targetChatID == 0 || (!msg.Chat.IsGroup() && !msg.Chat.IsSuperGroup() && args == "") {
+		b.replyText(msg, "Usage: `/setsecondarygroup [chat_id]` or run inside the target group.")
+		return
+	}
+
+	if err := b.db.SaveGroup(targetChatID, targetTitle, targetType); err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Error saving group: %v", err))
+		return
+	}
+	if err := b.db.SetGroupPrimary(targetChatID, false); err != nil {
+		b.replyText(msg, fmt.Sprintf("❌ Error setting secondary group: %v", err))
+		return
+	}
+	_ = b.db.SetGroupMonitored(targetChatID, true)
+
+	b.replyText(msg, fmt.Sprintf("👥 Group `%s` (ID: `%d`) is now set as a **Secondary Group** (Monitored: ✅)!", targetTitle, targetChatID))
+}
+
 func (b *Bot) cmdListGroups(msg *tgbotapi.Message, isAuthorized bool) {
 	if !isAuthorized {
 		b.replyText(msg, "❌ Permission denied.")
@@ -241,7 +330,11 @@ func (b *Bot) cmdListGroups(msg *tgbotapi.Message, isAuthorized bool) {
 	var sb strings.Builder
 	sb.WriteString("📋 **Monitored Groups List**:\n\n")
 	for i, g := range groups {
-		sb.WriteString(fmt.Sprintf("%d. %s (`%d`) [%s]\n", i+1, g.Title, g.ChatID, g.Type))
+		roleTag := "[Secondary]"
+		if g.IsPrimary {
+			roleTag = "[⭐ Primary]"
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s (`%d`) [%s] %s\n", i+1, g.Title, g.ChatID, g.Type, roleTag))
 	}
 	b.replyText(msg, sb.String())
 }
@@ -1541,6 +1634,7 @@ func getHelpText(isSuperAdmin, isModGroup bool) string {
 		"**Moderator & Super Admin Commands**:\n" +
 		"• `/setmodgroup` - Set current chat as the Private Moderation Group (Admin only)\n" +
 		"• `/addgroup` / `/removegroup` - Enable/disable group monitoring\n" +
+		"• `/setprimarygroup [chat_id]` / `/setsecondarygroup [chat_id]` - Set group as primary or secondary\n" +
 		"• `/listgroups` - List all monitored groups\n" +
 		"• `/rep <user|@username> [delta]` - Check or adjust reputation\n" +
 		"• `/warn <user|@username>` - Issue warning & deduct rep\n" +
