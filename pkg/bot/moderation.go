@@ -695,12 +695,32 @@ func (b *Bot) RescanLowRepUsers(ctx context.Context, opts RescanOptions, progres
 		var triggeredRes *detector.TriggerResult
 
 		msgCount, _ := b.db.GetUserMessageCount(userCopy.UserID)
-		results, _ := b.EvaluateUserContext(&userCopy, profile, 0, "", true, msgCount)
-		for _, r := range results {
-			if r != nil && r.Triggered {
-				triggeredRes = r
-				triggeredRule = r.TriggerID
-				reason = r.Reason
+
+		// Check against recorded join groups (or chatID 0 if none)
+		userJoins, _ := b.db.GetUserJoins(userCopy.UserID, 50)
+		checkedChats := make(map[int64]string)
+		for _, uj := range userJoins {
+			if uj.ChatID != 0 {
+				checkedChats[uj.ChatID] = uj.ChatTitle
+			}
+		}
+		if len(checkedChats) == 0 {
+			checkedChats[0] = ""
+		}
+
+		var triggeredChatID int64
+		for cID, cTitle := range checkedChats {
+			results, _ := b.EvaluateUserContext(&userCopy, profile, cID, cTitle, true, msgCount)
+			for _, r := range results {
+				if r != nil && r.Triggered {
+					triggeredRes = r
+					triggeredRule = r.TriggerID
+					reason = r.Reason
+					triggeredChatID = cID
+					break
+				}
+			}
+			if triggeredRes != nil {
 				break
 			}
 		}
@@ -712,13 +732,13 @@ func (b *Bot) RescanLowRepUsers(ctx context.Context, opts RescanOptions, progres
 
 			if !opts.DryRun {
 				alertMsg := &db.Message{
-					ChatID:    0,
+					ChatID:    triggeredChatID,
 					MessageID: 0,
 					UserID:    userCopy.UserID,
 					Text:      FormatUserTriggerAlertSnippet(triggeredRule, &userCopy, profile),
 					CreatedAt: time.Now(),
 				}
-				b.ExecuteActions(0, &userCopy, alertMsg, triggeredRes.Actions)
+				b.ExecuteActions(triggeredChatID, &userCopy, alertMsg, triggeredRes.Actions)
 			}
 		} else {
 			res.CleanCount++

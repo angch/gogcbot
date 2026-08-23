@@ -319,29 +319,34 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			}
 		}
 
+		isSec, isMember, pNames := b.CheckSecondaryGroupAndPrimaryMembership(chat.ID, user.UserID)
+
 		tCtx := &detector.TriggerContext{
-			Message:              dbMsg,
-			RawMessage:           msg,
-			Text:                 text,
-			User:                 user,
-			UserBio:              userBio,
-			LanguageCode:         msg.From.LanguageCode,
-			IsPremium:            user.IsPremium,
-			HasPrivateForwards:   hasPrivateForwards,
-			PersonalChatTitle:    personalChatTitle,
-			PersonalChatUsername: personalChatUsername,
-			BusinessIntro:        businessIntro,
-			HasPhoto:             hasPhoto,
-			PhotoCount:           photoCount,
-			IsNewUser:            isNewUser,
-			UserMessageCount:     userMsgCount,
-			ChatID:               chat.ID,
-			GroupTitle:           chat.Title,
-			HasVerifiedNotBot:    hasVerified,
+			Message:                dbMsg,
+			RawMessage:             msg,
+			Text:                   text,
+			User:                   user,
+			UserBio:                userBio,
+			LanguageCode:           msg.From.LanguageCode,
+			IsPremium:              user.IsPremium,
+			HasPrivateForwards:     hasPrivateForwards,
+			PersonalChatTitle:      personalChatTitle,
+			PersonalChatUsername:   personalChatUsername,
+			BusinessIntro:          businessIntro,
+			HasPhoto:               hasPhoto,
+			PhotoCount:             photoCount,
+			IsNewUser:              isNewUser,
+			UserMessageCount:       userMsgCount,
+			ChatID:                 chat.ID,
+			GroupTitle:             chat.Title,
+			HasVerifiedNotBot:      hasVerified,
+			IsSecondaryGroup:       isSec,
+			IsMemberOfPrimaryGroup: isMember,
+			PrimaryGroupNames:      pNames,
 		}
 
-		if b.detector != nil {
-			results, err := b.detector.Evaluate(tCtx)
+		if b.Detector() != nil {
+			results, err := b.Detector().Evaluate(tCtx)
 			if err != nil {
 				log.Printf("[Bot] Error evaluating detection triggers: %v", err)
 			} else if len(results) > 0 {

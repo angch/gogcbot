@@ -1943,11 +1943,24 @@ func (d *DB) GetLowRepUsersForRescan(maxRep int, cutoff time.Time, limit int) ([
 		args = append(args, maxRep)
 	} else {
 		query = `
-			SELECT u.user_id, u.username, u.first_name, u.last_name, u.language_code, u.is_premium, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
+			SELECT DISTINCT u.user_id, u.username, u.first_name, u.last_name, u.language_code, u.is_premium, u.reputation, u.warn_count, u.is_banned, u.is_admin, u.created_at, u.updated_at
 			FROM users u
 			LEFT JOIN user_profiles p ON u.user_id = p.user_id
 			WHERE u.is_banned = 0 AND u.is_admin = 0 AND u.reputation <= ?
-			  AND (p.fetched_at IS NULL OR p.fetched_at < ?)
+			  AND (
+			      p.fetched_at IS NULL
+			      OR p.fetched_at < ?
+			      OR u.user_id IN (
+			          SELECT DISTINCT uj.user_id FROM user_joins uj
+			          JOIN groups g ON uj.chat_id = g.chat_id
+			          WHERE g.is_monitored = 1 AND g.is_primary = 0
+			      )
+			      OR u.user_id IN (
+			          SELECT DISTINCT m.user_id FROM messages m
+			          JOIN groups g ON m.chat_id = g.chat_id
+			          WHERE g.is_monitored = 1 AND g.is_primary = 0
+			      )
+			  )
 			ORDER BY u.reputation ASC, u.user_id DESC
 		`
 		args = append(args, maxRep, cutoff)

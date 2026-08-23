@@ -2826,4 +2826,106 @@ func TestCmdSetPrimaryGroup_And_CmdSetSecondaryGroup(t *testing.T) {
 	b.handleCommand(msgList, adminUser)
 }
 
+func TestRescanLowRepUsers_SecondaryGroup_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	primaryChatID := int64(-1001072966891)
+	secondaryChatID := int64(-1001783678483)
+	userID := int64(888999555)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	_ = b.db.SaveGroupWithPrimary(primaryChatID, "Golang Malaysia Main", "supergroup", true)
+	_ = b.db.SaveGroupWithPrimary(secondaryChatID, "Golang Malaysia Overflow", "supergroup", false)
+
+	// User joined secondary group in the past
+	_, _, _ = b.db.GetOrCreateUser(userID, "past_joiner", "Past", "Joiner", 0)
+	_ = b.db.LogUserJoin(userID, secondaryChatID, "Golang Malaysia Overflow", "supergroup")
+
+	// Pre-seed profile fetched 30h ago so rescan picks them up
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:    userID,
+		Username:  "past_joiner",
+		FetchedAt: time.Now().Add(-30 * time.Hour),
+	})
+
+	// Mock GetChatMember: user is NOT in primary group
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		if config.ChatID == primaryChatID {
+			return tgbotapi.ChatMember{Status: "left"}, nil
+		}
+		return tgbotapi.ChatMember{Status: "member"}, nil
+	})
+
+	opts := RescanOptions{
+		MaxReputation: 20,
+		Hours:         24,
+		Delay:         1 * time.Millisecond,
+	}
+
+	res, err := b.RescanLowRepUsers(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatalf("rescan failed: %v", err)
+	}
+
+	if res.BannedCount != 1 {
+		t.Errorf("expected 1 user banned via rescan secondary group rule, got %d", res.BannedCount)
+	}
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil || !u.IsBanned {
+		t.Errorf("expected user %d to be banned after rescan evaluated secondary group join history", userID)
+	}
+}
+
+func TestHandleMessage_SecondaryGroup_UserNotInPrimaryGroup_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	primaryChatID := int64(-1001072966891)
+	secondaryChatID := int64(-1001783678483)
+	userID := int64(888999666)
+
+	b.cfg.ModerationGroupID = -100998877
+
+	_ = b.db.SaveGroupWithPrimary(primaryChatID, "Golang Malaysia Main", "supergroup", true)
+	_ = b.db.SaveGroupWithPrimary(secondaryChatID, "Golang Malaysia Overflow", "supergroup", false)
+
+	// Mock GetChatMember: user is NOT in primary group
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		if config.ChatID == primaryChatID {
+			return tgbotapi.ChatMember{Status: "left"}, nil
+		}
+		return tgbotapi.ChatMember{Status: "member"}, nil
+	})
+
+	msg := &tgbotapi.Message{
+		MessageID: 201,
+		Chat: &tgbotapi.Chat{
+			ID:    secondaryChatID,
+			Title: "Golang Malaysia Overflow",
+			Type:  "supergroup",
+		},
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "msg_spammer",
+			FirstName: "Msg",
+			LastName:  "Spammer",
+		},
+		Text: "Hello in secondary group",
+	}
+
+	b.handleMessage(msg)
+
+	u, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to query user %d: %v", userID, err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user %d to be banned after posting in secondary group without primary group membership", userID)
+	}
+}
+
+
 
