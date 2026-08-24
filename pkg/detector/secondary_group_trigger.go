@@ -6,8 +6,9 @@ import (
 
 // SecondaryGroupTriggerConfig configures thresholds for the secondary group join detection trigger.
 type SecondaryGroupTriggerConfig struct {
-	Enabled    bool `mapstructure:"enabled" yaml:"enabled"`
-	RepPenalty int  `mapstructure:"rep_penalty" yaml:"rep_penalty"`
+	Enabled       bool `mapstructure:"enabled" yaml:"enabled"`
+	MaxReputation int  `mapstructure:"max_reputation" yaml:"max_reputation"`
+	RepPenalty    int  `mapstructure:"rep_penalty" yaml:"rep_penalty"`
 }
 
 // SecondaryGroupTrigger detects users joining a secondary group without being a member of the primary group.
@@ -41,6 +42,15 @@ func (t *SecondaryGroupTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, e
 
 	// Exempt admins and whitelisted users (reputation >= 100)
 	if ctx.User.IsAdmin || ctx.User.Reputation >= 100 {
+		return &TriggerResult{Triggered: false}, nil
+	}
+
+	// Exempt users whose reputation exceeds MaxReputation threshold (e.g. rep >= 50 or rep > maxRep)
+	maxRep := t.cfg.MaxReputation
+	if maxRep <= 0 {
+		maxRep = 5
+	}
+	if ctx.User.Reputation > maxRep {
 		return &TriggerResult{Triggered: false}, nil
 	}
 

@@ -61,6 +61,11 @@ func (t *NewUserSpamBioTrigger) Evaluate(ctx *TriggerContext) (*TriggerResult, e
 		return &TriggerResult{Triggered: false}, nil
 	}
 
+	// Whitelist: Admins and high reputation users (>= 100) are exempt
+	if ctx.User.IsAdmin || ctx.User.Reputation >= 100 {
+		return &TriggerResult{Triggered: false}, nil
+	}
+
 	// Condition 1: Whitelist / Max reputation check
 	maxRep := t.cfg.MaxReputation
 	if maxRep <= 0 {

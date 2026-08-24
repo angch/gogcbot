@@ -166,6 +166,29 @@ func (d *Detector) ValidateAgainstHighRepUsers(database *db.DB, minRep int) ([]R
 				}
 			}
 		}
+
+		// 4. Check Secondary Group context (simulating user joining secondary group without primary group)
+		secJoinCtx := baseCtx()
+		secJoinCtx.IsNewUser = true
+		secJoinCtx.UserMessageCount = 0
+		secJoinCtx.IsSecondaryGroup = true
+		secJoinCtx.IsMemberOfPrimaryGroup = false
+		secJoinResults, err := d.Evaluate(secJoinCtx)
+		if err != nil {
+			return nil, fmt.Errorf("error evaluating secondary group join context for user %d: %w", userCopy.UserID, err)
+		}
+		for _, res := range secJoinResults {
+			if res != nil && res.Triggered {
+				violations = append(violations, RuleMatchViolation{
+					TriggerID:   res.TriggerID,
+					TriggerName: d.getTriggerName(res.TriggerID),
+					User:        &userCopy,
+					Profile:     profile,
+					ContextType: "secondary_group_join",
+					Reason:      res.Reason,
+				})
+			}
+		}
 	}
 
 	return violations, nil

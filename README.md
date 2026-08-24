@@ -93,7 +93,7 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
       - Deletes the join service message and any Shieldy captcha challenges.
       - Deducts reputation points (-20).
       - Dispatches a trigger ban notification to the Private Moderation Group.
-    - **Exemptions**: Bot administrators and whitelisted users with maximum reputation (>= 100) are exempt.
+    - **Exemptions**: Bot administrators, whitelisted users with maximum reputation (>= 100), and users with reputation exceeding the configured threshold (`max_reputation`, default 5, including rep 50+) are exempt.
     - **Commands**: Configure group roles on the fly via `/setprimarygroup [chat_id]` and `/setsecondarygroup [chat_id]`, with role badges (`[⭐ Primary]` / `[Secondary]`) displayed in `/listgroups`.
 
 14. **Unified Detection Pipeline & Lifecycle Integration**:
@@ -247,6 +247,35 @@ detector:
     min_username_length: 5
     min_cjk_ratio: 0.5
     min_cjk_chars: 1
+    rep_penalty: 20
+  username_anomaly:
+    enabled: true
+    min_high_user_id: 1000000000
+    max_reputation: 5
+    max_user_posts: 5
+    min_score: 3
+    flag_only: true
+    rep_penalty: 20
+  profile_name_keyword_ban:
+    enabled: true
+    min_high_user_id: 1000000000
+    max_reputation: 5
+    max_user_posts: 5
+    min_score: 3
+    flag_only: true
+    rep_penalty: 20
+    blocked_keywords: ["0壹天", "每日", "吴压", "吾思", "兼织"]
+  nonsense_bio:
+    enabled: true
+    min_high_user_id: 1000000000
+    max_reputation: 5
+    max_user_posts: 5
+    min_words: 5
+    flag_only: true
+    rep_penalty: 20
+  secondary_group:
+    enabled: true
+    max_reputation: 5
     rep_penalty: 20
 
 shieldy:

@@ -165,3 +165,45 @@ func TestSecondaryGroupTrigger_Disabled(t *testing.T) {
 		t.Errorf("expected disabled trigger not to fire")
 	}
 }
+
+func TestSecondaryGroupTrigger_HighRepExemption(t *testing.T) {
+	trig := NewSecondaryGroupTrigger(SecondaryGroupTriggerConfig{
+		Enabled:       true,
+		MaxReputation: 5,
+		RepPenalty:    20,
+	})
+
+	testCases := []struct {
+		name string
+		rep  int
+	}{
+		{"Reputation 50", 50},
+		{"Reputation 41", 41},
+		{"Reputation 10", 10},
+		{"Reputation 100", 100},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &TriggerContext{
+				User: &db.User{
+					UserID:     555123,
+					Username:   "establisheduser",
+					Reputation: tc.rep,
+				},
+				ChatID:                 -1001783678483,
+				GroupTitle:             "Secondary Group",
+				IsSecondaryGroup:       true,
+				IsMemberOfPrimaryGroup: false,
+			}
+
+			res, err := trig.Evaluate(ctx)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Triggered {
+				t.Errorf("expected high reputation user (rep=%d) to be exempt from secondary group trigger, got triggered: true", tc.rep)
+			}
+		})
+	}
+}

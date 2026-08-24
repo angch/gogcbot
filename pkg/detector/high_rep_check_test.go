@@ -86,6 +86,11 @@ func buildStandardTestDetector() *Detector {
 			FlagOnly:      true,
 			RepPenalty:    20,
 		}),
+		NewSecondaryGroupTrigger(SecondaryGroupTriggerConfig{
+			Enabled:       true,
+			MaxReputation: 5,
+			RepPenalty:    20,
+		}),
 	)
 }
 
@@ -160,7 +165,7 @@ func TestTriggers_NoMatchAgainstHighRepUsers_SyntheticDB(t *testing.T) {
 			messages: []string{"Hello world", "测试中文消息", "Check out https://github.com/angch/gogcbot"},
 		},
 		{
-			// High ID, rep 50, has CJK in name and mixed-caps username
+			// High ID, rep 50, has CJK in name and mixed-caps username (red_packet_cjk_name trigger target)
 			userID:   5000000001,
 			username: "cbzbQFLOuHNkJZ",
 			first:    "每日首发🧧",
@@ -170,28 +175,58 @@ func TestTriggers_NoMatchAgainstHighRepUsers_SyntheticDB(t *testing.T) {
 			messages: []string{"Just chatting here", "大家好！"},
 		},
 		{
-			// Rep 41, has blocked keyword in name and spammy bio
+			// Rep 50, has blocked keyword in name and spammy bio (profile_name_keyword_ban & spam_bio target)
 			userID:   6000000002,
-			username: "member41",
+			username: "member50_spamkw",
 			first:    "六o0壹天",
 			last:     "",
-			rep:      41,
-			bio:      "联系 沃尔玛 永辉",
-			messages: []string{"Nice group!"},
+			rep:      50,
+			bio:      "联系 沃尔玛 永辉 crypto giveaway airdrop",
+			messages: []string{"Nice group!", "Check out this crypto airdrop t.me/airdrop"},
 		},
 		{
-			// Rep 100, has auto-generated handle signature
+			// Rep 50, has auto-generated handle signature (username_anomaly target)
 			userID:   7000000003,
 			username: "qtdulcljcptk6950",
 			first:    "David",
 			last:     "Brown",
-			rep:      100,
-			bio:      "Crypto and tech enthusiast",
+			rep:      50,
+			bio:      "Tech enthusiast",
 			messages: []string{"Welcome to the community!"},
 		},
 		{
+			// Rep 50, has nonsense filler bio (nonsense_bio target)
+			userID:   7000000004,
+			username: "filleruser50",
+			first:    "James",
+			last:     "Smith",
+			rep:      50,
+			bio:      "Scientist near entire offer stay.",
+			messages: []string{"Hello everyone here."},
+		},
+		{
+			// Rep 50, high ID, sent purely CJK messages (new_user_cjk target)
+			userID:   7000000005,
+			username: "cjkuser50",
+			first:    "李明",
+			last:     "",
+			rep:      50,
+			bio:      "Software developer",
+			messages: []string{"你好大家，欢迎来到群组！", "今天天气真好。"},
+		},
+		{
+			// Rep 41, has blocked keyword in name
+			userID:   6000000006,
+			username: "member41",
+			first:    "吴压吾思",
+			last:     "",
+			rep:      41,
+			bio:      "Member bio",
+			messages: []string{"Hello!"},
+		},
+		{
 			// Rep 5 (low rep user) - should be skipped by ValidateAgainstHighRepUsers(minRep=40)
-			userID:   8000000004,
+			userID:   8000000007,
 			username: "lowrepuser",
 			first:    "SpamBot",
 			last:     "",

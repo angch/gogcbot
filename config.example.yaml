@@ -72,6 +72,18 @@ detector:
       - "吴压"
       - "吾思"
       - "兼织"
+  nonsense_bio:
+    enabled: true
+    min_high_user_id: 1000000000
+    max_reputation: 5
+    max_user_posts: 5
+    min_words: 5
+    flag_only: true
+    rep_penalty: 20
+  secondary_group:
+    enabled: true
+    max_reputation: 5
+    rep_penalty: 20
 
 shieldy:
   enabled: true

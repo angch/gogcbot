@@ -417,10 +417,10 @@ func (b *Bot) checkAutoFlagRules(msg *tgbotapi.Message, dbMsg *db.Message, user 
 		reasons = append(reasons, fmt.Sprintf("Low Reputation (%d < %d) with link", user.Reputation, b.cfg.AutoFlag.LowRepThreshold))
 	}
 
-	// Rule 2: New User + Link
+	// Rule 2: New User with Low Reputation + Link
 	userMsgCount, _ := b.db.GetUserMessageCount(user.UserID)
-	if b.cfg.AutoFlag.FlagOnLinks && dbMsg.HasLinks && userMsgCount <= b.cfg.AutoFlag.NewUserMinPosts {
-		reasons = append(reasons, fmt.Sprintf("New user (%d <= %d posts) with link", userMsgCount, b.cfg.AutoFlag.NewUserMinPosts))
+	if b.cfg.AutoFlag.FlagOnLinks && dbMsg.HasLinks && userMsgCount <= b.cfg.AutoFlag.NewUserMinPosts && user.Reputation < b.cfg.AutoFlag.LowRepThreshold {
+		reasons = append(reasons, fmt.Sprintf("New user (%d <= %d posts) with low reputation (%d < %d) and link", userMsgCount, b.cfg.AutoFlag.NewUserMinPosts, user.Reputation, b.cfg.AutoFlag.LowRepThreshold))
 	}
 
 	// Rule 3: Blocked Keywords & DB Spam Snippets

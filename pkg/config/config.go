@@ -153,8 +153,9 @@ func DefaultConfig() Config {
 				RepPenalty:    20,
 			},
 			SecondaryGroup: detector.SecondaryGroupTriggerConfig{
-				Enabled:    true,
-				RepPenalty: 20,
+				Enabled:       true,
+				MaxReputation: 5,
+				RepPenalty:    20,
 			},
 		},
 		Shieldy: ShieldyConfig{
@@ -249,6 +250,7 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.profile_name_keyword_ban.rep_penalty", 20)
 	v.SetDefault("detector.profile_name_keyword_ban.blocked_keywords", []string{"0壹天", "每日", "吴压", "吾思", "兼织"})
 	v.SetDefault("detector.secondary_group.enabled", true)
+	v.SetDefault("detector.secondary_group.max_reputation", 5)
 	v.SetDefault("detector.secondary_group.rep_penalty", 20)
 	v.SetDefault("shieldy.enabled", true)
 	v.SetDefault("shieldy.rep_bonus", 5)
