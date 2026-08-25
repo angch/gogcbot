@@ -2973,3 +2973,128 @@ func TestHandleMessage_SecondaryGroup_UserNotInPrimaryGroup_TriggersBan(t *testi
 		t.Errorf("expected user %d to be banned after posting in secondary group without primary group membership", userID)
 	}
 }
+
+func TestCallback_AddKnownBadUser(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.cfg.SuperAdminID = 10104269
+
+	userID := int64(99887766)
+	_, _, _ = b.db.GetOrCreateUser(userID, "badactor", "Spam", "Bot", 0)
+	_ = b.db.SaveUserProfile(&db.UserProfile{
+		UserID:    userID,
+		Username:  "badactor",
+		FirstName: "Spam",
+		LastName:  "Bot",
+		Bio:       "Free crypto tokens t.me/spam",
+		FetchedAt: time.Now(),
+	})
+	_ = b.db.SaveMessage(&db.Message{
+		ChatID:    -1001,
+		MessageID: 10,
+		UserID:    userID,
+		Text:      "Join crypto spam now",
+		CreatedAt: time.Now(),
+	})
+
+	cb := &tgbotapi.CallbackQuery{
+		ID:   "cb123",
+		Data: fmt.Sprintf("mod:add_bad:%d", userID),
+		From: &tgbotapi.User{
+			ID:       10104269,
+			UserName: "angch",
+		},
+		Message: &tgbotapi.Message{
+			MessageID: 55,
+			Chat: &tgbotapi.Chat{
+				ID: -100998877,
+			},
+			Text: "🚫 TRIGGER BAN EXECUTED",
+		},
+	}
+
+	b.handleCallbackQuery(cb)
+
+	// Verify user is saved to known_bad_data
+	kb, err := b.db.GetKnownBadUserByUserID(userID)
+	if err != nil || kb == nil {
+		t.Fatalf("expected user %d to be in known_bad_data, err: %v", userID, err)
+	}
+	if kb.Username != "badactor" || kb.Bio != "Free crypto tokens t.me/spam" {
+		t.Errorf("unexpected known bad user data: %+v", kb)
+	}
+	if kb.Source != "telegram_button" {
+		t.Errorf("expected source to be 'telegram_button', got %q", kb.Source)
+	}
+	if len(kb.SampleMessages) != 1 || kb.SampleMessages[0] != "Join crypto spam now" {
+		t.Errorf("expected sample messages to be populated, got %+v", kb.SampleMessages)
+	}
+}
+
+func TestAutomatedKickban_DoesNotAutoAddToKnownData(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+
+	initialBadCount, _ := b.db.GetKnownBadCount()
+	initialGoodCount, _ := b.db.GetKnownGoodCount()
+
+	user, _, _ := b.db.GetOrCreateUser(776655, "autospam", "Auto", "Spam", 0)
+	msg := &db.Message{
+		ChatID:    -1001,
+		MessageID: 99,
+		UserID:    user.UserID,
+		Text:      "Spam message for automated trigger",
+		CreatedAt: time.Now(),
+	}
+
+	// Trigger automated ban alert
+	_ = b.SendTriggerBanAlert(-1001, user, msg, "Automated test trigger")
+
+	badCountAfter, _ := b.db.GetKnownBadCount()
+	goodCountAfter, _ := b.db.GetKnownGoodCount()
+
+	if badCountAfter != initialBadCount {
+		t.Errorf("expected known bad count to remain %d, got %d (automated match should NOT auto-add to known bad)", initialBadCount, badCountAfter)
+	}
+	if goodCountAfter != initialGoodCount {
+		t.Errorf("expected known good count to remain %d, got %d", initialGoodCount, goodCountAfter)
+	}
+}
+
+func TestBot_ValidateRulesAgainstKnownData(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	// Seed known good and known bad
+	_ = b.db.SaveKnownGoodUser(&db.KnownGoodUser{
+		UserID:     10101,
+		Username:   "good_member",
+		FirstName:  "Good",
+		Reputation: 100,
+		Bio:        "Gopher",
+		Source:     "auto_reputation",
+	})
+	_ = b.db.SaveKnownBadUser(&db.KnownBadUser{
+		UserID:    90909,
+		Username:  "bad_actor",
+		FirstName: "每日首发🧧",
+		Pattern:   "每日首发🧧",
+		BanReason: "Red packet name spam",
+		Source:    "telegram_button",
+	})
+
+	report, err := b.ValidateRulesAgainstKnownData()
+	if err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	if !report.Passed {
+		t.Errorf("expected report to pass, got violations: %s", report.Summary)
+	}
+	if report.KnownGoodTotal != 1 || report.KnownBadTotal != 1 {
+		t.Errorf("expected 1 known good and 1 known bad, got %d and %d", report.KnownGoodTotal, report.KnownBadTotal)
+	}
+}

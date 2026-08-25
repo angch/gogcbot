@@ -29,14 +29,16 @@ type Bot struct {
 	mu                 sync.RWMutex
 	stopChan           chan struct{}
 	mockChatMemberFunc func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error)
+	mockSendFunc       func(c tgbotapi.Chattable) (tgbotapi.Message, error)
 	banCheckMu         sync.Mutex
 	isBanCheckRunning  bool
 }
 
 var (
-	newBotAPIFunc   = tgbotapi.NewBotAPI
-	loginRetryDelay = 5 * time.Second
-	maxLoginRetries = 6
+	newBotAPIFunc      = tgbotapi.NewBotAPI
+	loginRetryDelay    = 5 * time.Second
+	maxLoginRetries    = 6
+	globalMockSendFunc func(c tgbotapi.Chattable) (tgbotapi.Message, error)
 )
 
 // SetNewBotAPIFuncForTesting overrides the BotAPI constructor for unit testing.
@@ -51,6 +53,15 @@ func SetNewBotAPIFuncForTesting(f func(token string) (*tgbotapi.BotAPI, error)) 
 		newBotAPIFunc = orig
 		loginRetryDelay = origDelay
 		maxLoginRetries = origRetries
+	}
+}
+
+// SetMockSendFuncForTesting overrides the default Send behavior globally for unit testing.
+func SetMockSendFuncForTesting(f func(c tgbotapi.Chattable) (tgbotapi.Message, error)) func() {
+	orig := globalMockSendFunc
+	globalMockSendFunc = f
+	return func() {
+		globalMockSendFunc = orig
 	}
 }
 
@@ -156,6 +167,12 @@ func sanitizeChattable(c tgbotapi.Chattable) tgbotapi.Chattable {
 func (b *Bot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	c = sanitizeChattable(c)
 	log.Printf("[Telegram API Call] Send -> Payload: %#v", c)
+	if b.mockSendFunc != nil {
+		return b.mockSendFunc(c)
+	}
+	if globalMockSendFunc != nil {
+		return globalMockSendFunc(c)
+	}
 	if b.api == nil {
 		return tgbotapi.Message{}, nil
 	}
@@ -187,6 +204,99 @@ func (b *Bot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 // SetMockChatMemberFunc sets a mock callback for GetChatMember for testing.
 func (b *Bot) SetMockChatMemberFunc(f func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error)) {
 	b.mockChatMemberFunc = f
+}
+
+// SetMockSendFunc sets a mock callback for Send for testing.
+func (b *Bot) SetMockSendFunc(f func(c tgbotapi.Chattable) (tgbotapi.Message, error)) {
+	b.mockSendFunc = f
+}
+
+// SendMessageOptions holds configuration options for sending messages via Bot.
+type SendMessageOptions struct {
+	ParseMode           string
+	DisableNotification bool
+	ReplyToMessageID    int
+}
+
+// SendMessage sends a text message to the specified chat/group ID.
+// It supports Markdown, HTML, and Plain text formatting. When ParseMode is Markdown (or empty),
+// it automatically falls back to plain text if the Telegram API rejects the markdown syntax.
+// Long messages exceeding 4000 characters are automatically split into chunks and sent sequentially.
+func (b *Bot) SendMessage(chatID int64, text string, opts SendMessageOptions) ([]tgbotapi.Message, error) {
+	text = strings.ToValidUTF8(text, "")
+	if strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("message text cannot be empty")
+	}
+
+	runes := []rune(text)
+	const maxRunes = 4000
+	var chunks []string
+
+	for len(runes) > maxRunes {
+		sub := string(runes[:maxRunes])
+		splitIdx := strings.LastIndex(sub, "\n")
+		var chunk string
+		if splitIdx != -1 {
+			chunk = sub[:splitIdx]
+			runes = runes[len([]rune(chunk))+1:]
+		} else {
+			chunk = sub
+			runes = runes[maxRunes:]
+		}
+		chunks = append(chunks, chunk)
+	}
+	if len(runes) > 0 {
+		chunks = append(chunks, string(runes))
+	}
+
+	var sentMsgs []tgbotapi.Message
+
+	for i, chunk := range chunks {
+		msg := tgbotapi.NewMessage(chatID, chunk)
+		msg.DisableNotification = opts.DisableNotification
+		if i == 0 && opts.ReplyToMessageID > 0 {
+			msg.ReplyToMessageID = opts.ReplyToMessageID
+		}
+
+		pm := strings.ToLower(opts.ParseMode)
+		switch pm {
+		case "html":
+			msg.ParseMode = tgbotapi.ModeHTML
+		case "markdownv2":
+			msg.ParseMode = tgbotapi.ModeMarkdownV2
+		case "plain", "none", "text":
+			msg.ParseMode = ""
+		case "markdown", "":
+			msg.ParseMode = tgbotapi.ModeMarkdown
+		default:
+			msg.ParseMode = opts.ParseMode
+		}
+
+		sentMsg, err := b.Send(msg)
+		if err != nil && (pm == "markdown" || pm == "" || opts.ParseMode == tgbotapi.ModeMarkdown) {
+			log.Printf("[Bot] Markdown send failed for chat %d (%v), retrying as plain text...", chatID, err)
+			msg.ParseMode = ""
+			sentMsg, err = b.Send(msg)
+		}
+
+		if err != nil {
+			return sentMsgs, fmt.Errorf("failed to send message to chat %d: %w", chatID, err)
+		}
+
+		if b.db != nil {
+			_ = b.db.SaveMessage(&db.Message{
+				ChatID:    chatID,
+				MessageID: sentMsg.MessageID,
+				UserID:    b.botUser.ID,
+				Text:      chunk,
+				CreatedAt: time.Now(),
+			})
+		}
+
+		sentMsgs = append(sentMsgs, sentMsg)
+	}
+
+	return sentMsgs, nil
 }
 
 // TryStartBanCheck attempts to acquire the lock for running a background ban check. Returns true if acquired.
@@ -643,6 +753,14 @@ func (b *Bot) ValidateRulesAgainstHighRepUsers(minRep int) ([]detector.RuleMatch
 		return nil, fmt.Errorf("bot database is nil")
 	}
 	return b.Detector().ValidateAgainstHighRepUsers(b.db, minRep)
+}
+
+// ValidateRulesAgainstKnownData validates all registered detector rules against known good and bad datasets.
+func (b *Bot) ValidateRulesAgainstKnownData() (*detector.KnownDataValidationReport, error) {
+	if b.db == nil {
+		return nil, fmt.Errorf("bot database is nil")
+	}
+	return b.Detector().ValidateAgainstKnownGoodAndBad(b.db)
 }
 
 // BuildDetector constructs and registers all enabled triggers configured in Config.

@@ -387,6 +387,13 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, msg *db.Message, 
 	msgConfig := tgbotapi.NewMessage(modGroupID, text)
 	msgConfig.ParseMode = tgbotapi.ModeMarkdown
 
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🏷️ Add to Known Bad", fmt.Sprintf("mod:add_bad:%d", user.UserID)),
+		),
+	)
+	msgConfig.ReplyMarkup = keyboard
+
 	sentMsg, err := b.Send(msgConfig)
 	if err != nil {
 		// Fallback without markdown formatting if markdown fails

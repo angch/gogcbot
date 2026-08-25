@@ -1809,3 +1809,128 @@ func TestGroup_PrimaryAndSecondaryOperations(t *testing.T) {
 		t.Errorf("expected 3 all groups, got %d", len(allGroups))
 	}
 }
+
+func TestKnownData_And_DryRunGates(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Create users with rep >= 50 and banned users
+	_, _, _ = database.GetOrCreateUser(10001, "gooduser1", "Good", "One", 50)
+	_, _, _ = database.GetOrCreateUser(10002, "gooduser2", "Good", "Two", 100)
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:    10001,
+		Username:  "gooduser1",
+		FirstName: "Good",
+		Bio:       "Software engineer",
+		FetchedAt: time.Now(),
+	})
+	_ = database.SaveMessage(&Message{
+		ChatID:    -1001,
+		MessageID: 1,
+		UserID:    10001,
+		Text:      "Hello community!",
+		CreatedAt: time.Now(),
+	})
+
+	_, _, _ = database.GetOrCreateUser(20001, "badactor1", "六o0壹天", "Spam", 0)
+	_ = database.SetUserBanned(20001, true)
+	_ = database.SaveUserProfile(&UserProfile{
+		UserID:    20001,
+		Username:  "badactor1",
+		FirstName: "六o0壹天",
+		Bio:       "crypto giveaway airdrop t.me/spam",
+		FetchedAt: time.Now(),
+	})
+	_, _ = database.CreateResolvedFlaggedPost(-1001, 10, 20001, "Spam profile name keyword", "banned", 999)
+
+	// Test PopulateKnownGoodFromUsers and PopulateKnownBadFromUsers
+	goodPopulated, err := database.PopulateKnownGoodFromUsers(50)
+	if err != nil {
+		t.Fatalf("failed to populate known good: %v", err)
+	}
+	if goodPopulated != 2 {
+		t.Errorf("expected 2 populated known good, got %d", goodPopulated)
+	}
+
+	badPopulated, err := database.PopulateKnownBadFromUsers()
+	if err != nil {
+		t.Fatalf("failed to populate known bad: %v", err)
+	}
+	if badPopulated != 1 {
+		t.Errorf("expected 1 populated known bad, got %d", badPopulated)
+	}
+
+	// Verify GetKnownGoodUsers
+	goodUsers, err := database.GetKnownGoodUsers()
+	if err != nil || len(goodUsers) != 2 {
+		t.Fatalf("expected 2 known good users, got %d, err: %v", len(goodUsers), err)
+	}
+	if goodUsers[0].Reputation < 50 {
+		t.Errorf("expected rep >= 50, got %d", goodUsers[0].Reputation)
+	}
+
+	// Verify GetKnownGoodUserByUserID
+	kg1, err := database.GetKnownGoodUserByUserID(10001)
+	if err != nil || kg1 == nil {
+		t.Fatalf("failed to get known good user 10001: %v", err)
+	}
+	if kg1.Bio != "Software engineer" || len(kg1.SampleMessages) != 1 {
+		t.Errorf("unexpected known good user details: %+v", kg1)
+	}
+
+	// Verify GetKnownBadUsers
+	badUsers, err := database.GetKnownBadUsers()
+	if err != nil || len(badUsers) != 1 {
+		t.Fatalf("expected 1 known bad user, got %d, err: %v", len(badUsers), err)
+	}
+	if badUsers[0].UserID != 20001 || !strings.Contains(badUsers[0].BanReason, "Spam") {
+		t.Errorf("unexpected known bad user details: %+v", badUsers[0])
+	}
+
+	// Test AddKnownBadPattern
+	err = database.AddKnownBadPattern(0, "custompattern", "Custom", "Spam", "bad bio", "SpamKeywordPattern", "Manual add", "test", []string{"sample message"})
+	if err != nil {
+		t.Fatalf("failed to add known bad pattern: %v", err)
+	}
+	badUsersAfterAdd, _ := database.GetKnownBadUsers()
+	if len(badUsersAfterAdd) != 2 {
+		t.Errorf("expected 2 known bad users after pattern add, got %d", len(badUsersAfterAdd))
+	}
+
+	// Test DeleteKnownGoodUser and DeleteKnownBadUser
+	if err := database.DeleteKnownGoodUser(10002); err != nil {
+		t.Fatalf("failed to delete known good user: %v", err)
+	}
+	goodAfterDel, _ := database.GetKnownGoodUsers()
+	if len(goodAfterDel) != 1 {
+		t.Errorf("expected 1 known good user after deletion, got %d", len(goodAfterDel))
+	}
+
+	// Test DryRunGates
+	gate, err := database.GetValidDryRunGate("rescan_users")
+	if err == nil && gate != nil {
+		t.Errorf("expected no active dry run gate before recording")
+	}
+
+	err = database.RecordDryRunGate("rescan_users", 10, 2, "hash123", true, "10 candidates, 2 matches", 1*time.Hour)
+	if err != nil {
+		t.Fatalf("failed to record dry run gate: %v", err)
+	}
+
+	validGate, err := database.GetValidDryRunGate("rescan_users")
+	if err != nil || validGate == nil {
+		t.Fatalf("expected valid dry run gate, got nil, err: %v", err)
+	}
+	if validGate.CandidateCount != 10 || validGate.MatchCount != 2 || !validGate.PassedValidation {
+		t.Errorf("unexpected dry run gate details: %+v", validGate)
+	}
+
+	// Consume DryRunGate
+	if err := database.ConsumeDryRunGate("rescan_users"); err != nil {
+		t.Fatalf("failed to consume dry run gate: %v", err)
+	}
+	consumedGate, _ := database.GetValidDryRunGate("rescan_users")
+	if consumedGate != nil {
+		t.Errorf("expected dry run gate to be consumed/empty, got %+v", consumedGate)
+	}
+}

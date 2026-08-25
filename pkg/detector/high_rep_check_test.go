@@ -328,3 +328,166 @@ func TestTriggers_ViolationDetection_BuggyRule(t *testing.T) {
 		t.Errorf("Formatted string missing details: %s", formatted)
 	}
 }
+
+// TestTriggers_ValidateAgainstKnownGoodAndBad_RealDB verifies rules against known good and bad tables in real DB.
+func TestTriggers_ValidateAgainstKnownGoodAndBad_RealDB(t *testing.T) {
+	dbPath := findRealDatabase()
+	if dbPath == "" {
+		t.Skip("gogcbot.db not found, skipping real database check")
+	}
+
+	database, err := db.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database at %s: %v", dbPath, err)
+	}
+	defer database.Close()
+
+	det := buildStandardTestDetector()
+	report, err := det.ValidateAgainstKnownGoodAndBad(database)
+	if err != nil {
+		t.Fatalf("validation check failed: %v", err)
+	}
+
+	t.Logf("Validation report summary:\n%s", report.Summary)
+
+	if !report.Passed {
+		t.Fatalf("Rule validation regression on known good data in real DB! %d false positive violation(s):\n%s",
+			len(report.FalsePositives), report.Summary)
+	}
+
+	if report.KnownGoodTotal == 0 {
+		t.Errorf("expected >0 known good profiles in real DB")
+	}
+}
+
+// TestTriggers_ValidateAgainstKnownGoodAndBad_Synthetic tests Known Good and Known Bad validation on synthesized database.
+func TestTriggers_ValidateAgainstKnownGoodAndBad_Synthetic(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gogcbot_knowndata_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer database.Close()
+
+	// 1. Add Known Good users (rep >= 50)
+	kg1 := &db.KnownGoodUser{
+		UserID:         100001,
+		Username:       "devlead",
+		FirstName:      "David",
+		LastName:       "Lee",
+		Reputation:     100,
+		Bio:            "Go developer and open source enthusiast",
+		SampleMessages: []string{"Welcome everyone!", "Let's review the PR."},
+		Source:         "auto_reputation",
+	}
+	kg2 := &db.KnownGoodUser{
+		UserID:         100002,
+		Username:       "alice_w",
+		FirstName:      "Alice",
+		LastName:       "Wong",
+		Reputation:     55,
+		Bio:            "Golang Malaysia member",
+		SampleMessages: []string{"Happy coding everyone!", "See you at the meetup."},
+		Source:         "auto_reputation",
+	}
+	_ = database.SaveKnownGoodUser(kg1)
+	_ = database.SaveKnownGoodUser(kg2)
+
+	// 2. Add Known Bad users (banned spammers)
+	kb1 := &db.KnownBadUser{
+		UserID:         5000000001,
+		Username:       "cbzbQFLOuHNkJZ",
+		FirstName:      "每日首发🧧",
+		Pattern:        "每日首发🧧",
+		BanReason:      "Red packet name spam",
+		SampleMessages: []string{"Spam link t.me/airdrop"},
+		Source:         "banned_user",
+	}
+	kb2 := &db.KnownBadUser{
+		UserID:    5000000002,
+		Username:  "spammer_kw",
+		FirstName: "六o0壹天",
+		Pattern:   "六o0壹天",
+		BanReason: "Profile keyword ban",
+		Bio:       "crypto giveaway airdrop",
+		Source:    "banned_user",
+	}
+	_ = database.SaveKnownBadUser(kb1)
+	_ = database.SaveKnownBadUser(kb2)
+
+	det := buildStandardTestDetector()
+	report, err := det.ValidateAgainstKnownGoodAndBad(database)
+	if err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+
+	if !report.Passed {
+		t.Fatalf("expected report to pass with 0 false positives, got %d:\n%s",
+			len(report.FalsePositives), report.Summary)
+	}
+	if report.KnownGoodTotal != 2 {
+		t.Errorf("expected 2 known good profiles, got %d", report.KnownGoodTotal)
+	}
+	if report.KnownBadTotal != 2 {
+		t.Errorf("expected 2 known bad profiles, got %d", report.KnownBadTotal)
+	}
+	if len(report.KnownBadMatches) == 0 {
+		t.Errorf("expected detection matches on known bad data, got 0")
+	}
+}
+
+// TestTriggers_ValidateAgainstKnownGoodAndBad_RegressionDetection verifies that a faulty rule is caught.
+func TestTriggers_ValidateAgainstKnownGoodAndBad_RegressionDetection(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gogcbot_knowndata_regr_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer database.Close()
+
+	// Add known good user
+	kg := &db.KnownGoodUser{
+		UserID:     100001,
+		Username:   "gooddev",
+		FirstName:  "David",
+		Reputation: 100,
+		Bio:        "Passionate Go programmer",
+	}
+	_ = database.SaveKnownGoodUser(kg)
+
+	// Faulty rule that bans anyone with "David" in profile
+	buggyTrigger := &dummyTrigger{
+		id:        "buggy_david_rule",
+		enabled:   true,
+		triggered: true,
+		actions:   []Action{{Type: ActionBanUser, Reason: "Fired on David"}},
+	}
+
+	det := NewDetector(buggyTrigger)
+	report, err := det.ValidateAgainstKnownGoodAndBad(database)
+	if err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+
+	if report.Passed {
+		t.Fatalf("expected validation to FAIL due to buggy trigger on known good user, but passed")
+	}
+	if len(report.FalsePositives) == 0 {
+		t.Fatalf("expected false positives, got 0")
+	}
+	if report.FalsePositives[0].TriggerID != "buggy_david_rule" {
+		t.Errorf("expected TriggerID 'buggy_david_rule', got %s", report.FalsePositives[0].TriggerID)
+	}
+}

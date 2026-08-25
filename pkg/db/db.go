@@ -139,6 +139,83 @@ type ShieldyMessage struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// KnownGoodUser represents an established, verified community member with reputation >= 50.
+type KnownGoodUser struct {
+	ID                   int64     `json:"id"`
+	UserID               int64     `json:"user_id"`
+	Username             string    `json:"username"`
+	FirstName            string    `json:"first_name"`
+	LastName             string    `json:"last_name"`
+	LanguageCode         string    `json:"language_code,omitempty"`
+	IsPremium            bool      `json:"is_premium,omitempty"`
+	Reputation           int       `json:"reputation"`
+	Bio                  string    `json:"bio,omitempty"`
+	HasPrivateForwards   bool      `json:"has_private_forwards,omitempty"`
+	PersonalChatTitle    string    `json:"personal_chat_title,omitempty"`
+	PersonalChatUsername string    `json:"personal_chat_username,omitempty"`
+	BusinessIntro        string    `json:"business_intro,omitempty"`
+	PhotoCount           int       `json:"photo_count"`
+	HasPhoto             bool      `json:"has_photo"`
+	SampleMessages       []string  `json:"sample_messages,omitempty"`
+	Source               string    `json:"source"`
+	AddedAt              time.Time `json:"added_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+// DisplayName returns the trimmed combined first and last name.
+func (u *KnownGoodUser) DisplayName() string {
+	if u == nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimSpace(u.FirstName) + " " + strings.TrimSpace(u.LastName))
+}
+
+// KnownBadUser represents a confirmed spammer or malicious pattern.
+type KnownBadUser struct {
+	ID                   int64     `json:"id"`
+	UserID               int64     `json:"user_id"`
+	Username             string    `json:"username"`
+	FirstName            string    `json:"first_name"`
+	LastName             string    `json:"last_name"`
+	LanguageCode         string    `json:"language_code,omitempty"`
+	IsPremium            bool      `json:"is_premium,omitempty"`
+	Reputation           int       `json:"reputation"`
+	Bio                  string    `json:"bio,omitempty"`
+	HasPrivateForwards   bool      `json:"has_private_forwards,omitempty"`
+	PersonalChatTitle    string    `json:"personal_chat_title,omitempty"`
+	PersonalChatUsername string    `json:"personal_chat_username,omitempty"`
+	BusinessIntro        string    `json:"business_intro,omitempty"`
+	PhotoCount           int       `json:"photo_count"`
+	HasPhoto             bool      `json:"has_photo"`
+	Pattern              string    `json:"pattern,omitempty"`
+	BanReason            string    `json:"ban_reason,omitempty"`
+	SampleMessages       []string  `json:"sample_messages,omitempty"`
+	Source               string    `json:"source"`
+	AddedAt              time.Time `json:"added_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+// DisplayName returns the trimmed combined first and last name.
+func (u *KnownBadUser) DisplayName() string {
+	if u == nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimSpace(u.FirstName) + " " + strings.TrimSpace(u.LastName))
+}
+
+// DryRunGate tracks the completion and validity window of a dry-run preview before live mass operations.
+type DryRunGate struct {
+	ID               int64     `json:"id"`
+	ActionType       string    `json:"action_type"` // e.g. "rescan_users"
+	ExecutedAt       time.Time `json:"executed_at"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	CandidateCount   int       `json:"candidate_count"`
+	MatchCount       int       `json:"match_count"`
+	RuleHash         string    `json:"rule_hash"`
+	PassedValidation bool      `json:"passed_validation"`
+	Details          string    `json:"details"`
+}
+
 func OpenDB(dbPath string) (*DB, error) {
 	dir := filepath.Dir(dbPath)
 	if dir != "" && dir != "." {
@@ -275,11 +352,72 @@ func (d *DB) AutoMigrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_shieldy_messages_chat_user ON shieldy_messages(chat_id, target_user_id, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_shieldy_messages_created ON shieldy_messages(created_at);`,
 		`ALTER TABLE groups ADD COLUMN is_primary BOOLEAN NOT NULL DEFAULT 0;`,
+		`CREATE TABLE IF NOT EXISTS known_good_data (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL UNIQUE,
+			username TEXT NOT NULL DEFAULT '',
+			first_name TEXT NOT NULL DEFAULT '',
+			last_name TEXT NOT NULL DEFAULT '',
+			language_code TEXT NOT NULL DEFAULT '',
+			is_premium BOOLEAN NOT NULL DEFAULT 0,
+			reputation INTEGER NOT NULL DEFAULT 0,
+			bio TEXT NOT NULL DEFAULT '',
+			has_private_forwards BOOLEAN NOT NULL DEFAULT 0,
+			personal_chat_title TEXT NOT NULL DEFAULT '',
+			personal_chat_username TEXT NOT NULL DEFAULT '',
+			business_intro TEXT NOT NULL DEFAULT '',
+			photo_count INTEGER NOT NULL DEFAULT 0,
+			has_photo BOOLEAN NOT NULL DEFAULT 0,
+			sample_messages TEXT NOT NULL DEFAULT '[]',
+			source TEXT NOT NULL DEFAULT 'auto_reputation',
+			added_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_known_good_user_id ON known_good_data(user_id);`,
+		`CREATE TABLE IF NOT EXISTS known_bad_data (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL DEFAULT 0,
+			username TEXT NOT NULL DEFAULT '',
+			first_name TEXT NOT NULL DEFAULT '',
+			last_name TEXT NOT NULL DEFAULT '',
+			language_code TEXT NOT NULL DEFAULT '',
+			is_premium BOOLEAN NOT NULL DEFAULT 0,
+			reputation INTEGER NOT NULL DEFAULT 0,
+			bio TEXT NOT NULL DEFAULT '',
+			has_private_forwards BOOLEAN NOT NULL DEFAULT 0,
+			personal_chat_title TEXT NOT NULL DEFAULT '',
+			personal_chat_username TEXT NOT NULL DEFAULT '',
+			business_intro TEXT NOT NULL DEFAULT '',
+			photo_count INTEGER NOT NULL DEFAULT 0,
+			has_photo BOOLEAN NOT NULL DEFAULT 0,
+			pattern TEXT NOT NULL DEFAULT '',
+			ban_reason TEXT NOT NULL DEFAULT '',
+			sample_messages TEXT NOT NULL DEFAULT '[]',
+			source TEXT NOT NULL DEFAULT 'banned_user',
+			added_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_known_bad_user_id ON known_bad_data(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_known_bad_pattern ON known_bad_data(pattern);`,
+		`CREATE TABLE IF NOT EXISTS dryrun_gates (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			action_type TEXT NOT NULL,
+			executed_at DATETIME NOT NULL,
+			expires_at DATETIME NOT NULL,
+			candidate_count INTEGER NOT NULL DEFAULT 0,
+			match_count INTEGER NOT NULL DEFAULT 0,
+			rule_hash TEXT NOT NULL DEFAULT '',
+			passed_validation BOOLEAN NOT NULL DEFAULT 1,
+			details TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_dryrun_gates_type ON dryrun_gates(action_type, executed_at DESC);`,
 	}
 
 	for _, stmt := range migrations {
 		_, _ = d.Exec(stmt)
 	}
+
+	_ = d.EnsureKnownDataSeeded()
 	return nil
 }
 
@@ -410,6 +548,71 @@ func (d *DB) InitSchema() error {
 
 	CREATE INDEX IF NOT EXISTS idx_shieldy_messages_chat_user ON shieldy_messages(chat_id, target_user_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_shieldy_messages_created ON shieldy_messages(created_at);
+
+	CREATE TABLE IF NOT EXISTS known_good_data (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL UNIQUE,
+		username TEXT NOT NULL DEFAULT '',
+		first_name TEXT NOT NULL DEFAULT '',
+		last_name TEXT NOT NULL DEFAULT '',
+		language_code TEXT NOT NULL DEFAULT '',
+		is_premium BOOLEAN NOT NULL DEFAULT 0,
+		reputation INTEGER NOT NULL DEFAULT 0,
+		bio TEXT NOT NULL DEFAULT '',
+		has_private_forwards BOOLEAN NOT NULL DEFAULT 0,
+		personal_chat_title TEXT NOT NULL DEFAULT '',
+		personal_chat_username TEXT NOT NULL DEFAULT '',
+		business_intro TEXT NOT NULL DEFAULT '',
+		photo_count INTEGER NOT NULL DEFAULT 0,
+		has_photo BOOLEAN NOT NULL DEFAULT 0,
+		sample_messages TEXT NOT NULL DEFAULT '[]',
+		source TEXT NOT NULL DEFAULT 'auto_reputation',
+		added_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_known_good_user_id ON known_good_data(user_id);
+
+	CREATE TABLE IF NOT EXISTS known_bad_data (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL DEFAULT 0,
+		username TEXT NOT NULL DEFAULT '',
+		first_name TEXT NOT NULL DEFAULT '',
+		last_name TEXT NOT NULL DEFAULT '',
+		language_code TEXT NOT NULL DEFAULT '',
+		is_premium BOOLEAN NOT NULL DEFAULT 0,
+		reputation INTEGER NOT NULL DEFAULT 0,
+		bio TEXT NOT NULL DEFAULT '',
+		has_private_forwards BOOLEAN NOT NULL DEFAULT 0,
+		personal_chat_title TEXT NOT NULL DEFAULT '',
+		personal_chat_username TEXT NOT NULL DEFAULT '',
+		business_intro TEXT NOT NULL DEFAULT '',
+		photo_count INTEGER NOT NULL DEFAULT 0,
+		has_photo BOOLEAN NOT NULL DEFAULT 0,
+		pattern TEXT NOT NULL DEFAULT '',
+		ban_reason TEXT NOT NULL DEFAULT '',
+		sample_messages TEXT NOT NULL DEFAULT '[]',
+		source TEXT NOT NULL DEFAULT 'banned_user',
+		added_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_known_bad_user_id ON known_bad_data(user_id);
+	CREATE INDEX IF NOT EXISTS idx_known_bad_pattern ON known_bad_data(pattern);
+
+	CREATE TABLE IF NOT EXISTS dryrun_gates (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		action_type TEXT NOT NULL,
+		executed_at DATETIME NOT NULL,
+		expires_at DATETIME NOT NULL,
+		candidate_count INTEGER NOT NULL DEFAULT 0,
+		match_count INTEGER NOT NULL DEFAULT 0,
+		rule_hash TEXT NOT NULL DEFAULT '',
+		passed_validation BOOLEAN NOT NULL DEFAULT 1,
+		details TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_dryrun_gates_type ON dryrun_gates(action_type, executed_at DESC);
 	`
 	_, err := d.Exec(schema)
 	if err != nil {
@@ -2745,7 +2948,6 @@ func MatchSpamBio(bio string, customKeywords ...string) (bool, []string) {
 		return false, nil
 	}
 
-	bioLower := strings.ToLower(bio)
 	var matched []string
 	seen := make(map[string]bool)
 
@@ -2755,7 +2957,7 @@ func MatchSpamBio(bio string, customKeywords ...string) (bool, []string) {
 		kw = strings.TrimSpace(kw)
 		if kw != "" {
 			hasCustom = true
-			if strings.Contains(bioLower, strings.ToLower(kw)) && !seen[strings.ToLower(kw)] {
+			if containsKeywordMatch(bio, kw) && !seen[strings.ToLower(kw)] {
 				matched = append(matched, kw)
 				seen[strings.ToLower(kw)] = true
 			}
@@ -2767,13 +2969,37 @@ func MatchSpamBio(bio string, customKeywords ...string) (bool, []string) {
 
 	// Match against default spam keywords
 	for _, kw := range SpamBioKeywords {
-		if strings.Contains(bioLower, strings.ToLower(kw)) && !seen[strings.ToLower(kw)] {
+		if containsKeywordMatch(bio, kw) && !seen[strings.ToLower(kw)] {
 			matched = append(matched, kw)
 			seen[strings.ToLower(kw)] = true
 		}
 	}
 
 	return len(matched) > 0, matched
+}
+
+func containsKeywordMatch(text, kw string) bool {
+	lowerText := strings.ToLower(text)
+	lowerKw := strings.ToLower(strings.TrimSpace(kw))
+	if lowerKw == "" {
+		return false
+	}
+	start := 0
+	for {
+		idx := strings.Index(lowerText[start:], lowerKw)
+		if idx < 0 {
+			return false
+		}
+		actualIdx := start + idx
+		// If keyword starts with a domain prefix like "t.me/" or "me/", ensure not preceded by letter (e.g. "about.me/")
+		if strings.HasPrefix(lowerKw, "t.me/") || strings.HasPrefix(lowerKw, "me/") {
+			if actualIdx > 0 && unicode.IsLetter(rune(lowerText[actualIdx-1])) {
+				start = actualIdx + len(lowerKw)
+				continue
+			}
+		}
+		return true
+	}
 }
 
 // MatchSpamBioAll checks if a user bio matches SpamBioKeywords, DB spam snippets, or any additional keywords.
@@ -3122,4 +3348,460 @@ func (d *DB) SyncSpamSnippets(snippets []string) error {
 		}
 	}
 	return nil
+}
+
+// EnsureKnownDataSeeded automatically populates known_good_data and known_bad_data if they are empty and data is available.
+func (d *DB) EnsureKnownDataSeeded() error {
+	goodCnt, err := d.GetKnownGoodCount()
+	if err == nil && goodCnt == 0 {
+		_, _ = d.PopulateKnownGoodFromUsers(50)
+	}
+
+	badCnt, err := d.GetKnownBadCount()
+	if err == nil && badCnt == 0 {
+		_, _ = d.PopulateKnownBadFromUsers()
+	}
+	return nil
+}
+
+// --- Known Good Data Methods ---
+
+// SaveKnownGoodUser inserts or updates a known good user profile in known_good_data.
+func (d *DB) SaveKnownGoodUser(u *KnownGoodUser) error {
+	if u == nil {
+		return fmt.Errorf("user cannot be nil")
+	}
+	now := time.Now()
+	if u.AddedAt.IsZero() {
+		u.AddedAt = now
+	}
+	u.UpdatedAt = now
+	if u.Source == "" {
+		u.Source = "manual"
+	}
+	msgJSON, _ := json.Marshal(u.SampleMessages)
+	if len(u.SampleMessages) == 0 {
+		msgJSON = []byte("[]")
+	}
+
+	_, err := d.Exec(`
+		INSERT INTO known_good_data (
+			user_id, username, first_name, last_name, language_code, is_premium, reputation,
+			bio, has_private_forwards, personal_chat_title, personal_chat_username, business_intro,
+			photo_count, has_photo, sample_messages, source, added_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET
+			username = excluded.username,
+			first_name = excluded.first_name,
+			last_name = excluded.last_name,
+			language_code = excluded.language_code,
+			is_premium = excluded.is_premium,
+			reputation = excluded.reputation,
+			bio = excluded.bio,
+			has_private_forwards = excluded.has_private_forwards,
+			personal_chat_title = excluded.personal_chat_title,
+			personal_chat_username = excluded.personal_chat_username,
+			business_intro = excluded.business_intro,
+			photo_count = excluded.photo_count,
+			has_photo = excluded.has_photo,
+			sample_messages = excluded.sample_messages,
+			source = excluded.source,
+			updated_at = excluded.updated_at
+	`, u.UserID, u.Username, u.FirstName, u.LastName, u.LanguageCode, u.IsPremium, u.Reputation,
+		u.Bio, u.HasPrivateForwards, u.PersonalChatTitle, u.PersonalChatUsername, u.BusinessIntro,
+		u.PhotoCount, u.HasPhoto, string(msgJSON), u.Source, u.AddedAt, u.UpdatedAt)
+	return err
+}
+
+// GetKnownGoodUsers retrieves all records from known_good_data.
+func (d *DB) GetKnownGoodUsers() ([]KnownGoodUser, error) {
+	rows, err := d.Query(`
+		SELECT id, user_id, username, first_name, last_name, language_code, is_premium, reputation,
+		       bio, has_private_forwards, personal_chat_title, personal_chat_username, business_intro,
+		       photo_count, has_photo, sample_messages, source, added_at, updated_at
+		FROM known_good_data
+		ORDER BY reputation DESC, user_id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var res []KnownGoodUser
+	for rows.Next() {
+		var u KnownGoodUser
+		var rawMsgJSON string
+		var rawAddedAt, rawUpdatedAt any
+		if err := rows.Scan(
+			&u.ID, &u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation,
+			&u.Bio, &u.HasPrivateForwards, &u.PersonalChatTitle, &u.PersonalChatUsername, &u.BusinessIntro,
+			&u.PhotoCount, &u.HasPhoto, &rawMsgJSON, &u.Source, &rawAddedAt, &rawUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		u.AddedAt = parseTime(rawAddedAt)
+		u.UpdatedAt = parseTime(rawUpdatedAt)
+		if rawMsgJSON != "" {
+			_ = json.Unmarshal([]byte(rawMsgJSON), &u.SampleMessages)
+		}
+		res = append(res, u)
+	}
+	return res, nil
+}
+
+// GetKnownGoodUserByUserID retrieves a single record by user ID from known_good_data.
+func (d *DB) GetKnownGoodUserByUserID(userID int64) (*KnownGoodUser, error) {
+	var u KnownGoodUser
+	var rawMsgJSON string
+	var rawAddedAt, rawUpdatedAt any
+	err := d.QueryRow(`
+		SELECT id, user_id, username, first_name, last_name, language_code, is_premium, reputation,
+		       bio, has_private_forwards, personal_chat_title, personal_chat_username, business_intro,
+		       photo_count, has_photo, sample_messages, source, added_at, updated_at
+		FROM known_good_data
+		WHERE user_id = ?
+	`, userID).Scan(
+		&u.ID, &u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation,
+		&u.Bio, &u.HasPrivateForwards, &u.PersonalChatTitle, &u.PersonalChatUsername, &u.BusinessIntro,
+		&u.PhotoCount, &u.HasPhoto, &rawMsgJSON, &u.Source, &rawAddedAt, &rawUpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	u.AddedAt = parseTime(rawAddedAt)
+	u.UpdatedAt = parseTime(rawUpdatedAt)
+	if rawMsgJSON != "" {
+		_ = json.Unmarshal([]byte(rawMsgJSON), &u.SampleMessages)
+	}
+	return &u, nil
+}
+
+// DeleteKnownGoodUser removes a user record from known_good_data.
+func (d *DB) DeleteKnownGoodUser(userID int64) error {
+	_, err := d.Exec(`DELETE FROM known_good_data WHERE user_id = ?`, userID)
+	return err
+}
+
+// GetKnownGoodCount returns the total count of known good records.
+func (d *DB) GetKnownGoodCount() (int, error) {
+	var cnt int
+	err := d.QueryRow(`SELECT count(*) FROM known_good_data`).Scan(&cnt)
+	return cnt, err
+}
+
+// PopulateKnownGoodFromUsers populates known_good_data from existing users with reputation >= minRep (default 50).
+func (d *DB) PopulateKnownGoodFromUsers(minRep int) (int, error) {
+	if minRep <= 0 {
+		minRep = 50
+	}
+	users, err := d.GetUsersWithReputationAbove(minRep - 1)
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for _, u := range users {
+		if u.Reputation < minRep || u.IsBanned {
+			continue
+		}
+		prof, _ := d.GetUserProfile(u.UserID)
+		msgs, _ := d.GetRecentUserMessages(u.UserID, 10)
+		var sampleMsgs []string
+		for _, m := range msgs {
+			if strings.TrimSpace(m.Text) != "" {
+				sampleMsgs = append(sampleMsgs, m.Text)
+			}
+		}
+
+		kg := &KnownGoodUser{
+			UserID:         u.UserID,
+			Username:       u.Username,
+			FirstName:      u.FirstName,
+			LastName:       u.LastName,
+			LanguageCode:   u.LanguageCode,
+			IsPremium:      u.IsPremium,
+			Reputation:     u.Reputation,
+			SampleMessages: sampleMsgs,
+			Source:         "auto_reputation",
+		}
+		if prof != nil {
+			kg.Bio = prof.Bio
+			kg.HasPrivateForwards = prof.HasPrivateForwards
+			kg.PersonalChatTitle = prof.PersonalChatTitle
+			kg.PersonalChatUsername = prof.PersonalChatUsername
+			kg.BusinessIntro = prof.BusinessIntro
+			kg.PhotoCount = prof.PhotoCount
+			kg.HasPhoto = prof.HasPhoto
+		}
+		if err := d.SaveKnownGoodUser(kg); err == nil {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// --- Known Bad Data Methods ---
+
+// SaveKnownBadUser inserts or updates a known bad entry in known_bad_data.
+func (d *DB) SaveKnownBadUser(u *KnownBadUser) error {
+	if u == nil {
+		return fmt.Errorf("user cannot be nil")
+	}
+	now := time.Now()
+	if u.AddedAt.IsZero() {
+		u.AddedAt = now
+	}
+	u.UpdatedAt = now
+	if u.Source == "" {
+		u.Source = "manual"
+	}
+	msgJSON, _ := json.Marshal(u.SampleMessages)
+	if len(u.SampleMessages) == 0 {
+		msgJSON = []byte("[]")
+	}
+
+	if u.ID != 0 {
+		_, err := d.Exec(`
+			UPDATE known_bad_data SET
+				user_id = ?, username = ?, first_name = ?, last_name = ?, language_code = ?,
+				is_premium = ?, reputation = ?, bio = ?, has_private_forwards = ?,
+				personal_chat_title = ?, personal_chat_username = ?, business_intro = ?,
+				photo_count = ?, has_photo = ?, pattern = ?, ban_reason = ?,
+				sample_messages = ?, source = ?, updated_at = ?
+			WHERE id = ?
+		`, u.UserID, u.Username, u.FirstName, u.LastName, u.LanguageCode, u.IsPremium, u.Reputation,
+			u.Bio, u.HasPrivateForwards, u.PersonalChatTitle, u.PersonalChatUsername, u.BusinessIntro,
+			u.PhotoCount, u.HasPhoto, u.Pattern, u.BanReason, string(msgJSON), u.Source, u.UpdatedAt, u.ID)
+		return err
+	}
+
+	if u.UserID != 0 {
+		var existingID int64
+		err := d.QueryRow(`SELECT id FROM known_bad_data WHERE user_id = ? LIMIT 1`, u.UserID).Scan(&existingID)
+		if err == nil && existingID != 0 {
+			u.ID = existingID
+			return d.SaveKnownBadUser(u)
+		}
+	}
+
+	res, err := d.Exec(`
+		INSERT INTO known_bad_data (
+			user_id, username, first_name, last_name, language_code, is_premium, reputation,
+			bio, has_private_forwards, personal_chat_title, personal_chat_username, business_intro,
+			photo_count, has_photo, pattern, ban_reason, sample_messages, source, added_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, u.UserID, u.Username, u.FirstName, u.LastName, u.LanguageCode, u.IsPremium, u.Reputation,
+		u.Bio, u.HasPrivateForwards, u.PersonalChatTitle, u.PersonalChatUsername, u.BusinessIntro,
+		u.PhotoCount, u.HasPhoto, u.Pattern, u.BanReason, string(msgJSON), u.Source, u.AddedAt, u.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	u.ID, _ = res.LastInsertId()
+	return nil
+}
+
+// AddKnownBadUser is an alias for SaveKnownBadUser.
+func (d *DB) AddKnownBadUser(u *KnownBadUser) error {
+	return d.SaveKnownBadUser(u)
+}
+
+// AddKnownBadPattern adds a specific spam pattern/profile into known_bad_data.
+func (d *DB) AddKnownBadPattern(userID int64, username, firstName, lastName, bio, pattern, reason, source string, messages []string) error {
+	kb := &KnownBadUser{
+		UserID:         userID,
+		Username:       username,
+		FirstName:      firstName,
+		LastName:       lastName,
+		Bio:            bio,
+		Pattern:        pattern,
+		BanReason:      reason,
+		SampleMessages: messages,
+		Source:         source,
+		AddedAt:        time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	return d.SaveKnownBadUser(kb)
+}
+
+// GetKnownBadUsers retrieves all records from known_bad_data.
+func (d *DB) GetKnownBadUsers() ([]KnownBadUser, error) {
+	rows, err := d.Query(`
+		SELECT id, user_id, username, first_name, last_name, language_code, is_premium, reputation,
+		       bio, has_private_forwards, personal_chat_title, personal_chat_username, business_intro,
+		       photo_count, has_photo, pattern, ban_reason, sample_messages, source, added_at, updated_at
+		FROM known_bad_data
+		ORDER BY id DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var res []KnownBadUser
+	for rows.Next() {
+		var u KnownBadUser
+		var rawMsgJSON string
+		var rawAddedAt, rawUpdatedAt any
+		if err := rows.Scan(
+			&u.ID, &u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation,
+			&u.Bio, &u.HasPrivateForwards, &u.PersonalChatTitle, &u.PersonalChatUsername, &u.BusinessIntro,
+			&u.PhotoCount, &u.HasPhoto, &u.Pattern, &u.BanReason, &rawMsgJSON, &u.Source, &rawAddedAt, &rawUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		u.AddedAt = parseTime(rawAddedAt)
+		u.UpdatedAt = parseTime(rawUpdatedAt)
+		if rawMsgJSON != "" {
+			_ = json.Unmarshal([]byte(rawMsgJSON), &u.SampleMessages)
+		}
+		res = append(res, u)
+	}
+	return res, nil
+}
+
+// GetKnownBadUserByUserID retrieves a single record by user ID from known_bad_data.
+func (d *DB) GetKnownBadUserByUserID(userID int64) (*KnownBadUser, error) {
+	var u KnownBadUser
+	var rawMsgJSON string
+	var rawAddedAt, rawUpdatedAt any
+	err := d.QueryRow(`
+		SELECT id, user_id, username, first_name, last_name, language_code, is_premium, reputation,
+		       bio, has_private_forwards, personal_chat_title, personal_chat_username, business_intro,
+		       photo_count, has_photo, pattern, ban_reason, sample_messages, source, added_at, updated_at
+		FROM known_bad_data
+		WHERE user_id = ?
+		LIMIT 1
+	`, userID).Scan(
+		&u.ID, &u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation,
+		&u.Bio, &u.HasPrivateForwards, &u.PersonalChatTitle, &u.PersonalChatUsername, &u.BusinessIntro,
+		&u.PhotoCount, &u.HasPhoto, &u.Pattern, &u.BanReason, &rawMsgJSON, &u.Source, &rawAddedAt, &rawUpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	u.AddedAt = parseTime(rawAddedAt)
+	u.UpdatedAt = parseTime(rawUpdatedAt)
+	if rawMsgJSON != "" {
+		_ = json.Unmarshal([]byte(rawMsgJSON), &u.SampleMessages)
+	}
+	return &u, nil
+}
+
+// DeleteKnownBadUser removes a record by ID or UserID from known_bad_data.
+func (d *DB) DeleteKnownBadUser(id int64) error {
+	_, err := d.Exec(`DELETE FROM known_bad_data WHERE id = ? OR user_id = ?`, id, id)
+	return err
+}
+
+// GetKnownBadCount returns the total count of known bad records.
+func (d *DB) GetKnownBadCount() (int, error) {
+	var cnt int
+	err := d.QueryRow(`SELECT count(*) FROM known_bad_data`).Scan(&cnt)
+	return cnt, err
+}
+
+// PopulateKnownBadFromUsers populates known_bad_data from all banned users in users table.
+func (d *DB) PopulateKnownBadFromUsers() (int, error) {
+	banned, err := d.GetBannedUsers()
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for _, u := range banned {
+		prof, _ := d.GetUserProfile(u.UserID)
+		msgs, _ := d.GetRecentUserMessages(u.UserID, 5)
+		var sampleMsgs []string
+		for _, m := range msgs {
+			if strings.TrimSpace(m.Text) != "" {
+				sampleMsgs = append(sampleMsgs, m.Text)
+			}
+		}
+
+		banReason := "Banned user"
+		var r string
+		errR := d.QueryRow(`SELECT reason FROM flagged_posts WHERE user_id = ? ORDER BY flagged_at DESC LIMIT 1`, u.UserID).Scan(&r)
+		if errR == nil && r != "" {
+			banReason = r
+		}
+
+		kb := &KnownBadUser{
+			UserID:         u.UserID,
+			Username:       u.Username,
+			FirstName:      u.FirstName,
+			LastName:       u.LastName,
+			LanguageCode:   u.LanguageCode,
+			IsPremium:      u.IsPremium,
+			Reputation:     u.Reputation,
+			Pattern:        u.DisplayName(),
+			BanReason:      banReason,
+			SampleMessages: sampleMsgs,
+			Source:         "banned_user",
+		}
+		if prof != nil {
+			kb.Bio = prof.Bio
+			kb.HasPrivateForwards = prof.HasPrivateForwards
+			kb.PersonalChatTitle = prof.PersonalChatTitle
+			kb.PersonalChatUsername = prof.PersonalChatUsername
+			kb.BusinessIntro = prof.BusinessIntro
+			kb.PhotoCount = prof.PhotoCount
+			kb.HasPhoto = prof.HasPhoto
+		}
+		if err := d.SaveKnownBadUser(kb); err == nil {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// --- Dry Run Gate Methods ---
+
+// RecordDryRunGate records an authorized dry-run gate in dryrun_gates table.
+func (d *DB) RecordDryRunGate(actionType string, candidateCount, matchCount int, ruleHash string, valid bool, details string, duration time.Duration) error {
+	if duration <= 0 {
+		duration = 1 * time.Hour
+	}
+	now := time.Now()
+	expiresAt := now.Add(duration)
+
+	_, err := d.Exec(`
+		INSERT INTO dryrun_gates (
+			action_type, executed_at, expires_at, candidate_count, match_count, rule_hash, passed_validation, details
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, actionType, now, expiresAt, candidateCount, matchCount, ruleHash, valid, details)
+	return err
+}
+
+// GetValidDryRunGate returns an active unexpired dry-run gate for the specified action type, if any.
+func (d *DB) GetValidDryRunGate(actionType string) (*DryRunGate, error) {
+	now := time.Now()
+	var g DryRunGate
+	var rawExecutedAt, rawExpiresAt any
+
+	err := d.QueryRow(`
+		SELECT id, action_type, executed_at, expires_at, candidate_count, match_count, rule_hash, passed_validation, details
+		FROM dryrun_gates
+		WHERE action_type = ? AND expires_at > ? AND passed_validation = 1
+		ORDER BY executed_at DESC
+		LIMIT 1
+	`, actionType, now).Scan(
+		&g.ID, &g.ActionType, &rawExecutedAt, &rawExpiresAt, &g.CandidateCount, &g.MatchCount, &g.RuleHash, &g.PassedValidation, &g.Details,
+	)
+	if err != nil {
+		return nil, err
+	}
+	g.ExecutedAt = parseTime(rawExecutedAt)
+	g.ExpiresAt = parseTime(rawExpiresAt)
+	return &g, nil
+}
+
+// ConsumeDryRunGate clears the active dry-run gate for the specified action type.
+func (d *DB) ConsumeDryRunGate(actionType string) error {
+	_, err := d.Exec(`DELETE FROM dryrun_gates WHERE action_type = ?`, actionType)
+	return err
+}
+
+// ClearDryRunGate clears the active dry-run gate for the specified action type.
+func (d *DB) ClearDryRunGate(actionType string) error {
+	return d.ConsumeDryRunGate(actionType)
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/angch/gogcbot/pkg/db"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
@@ -32,7 +33,78 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		return
 	}
 
+	modUser := cb.From
+	modIdentifier := fmt.Sprintf("@%s", modUser.UserName)
+	if modUser.UserName == "" {
+		modIdentifier = modUser.FirstName
+	}
+
 	action := parts[1]
+	if action == "add_bad" || action == "add_known_bad" {
+		targetUserID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			b.answerCallback(cb.ID, "Invalid user ID", true)
+			return
+		}
+		targetUser, err := b.db.GetUserByID(targetUserID)
+		if err != nil || targetUser == nil {
+			b.answerCallback(cb.ID, "User not found in DB", true)
+			return
+		}
+
+		profile, _ := b.db.GetUserProfile(targetUserID)
+		msgs, _ := b.db.GetRecentUserMessages(targetUserID, 10)
+		var sampleMsgs []string
+		for _, m := range msgs {
+			if strings.TrimSpace(m.Text) != "" {
+				sampleMsgs = append(sampleMsgs, m.Text)
+			}
+		}
+
+		pattern := targetUser.DisplayName()
+		if profile != nil && profile.Bio != "" {
+			if pattern != "" {
+				pattern += " | Bio: " + profile.Bio
+			} else {
+				pattern = "Bio: " + profile.Bio
+			}
+		}
+
+		kb := &db.KnownBadUser{
+			UserID:         targetUser.UserID,
+			Username:       targetUser.Username,
+			FirstName:      targetUser.FirstName,
+			LastName:       targetUser.LastName,
+			LanguageCode:   targetUser.LanguageCode,
+			IsPremium:      targetUser.IsPremium,
+			Reputation:     targetUser.Reputation,
+			Pattern:        pattern,
+			BanReason:      "Trigger kickban confirmed by moderator",
+			SampleMessages: sampleMsgs,
+			Source:         "telegram_button",
+			AddedAt:        time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		if profile != nil {
+			kb.Bio = profile.Bio
+			kb.HasPrivateForwards = profile.HasPrivateForwards
+			kb.PersonalChatTitle = profile.PersonalChatTitle
+			kb.PersonalChatUsername = profile.PersonalChatUsername
+			kb.BusinessIntro = profile.BusinessIntro
+			kb.PhotoCount = profile.PhotoCount
+			kb.HasPhoto = profile.HasPhoto
+		}
+
+		if err := b.db.SaveKnownBadUser(kb); err != nil {
+			b.answerCallback(cb.ID, fmt.Sprintf("Error adding to known bad: %v", err), true)
+			return
+		}
+
+		b.answerCallback(cb.ID, fmt.Sprintf("✅ Added user %d (@%s) to Known Bad dataset!", targetUser.UserID, targetUser.Username), false)
+		b.updateModCardText(cb.Message, "🏷️ Added to Known Bad", modIdentifier, fmt.Sprintf("Patterns added to Known Bad dataset by %s.", modIdentifier))
+		return
+	}
+
 	flagID, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil {
 		b.answerCallback(cb.ID, "Invalid flag ID", true)
@@ -43,12 +115,6 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	if err != nil {
 		b.answerCallback(cb.ID, "Flagged post record not found", true)
 		return
-	}
-
-	modUser := cb.From
-	modIdentifier := fmt.Sprintf("@%s", modUser.UserName)
-	if modUser.UserName == "" {
-		modIdentifier = modUser.FirstName
 	}
 
 	user, err := b.db.GetUserByID(flag.UserID)

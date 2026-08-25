@@ -645,6 +645,20 @@ func (b *Bot) cmdRescanUsers(msg *tgbotapi.Message, args string, isAuthorized bo
 		}
 	}
 
+	if !opts.DryRun {
+		gate, errGate := b.db.GetValidDryRunGate("rescan_users")
+		if errGate != nil || gate == nil {
+			b.replyText(msg, "❌ **Execution Gated**: Live rescan mass-banning requires a completed dry-run preview first.\n\n👉 Please run `/rescan` (or `/rescanusers`) first to preview matches without issuing bans.")
+			return
+		}
+	} else {
+		valReport, errVal := b.ValidateRulesAgainstKnownData()
+		if errVal == nil && valReport != nil && !valReport.Passed {
+			b.replyText(msg, fmt.Sprintf("❌ **Rule Regression Detected against Known Good data**!\n\n%s\n\nLive execution gate will NOT be unlocked until false positive regressions are resolved.", valReport.Summary))
+			return
+		}
+	}
+
 	var cutoff time.Time
 	if !opts.Force && opts.Hours > 0 {
 		cutoff = time.Now().Add(-time.Duration(opts.Hours) * time.Hour)
@@ -734,10 +748,19 @@ func (b *Bot) cmdRescanUsers(msg *tgbotapi.Message, args string, isAuthorized bo
 			}
 
 			if opts.DryRun {
-				report.WriteString("💡 **To execute these actions live**, run:\n`/rescan live` (or `/rescan live force` to rescan all)")
+				_ = b.db.RecordDryRunGate("rescan_users", res.TotalCandidates, len(res.Matches), "rescan_rules", true, fmt.Sprintf("%d candidates, %d matches", res.TotalCandidates, len(res.Matches)), 1*time.Hour)
+				report.WriteString("💡 **Live execution gate is UNLOCKED for 1 hour**.\nTo execute these actions live, run:\n`/rescan live` (or `/rescan live force` to rescan all)")
+			} else {
+				_ = b.db.ConsumeDryRunGate("rescan_users")
 			}
 		} else {
-			report.WriteString("🎉 No rule violations or spam accounts found among scanned candidates.")
+			if opts.DryRun {
+				_ = b.db.RecordDryRunGate("rescan_users", res.TotalCandidates, 0, "rescan_rules", true, fmt.Sprintf("%d candidates, 0 matches", res.TotalCandidates), 1*time.Hour)
+				report.WriteString("🎉 No rule violations or spam accounts found among scanned candidates.\n\n🔓 Live execution gate is unlocked for 1 hour.")
+			} else {
+				_ = b.db.ConsumeDryRunGate("rescan_users")
+				report.WriteString("🎉 No rule violations or spam accounts found among scanned candidates.")
+			}
 		}
 
 		b.replyText(msg, report.String())

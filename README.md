@@ -99,8 +99,14 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
 14. **Unified Detection Pipeline & Lifecycle Integration**:
     - Centralized modular detection engine evaluating across all lifecycle entrypoints: **Message Processing**, **Chat/Channel Join Events**, and **Offline Rescan Audits** (`/rescanusers`).
 
-15. **High-Reputation Rule Validation Internal Check**:
-    - Built-in validation suite (`detector.ValidateAgainstHighRepUsers`) ensuring any new or modified detection rules/triggers never match against established community members with reputation > 40 across profile data, join/rescan contexts, and message history.
+15. **Known Good & Known Bad Regression Suite (`known_good_data`, `known_bad_data`)**:
+    - **Regression Protection**: Stores persistent datasets of Known Good community members (`reputation >= 50`) and Known Bad banned spammers in dedicated SQLite tables.
+    - **Bypassed Rep/Admin Simulation**: When validating rules via `gogcbot validate-rules` or pre-scan checks, tests simulated profiles with reputation (`rep = 0`), admin status (`admin = false`), and banned status (`banned = false`) across join, rescan, message snippet, and secondary group contexts to ensure 0 false-positive regressions.
+    - **Automated Kickban Button**: Automated rule hits do NOT automatically pollute known datasets. Instead, kickban alerts in the moderation group include an interactive `🏷️ Add to Known Bad` inline button allowing human moderators to deliberately add confirmed spam patterns to the Known Bad dataset.
+
+16. **Explicit Dry-Run Gating for Mass Actions**:
+    - **Enforced Dry-Run Prior to Live Bans**: Mass-banning rescan operations (`gogcbot rescan-users --live` or `/rescan live`) are strictly gated by the `dryrun_gates` table. A live run is refused unless a successful dry-run preview and rule pre-check were completed within the past 1 hour.
+    - Consumes the gate immediately after live execution to ensure fresh dry-run verification for every subsequent batch action.
 
 ---
 
@@ -149,25 +155,37 @@ CGO_ENABLED=0 go build -o gogcbot main.go
 ./gogcbot list-unknownusers --config config.yaml --max-rep 20
 ./gogcbot list-unknownusers --config config.yaml --ban
 
-# 8. Manually rescan low-reputation users (>24h since last scan) - dry-run preview by default
+# 8. Manually rescan low-reputation users (>24h since last scan) - dry-run preview unlocks 1-hour live execution gate
 ./gogcbot rescan-users --config config.yaml
 ./gogcbot rescan-users --config config.yaml --max-rep 20 --hours 24
 ./gogcbot rescan-users --config config.yaml --force
-# Execute bans live:
+# Execute bans live (requires prior dry-run preview):
 ./gogcbot rescan-users --config config.yaml --live
 
-# 9. Dump all known database info and profiles for a user by @tag or numeric ID
+# 9. Validate all detection rules against Known Good & Known Bad datasets (0 false-positive check)
+./gogcbot validate-rules --config config.yaml
+
+# 10. Inspect or synchronize Known Good (rep >= 50) and Known Bad datasets in SQLite
+./gogcbot known-data --config config.yaml
+./gogcbot known-data --config config.yaml --list
+./gogcbot known-data --config config.yaml --sync
+
+# 11. Send a message to a Telegram group/channel as the bot
+./gogcbot send -1001234567890 "Important announcement" --config config.yaml
+./gogcbot send -1001234567890 -m "*Bold message*" --config config.yaml
+
+# 12. Dump all known database info and profiles for a user by @tag or numeric ID
 ./gogcbot user @spambot --config config.yaml
 ./gogcbot user 555666 --config config.yaml
 ./gogcbot user @spambot --config config.yaml --json
 ./gogcbot user 555666 --config config.yaml --output user_dossier.md
 
-# 10. Audit all banned users across monitored channels & groups (<= 1 req/sec) and enforce missing kick bans
+# 13. Audit all banned users across monitored channels & groups (<= 1 req/sec) and enforce missing kick bans
 ./gogcbot bancheck --config config.yaml
 ./gogcbot bancheck --config config.yaml --dry-run
 ./gogcbot bancheck --config config.yaml --delay-ms 1000
 
-# 11. Seed members from monitored groups via MTProto into users & user_joins tables
+# 14. Seed members from monitored groups via MTProto into users & user_joins tables
 ./gogcbot seedmembers --config config.yaml --api-id 12345678 --api-hash "your_api_hash"
 ./gogcbot seedmembers --config config.yaml --dry-run
 TG_API_ID=12345678 TG_API_HASH="your_api_hash" ./gogcbot seedmembers --config config.yaml
@@ -317,6 +335,7 @@ shieldy:
 | `/listusers` | Admin/Mod | List known good/bad users and moderation status |
 | `/listunknownusers [kw] [ban]` | Admin/Mod | Compact monospace table list or batch-ban unbanned new users with few messages (with or without bios) |
 | `/rescanusers [live] [force]` | Admin/Mod | Manually rescan low-rep users (>24h since last scan, dry-run by default; use 'live' to execute) |
+| `/send <group> <text>` | Super Admin / Bot Admin | Send a message to a monitored Telegram group/channel as the bot |
 | `/bancheck [dryrun]` | Admin/Mod | Audit all banned users across monitored channels/groups (<= 1 req/sec) & enforce missing kick bans |
 | `/cleanup` | Admin/Mod | Run retention cleanup on demand |
 | `/getdb` | Bot Admin (Direct PM only) | Download a copy of current SQLite3 database |

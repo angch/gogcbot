@@ -73,11 +73,40 @@ new_user_spam_bio) and shows possible actions (dry-run by default). Use --live t
 			delay = 100 * time.Millisecond
 		}
 
+		liveFlag, _ := cmd.Flags().GetBool("live")
+		dryRunFlag, _ := cmd.Flags().GetBool("dry-run")
 		isDryRun := true
-		if rescanLive {
+		if liveFlag {
 			isDryRun = false
 		} else if cmd.Flags().Changed("dry-run") {
-			isDryRun = rescanDryRun
+			isDryRun = dryRunFlag
+		}
+
+		out := cmd.OutOrStdout()
+
+		// Explicit Gating: Live execution requires a verified prior dry-run
+		if !isDryRun {
+			gate, errGate := database.GetValidDryRunGate("rescan_users")
+			if errGate != nil || gate == nil {
+				fmt.Fprintln(out, "❌ EXECUTION GATED: Live mass-banning rescan requires a completed dry-run preview first!")
+				fmt.Fprintln(out, "👉 Explicit Gating Rule: You must run without --live (or with --dry-run) to preview potential bans and validate against known good data before live actions can proceed.")
+				return fmt.Errorf("live rescan gated: must run dry-run first")
+			}
+			fmt.Fprintf(out, "🔓 Dry-run gate verified (Preview completed at %s: %s).\n🚀 Proceeding with LIVE mass-banning...\n\n",
+				gate.ExecutedAt.Format("2006-01-02 15:04:05"), gate.Details)
+		} else {
+			// In dry-run mode, validate rules against known good and bad datasets
+			fmt.Fprintln(out, "🔍 Validating detection rules against Known Good and Bad datasets...")
+			report, errVal := b.ValidateRulesAgainstKnownData()
+			if errVal == nil && report != nil {
+				if !report.Passed {
+					fmt.Fprintln(out, "❌ RULE REGRESSION DETECTED against Known Good data!")
+					fmt.Fprintln(out, report.Summary)
+					return fmt.Errorf("rule validation failed: %d false positive violation(s) on known good data", len(report.FalsePositives))
+				}
+				fmt.Fprintf(out, "✅ Pre-check passed: 0 false positive regressions on %d known good profiles (%d known bad detections).\n\n",
+					report.KnownGoodTotal, len(report.KnownBadMatches))
+			}
 		}
 
 		opts := bot.RescanOptions{
@@ -88,7 +117,6 @@ new_user_spam_bio) and shows possible actions (dry-run by default). Use --live t
 			DryRun:        isDryRun,
 		}
 
-		out := cmd.OutOrStdout()
 		fmt.Fprintln(out, "🚀 Starting low-reputation user rescan...")
 		fmt.Fprintf(out, "Database: %s | Max Rep: %d | Age Threshold: >%d hrs | Force: %t | DryRun: %t\n\n",
 			dbPath, opts.MaxReputation, opts.Hours, opts.Force, opts.DryRun)
@@ -140,10 +168,19 @@ new_user_spam_bio) and shows possible actions (dry-run by default). Use --live t
 					fmt.Fprintf(out, "  %d. %s -> Rule: %s | Action: %s\n     Reason: %s\n",
 						i+1, userTag, m.TriggeredRule, m.ActionSummary, m.Reason)
 				}
-				if opts.DryRun {
-					fmt.Fprintln(out, "\n💡 To execute live actions/bans, run with --live:")
-					fmt.Fprintln(out, "   ./gogcbot rescan-users --config config.yaml --live")
-				}
+			}
+
+			if opts.DryRun {
+				// Record dry-run gate in DB
+				_ = database.RecordDryRunGate("rescan_users", res.TotalCandidates, len(res.Matches), "rescan_rules", true, fmt.Sprintf("%d candidates, %d matches", res.TotalCandidates, len(res.Matches)), 1*time.Hour)
+				fmt.Fprintln(out, "\n✅ Dry-run completed successfully!")
+				fmt.Fprintln(out, "🔓 Live execution gate is UNLOCKED for 1 hour.")
+				fmt.Fprintln(out, "👉 To execute these actions live, run:")
+				fmt.Fprintln(out, "   ./gogcbot rescan-users --config config.yaml --live")
+			} else {
+				// Consume dry-run gate
+				_ = database.ConsumeDryRunGate("rescan_users")
+				fmt.Fprintln(out, "\n✅ Live rescan mass-banning completed. Dry-run gate consumed.")
 			}
 		}
 

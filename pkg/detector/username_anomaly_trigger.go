@@ -148,7 +148,7 @@ func UsernameAnomalyScore(username string) int {
 	}
 
 	score := 0
-	if totalLen > 0 && float64(upperCount)/float64(totalLen) >= 0.25 {
+	if totalLen > 0 && (float64(upperCount)/float64(totalLen) >= 0.50 || (float64(upperCount)/float64(totalLen) >= 0.25 && hasConsecutiveUpper(username))) {
 		score += 3
 	}
 	if vowelRatio < vowelGateThreshold {
@@ -166,6 +166,22 @@ func UsernameAnomalyScore(username string) int {
 		score += 2
 	}
 	return score
+}
+
+// hasConsecutiveUpper returns true if s contains at least two adjacent uppercase ASCII letters.
+func hasConsecutiveUpper(s string) bool {
+	prevUpper := false
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			if prevUpper {
+				return true
+			}
+			prevUpper = true
+		} else {
+			prevUpper = false
+		}
+	}
+	return false
 }
 
 // entropyThreshold is the character-diversity cutoff for the entropy term.

@@ -199,6 +199,300 @@ func (d *Detector) ValidateAgainstDB(database *db.DB, minRep int) ([]RuleMatchVi
 	return d.ValidateAgainstHighRepUsers(database, minRep)
 }
 
+// KnownDataValidationReport encapsulates the results of regression testing against known good and bad datasets.
+type KnownDataValidationReport struct {
+	KnownGoodTotal  int                  `json:"known_good_total"`
+	KnownBadTotal   int                  `json:"known_bad_total"`
+	FalsePositives  []RuleMatchViolation `json:"false_positives,omitempty"`
+	KnownBadMatches []RuleMatchViolation `json:"known_bad_matches,omitempty"`
+	Passed          bool                 `json:"passed"`
+	Summary         string               `json:"summary"`
+}
+
+// ValidateAgainstKnownGoodAndBad checks all registered triggers against known good and known bad datasets,
+// explicitly bypassing reputation and banned requirements to ensure no false positives on good data
+// and verifying detections on bad data.
+func (d *Detector) ValidateAgainstKnownGoodAndBad(database *db.DB) (*KnownDataValidationReport, error) {
+	if database == nil {
+		return nil, fmt.Errorf("database cannot be nil")
+	}
+
+	goodUsers, err := database.GetKnownGoodUsers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch known good users: %w", err)
+	}
+
+	badUsers, err := database.GetKnownBadUsers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch known bad users: %w", err)
+	}
+
+	report := &KnownDataValidationReport{
+		KnownGoodTotal: len(goodUsers),
+		KnownBadTotal:  len(badUsers),
+	}
+
+	// 1. Evaluate Known Good users (Bypassing reputation & banned requirements)
+	for _, kg := range goodUsers {
+		kgCopy := kg
+
+		baseCtx := func(simUserID int64) *TriggerContext {
+			u := &db.User{
+				UserID:       simUserID,
+				Username:     kgCopy.Username,
+				FirstName:    kgCopy.FirstName,
+				LastName:     kgCopy.LastName,
+				LanguageCode: kgCopy.LanguageCode,
+				IsPremium:    kgCopy.IsPremium,
+				Reputation:   0,     // BYPASS rep requirement
+				IsAdmin:      false, // BYPASS admin exemption
+				IsBanned:     false, // BYPASS banned check
+			}
+			return &TriggerContext{
+				User:                 u,
+				UserBio:              kgCopy.Bio,
+				LanguageCode:         kgCopy.LanguageCode,
+				IsPremium:            kgCopy.IsPremium,
+				HasPrivateForwards:   kgCopy.HasPrivateForwards,
+				PersonalChatTitle:    kgCopy.PersonalChatTitle,
+				PersonalChatUsername: kgCopy.PersonalChatUsername,
+				BusinessIntro:        kgCopy.BusinessIntro,
+				HasPhoto:             kgCopy.HasPhoto,
+				PhotoCount:           kgCopy.PhotoCount,
+			}
+		}
+
+		testUserIDs := []int64{kgCopy.UserID}
+		if kgCopy.UserID < 1000000000 {
+			testUserIDs = append(testUserIDs, 5000000000+kgCopy.UserID)
+		}
+
+		for _, testUID := range testUserIDs {
+			// (A) Join context
+			joinCtx := baseCtx(testUID)
+			joinCtx.IsNewUser = true
+			joinCtx.UserMessageCount = 0
+			joinRes, err := d.Evaluate(joinCtx)
+			if err == nil {
+				for _, res := range joinRes {
+					if res != nil && res.Triggered {
+						report.FalsePositives = append(report.FalsePositives, RuleMatchViolation{
+							TriggerID:   res.TriggerID,
+							TriggerName: d.getTriggerName(res.TriggerID),
+							User:        joinCtx.User,
+							Profile: &db.UserProfile{
+								UserID:               kgCopy.UserID,
+								Username:             kgCopy.Username,
+								FirstName:            kgCopy.FirstName,
+								LastName:             kgCopy.LastName,
+								Bio:                  kgCopy.Bio,
+								PersonalChatTitle:    kgCopy.PersonalChatTitle,
+								PersonalChatUsername: kgCopy.PersonalChatUsername,
+								BusinessIntro:        kgCopy.BusinessIntro,
+								HasPhoto:             kgCopy.HasPhoto,
+								PhotoCount:           kgCopy.PhotoCount,
+							},
+							ContextType: "known_good_join",
+							Reason:      res.Reason,
+						})
+					}
+				}
+			}
+
+			// (B) Rescan context
+			rescanCtx := baseCtx(testUID)
+			rescanCtx.IsNewUser = false
+			rescanCtx.UserMessageCount = len(kgCopy.SampleMessages)
+			rescanRes, err := d.Evaluate(rescanCtx)
+			if err == nil {
+				for _, res := range rescanRes {
+					if res != nil && res.Triggered {
+						report.FalsePositives = append(report.FalsePositives, RuleMatchViolation{
+							TriggerID:   res.TriggerID,
+							TriggerName: d.getTriggerName(res.TriggerID),
+							User:        rescanCtx.User,
+							Profile: &db.UserProfile{
+								UserID:               kgCopy.UserID,
+								Username:             kgCopy.Username,
+								FirstName:            kgCopy.FirstName,
+								LastName:             kgCopy.LastName,
+								Bio:                  kgCopy.Bio,
+								PersonalChatTitle:    kgCopy.PersonalChatTitle,
+								PersonalChatUsername: kgCopy.PersonalChatUsername,
+								BusinessIntro:        kgCopy.BusinessIntro,
+								HasPhoto:             kgCopy.HasPhoto,
+								PhotoCount:           kgCopy.PhotoCount,
+							},
+							ContextType: "known_good_rescan",
+							Reason:      res.Reason,
+						})
+					}
+				}
+			}
+
+			// (C) Sample Messages context
+			for idx, msgText := range kgCopy.SampleMessages {
+				msgCtx := baseCtx(testUID)
+				msgCtx.IsNewUser = false
+				msgCtx.UserMessageCount = len(kgCopy.SampleMessages)
+				msgCtx.Text = msgText
+				msgCtx.Message = &db.Message{
+					ChatID:    123456,
+					MessageID: idx + 1,
+					UserID:    testUID,
+					Text:      msgText,
+				}
+				msgRes, err := d.Evaluate(msgCtx)
+				if err == nil {
+					for _, res := range msgRes {
+						if res != nil && res.Triggered {
+							report.FalsePositives = append(report.FalsePositives, RuleMatchViolation{
+								TriggerID:   res.TriggerID,
+								TriggerName: d.getTriggerName(res.TriggerID),
+								User:        msgCtx.User,
+								Message:     msgCtx.Message,
+								ContextType: "known_good_message",
+								Reason:      res.Reason,
+							})
+						}
+					}
+				}
+			}
+
+			// (D) Secondary group context (testing that primary members are not flagged in secondary groups)
+			secCtx := baseCtx(testUID)
+			secCtx.IsNewUser = true
+			secCtx.UserMessageCount = 0
+			secCtx.IsSecondaryGroup = true
+			secCtx.IsMemberOfPrimaryGroup = true
+			secRes, err := d.Evaluate(secCtx)
+			if err == nil {
+				for _, res := range secRes {
+					if res != nil && res.Triggered {
+						report.FalsePositives = append(report.FalsePositives, RuleMatchViolation{
+							TriggerID:   res.TriggerID,
+							TriggerName: d.getTriggerName(res.TriggerID),
+							User:        secCtx.User,
+							ContextType: "known_good_secondary_group",
+							Reason:      res.Reason,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Evaluate Known Bad users (Bypassing reputation & banned requirements)
+	for _, kb := range badUsers {
+		kbCopy := kb
+		badCtx := &TriggerContext{
+			User: &db.User{
+				UserID:       kbCopy.UserID,
+				Username:     kbCopy.Username,
+				FirstName:    kbCopy.FirstName,
+				LastName:     kbCopy.LastName,
+				LanguageCode: kbCopy.LanguageCode,
+				IsPremium:    kbCopy.IsPremium,
+				Reputation:   0,     // BYPASS
+				IsAdmin:      false, // BYPASS
+				IsBanned:     false, // BYPASS
+			},
+			UserBio:              kbCopy.Bio,
+			LanguageCode:         kbCopy.LanguageCode,
+			IsPremium:            kbCopy.IsPremium,
+			HasPrivateForwards:   kbCopy.HasPrivateForwards,
+			PersonalChatTitle:    kbCopy.PersonalChatTitle,
+			PersonalChatUsername: kbCopy.PersonalChatUsername,
+			BusinessIntro:        kbCopy.BusinessIntro,
+			HasPhoto:             kbCopy.HasPhoto,
+			PhotoCount:           kbCopy.PhotoCount,
+			IsNewUser:            true,
+			UserMessageCount:     0,
+		}
+
+		resList, err := d.Evaluate(badCtx)
+		if err == nil {
+			for _, res := range resList {
+				if res != nil && res.Triggered {
+					report.KnownBadMatches = append(report.KnownBadMatches, RuleMatchViolation{
+						TriggerID:   res.TriggerID,
+						TriggerName: d.getTriggerName(res.TriggerID),
+						User:        badCtx.User,
+						ContextType: "known_bad_profile",
+						Reason:      res.Reason,
+					})
+				}
+			}
+		}
+
+		for idx, msgText := range kbCopy.SampleMessages {
+			msgCtx := &TriggerContext{
+				User:             badCtx.User,
+				UserBio:          kbCopy.Bio,
+				Text:             msgText,
+				IsNewUser:        true,
+				UserMessageCount: 0,
+				Message: &db.Message{
+					ChatID:    123456,
+					MessageID: idx + 1,
+					UserID:    kbCopy.UserID,
+					Text:      msgText,
+				},
+			}
+			mResList, err := d.Evaluate(msgCtx)
+			if err == nil {
+				for _, res := range mResList {
+					if res != nil && res.Triggered {
+						report.KnownBadMatches = append(report.KnownBadMatches, RuleMatchViolation{
+							TriggerID:   res.TriggerID,
+							TriggerName: d.getTriggerName(res.TriggerID),
+							User:        msgCtx.User,
+							Message:     msgCtx.Message,
+							ContextType: "known_bad_message",
+							Reason:      res.Reason,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	report.Passed = len(report.FalsePositives) == 0
+	report.Summary = FormatKnownDataReport(report)
+	return report, nil
+}
+
+// ValidateTriggersAgainstKnownGoodAndBad is a convenience function that constructs a detector with the given triggers
+// and validates them against known good and known bad datasets in database.
+func ValidateTriggersAgainstKnownGoodAndBad(database *db.DB, triggers ...Trigger) (*KnownDataValidationReport, error) {
+	det := NewDetector(triggers...)
+	return det.ValidateAgainstKnownGoodAndBad(database)
+}
+
+// FormatKnownDataReport formats the validation report into a human-readable summary.
+func FormatKnownDataReport(report *KnownDataValidationReport) string {
+	if report == nil {
+		return "No validation report available."
+	}
+	var sb strings.Builder
+	sb.WriteString("📊 Known Data Rule Validation Report:\n")
+	sb.WriteString(fmt.Sprintf("  • Known Good Profiles Evaluated: %d\n", report.KnownGoodTotal))
+	sb.WriteString(fmt.Sprintf("  • Known Bad Profiles Evaluated:  %d\n", report.KnownBadTotal))
+	sb.WriteString(fmt.Sprintf("  • False Positives (Violations):  %d\n", len(report.FalsePositives)))
+	sb.WriteString(fmt.Sprintf("  • Known Bad Detections:          %d\n", len(report.KnownBadMatches)))
+
+	if len(report.FalsePositives) > 0 {
+		sb.WriteString("\n❌ FALSE POSITIVE REGRESSIONS (Rules falsely triggered on known good data):\n")
+		for i, fp := range report.FalsePositives {
+			sb.WriteString(fmt.Sprintf("  [%d] %s\n", i+1, fp.String()))
+		}
+	} else {
+		sb.WriteString("\n✅ All Known Good profiles passed with 0 false positive regressions!\n")
+	}
+
+	return sb.String()
+}
+
 func (d *Detector) getTriggerName(id string) string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
