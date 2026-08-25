@@ -121,7 +121,24 @@ func (b *Bot) DeleteGroupMessage(chatID int64, messageID int) error {
 	return err
 }
 
+func isNonFatalBanError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "user_not_participant") ||
+		strings.Contains(errStr, "usernotparticipant") ||
+		strings.Contains(errStr, "user not participant") ||
+		strings.Contains(errStr, "can't ban members in private chats") ||
+		strings.Contains(errStr, "cannot ban members in private chats") ||
+		strings.Contains(errStr, "participant_id_invalid") ||
+		strings.Contains(errStr, "user not found")
+}
+
 func (b *Bot) MuteUserInGroup(chatID int64, userID int64, duration time.Duration) error {
+	if chatID >= 0 {
+		return nil
+	}
 	untilDate := time.Now().Add(duration).Unix()
 	// Restrict send messages
 	restrictConfig := tgbotapi.RestrictChatMemberConfig{
@@ -140,10 +157,20 @@ func (b *Bot) MuteUserInGroup(chatID int64, userID int64, duration time.Duration
 	}
 
 	_, err := b.Request(restrictConfig)
-	return err
+	if err != nil {
+		if isNonFatalBanError(err) {
+			log.Printf("[Bot] User %d mute in chat %d reported non-fatal status (%v), treating as success", userID, chatID, err)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (b *Bot) BanUserInGroup(chatID int64, userID int64) error {
+	if chatID >= 0 {
+		return nil
+	}
 	banConfig := tgbotapi.BanChatMemberConfig{
 		ChatMemberConfig: tgbotapi.ChatMemberConfig{
 			ChatID: chatID,
@@ -154,6 +181,10 @@ func (b *Bot) BanUserInGroup(chatID int64, userID int64) error {
 
 	_, err := b.Request(banConfig)
 	if err != nil {
+		if isNonFatalBanError(err) {
+			log.Printf("[Bot] User %d ban in chat %d reported non-fatal status (%v), treating as success", userID, chatID, err)
+			return nil
+		}
 		return fmt.Errorf("telegram ban error: %w", err)
 	}
 	return nil
@@ -164,7 +195,7 @@ func (b *Bot) BanUserAcrossAllGroups(userID int64, currentChatID ...int64) error
 
 	chatIDs := make(map[int64]bool)
 	for _, cid := range currentChatID {
-		if cid != 0 {
+		if cid < 0 {
 			chatIDs[cid] = true
 		}
 	}
@@ -172,7 +203,9 @@ func (b *Bot) BanUserAcrossAllGroups(userID int64, currentChatID ...int64) error
 	groups, err := b.db.GetMonitoredGroups()
 	if err == nil {
 		for _, g := range groups {
-			chatIDs[g.ChatID] = true
+			if g.ChatID < 0 {
+				chatIDs[g.ChatID] = true
+			}
 		}
 	}
 
@@ -200,6 +233,9 @@ func (b *Bot) BanUserAcrossAllGroups(userID int64, currentChatID ...int64) error
 // ScheduleBanRecheck schedules a delayed check (e.g. 6 minutes) to verify if Shieldy or Telegram
 // modified a permanent ban into a timed ban. If so, it re-issues the permanent ban.
 func (b *Bot) ScheduleBanRecheck(chatID int64, userID int64, delay time.Duration) {
+	if chatID >= 0 {
+		return
+	}
 	go func() {
 		time.Sleep(delay)
 
@@ -240,6 +276,10 @@ func (b *Bot) ScheduleBanRecheck(chatID int64, userID int64, delay time.Duration
 }
 
 func (b *Bot) UnbanUserInGroup(chatID int64, userID int64) error {
+	if chatID >= 0 {
+		_ = b.db.SetUserBanned(userID, false)
+		return nil
+	}
 	unbanConfig := tgbotapi.UnbanChatMemberConfig{
 		ChatMemberConfig: tgbotapi.ChatMemberConfig{
 			ChatID: chatID,
@@ -249,6 +289,9 @@ func (b *Bot) UnbanUserInGroup(chatID int64, userID int64) error {
 	}
 
 	_, err := b.Request(unbanConfig)
+	if err != nil && isNonFatalBanError(err) {
+		err = nil
+	}
 	// Unconditionally clear banned flag in DB even if Telegram reports user is already unbanned
 	_ = b.db.SetUserBanned(userID, false)
 	return err
@@ -257,7 +300,7 @@ func (b *Bot) UnbanUserInGroup(chatID int64, userID int64) error {
 func (b *Bot) UnbanUserAcrossAllGroups(userID int64, currentChatID ...int64) error {
 	chatIDs := make(map[int64]bool)
 	for _, cid := range currentChatID {
-		if cid != 0 {
+		if cid < 0 {
 			chatIDs[cid] = true
 		}
 	}
@@ -265,7 +308,9 @@ func (b *Bot) UnbanUserAcrossAllGroups(userID int64, currentChatID ...int64) err
 	groups, err := b.db.GetMonitoredGroups()
 	if err == nil {
 		for _, g := range groups {
-			chatIDs[g.ChatID] = true
+			if g.ChatID < 0 {
+				chatIDs[g.ChatID] = true
+			}
 		}
 	}
 
@@ -1021,6 +1066,9 @@ func (b *Bot) CheckBannedUsersAcrossGroups(ctx context.Context, opts BanCheckOpt
 		}
 
 		for gIdx, g := range groups {
+			if g.ChatID >= 0 {
+				continue
+			}
 			groupCopy := g
 			res.TotalChecks++
 
@@ -1039,6 +1087,14 @@ func (b *Bot) CheckBannedUsersAcrossGroups(ctx context.Context, opts BanCheckOpt
 			}
 
 			if getErr != nil {
+				if isNonFatalBanError(getErr) {
+					log.Printf("[BanCheck Notice] User %d in %s (`%d`) is not a participant (%v)",
+						userCopy.UserID, groupCopy.Title, groupCopy.ChatID, getErr)
+					if progressCb != nil {
+						progressCb(uIdx+1, len(bannedUsers), gIdx+1, len(groups), &userCopy, &groupCopy, "not_participant", false, nil)
+					}
+					continue
+				}
 				log.Printf("[BanCheck Error] GetChatMember failed for user %d in %s (`%d`): %v",
 					userCopy.UserID, groupCopy.Title, groupCopy.ChatID, getErr)
 				res.ErrorCount++

@@ -3098,3 +3098,98 @@ func TestBot_ValidateRulesAgainstKnownData(t *testing.T) {
 		t.Errorf("expected 1 known good and 1 known bad, got %d and %d", report.KnownGoodTotal, report.KnownBadTotal)
 	}
 }
+
+func TestIsNonFatalBanError(t *testing.T) {
+	nonFatalErrors := []string{
+		"Bad Request: USER_NOT_PARTICIPANT",
+		"Bad Request: USERNOTPARTICIPANT",
+		"Bad Request: user not participant",
+		"telegram ban error: Bad Request: can't ban members in private chats",
+		"cannot ban members in private chats",
+		"Bad Request: PARTICIPANT_ID_INVALID",
+		"Bad Request: user not found",
+	}
+
+	for _, msg := range nonFatalErrors {
+		if !isNonFatalBanError(fmt.Errorf("%s", msg)) {
+			t.Errorf("expected '%s' to be identified as non-fatal, got false", msg)
+		}
+	}
+
+	fatalErrors := []string{
+		"Bad Request: not enough rights to restrict/ban chat member",
+		"Bad Request: CHAT_ADMIN_REQUIRED",
+		"Unauthorized",
+		"network timeout",
+	}
+
+	for _, msg := range fatalErrors {
+		if isNonFatalBanError(fmt.Errorf("%s", msg)) {
+			t.Errorf("expected '%s' to be identified as fatal, got true", msg)
+		}
+	}
+
+	if isNonFatalBanError(nil) {
+		t.Errorf("expected nil to return false")
+	}
+}
+
+func TestBanUserInGroup_SkipsPrivateChat(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	// Positive chat ID represents private 1-on-1 chat in Telegram
+	err := b.BanUserInGroup(79896072, 12345)
+	if err != nil {
+		t.Errorf("expected BanUserInGroup on private chat to return nil, got %v", err)
+	}
+
+	err = b.MuteUserInGroup(79896072, 12345, time.Hour)
+	if err != nil {
+		t.Errorf("expected MuteUserInGroup on private chat to return nil, got %v", err)
+	}
+
+	err = b.UnbanUserInGroup(79896072, 12345)
+	if err != nil {
+		t.Errorf("expected UnbanUserInGroup on private chat to return nil, got %v", err)
+	}
+}
+
+func TestBanUserAcrossAllGroups_IgnoresPrivateChats(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	targetUserID := int64(8587706050)
+	_, _, _ = b.db.GetOrCreateUser(targetUserID, "spammer", "Spam", "User", 0)
+
+	// Save a private chat as monitored by mistake (e.g. chatID > 0)
+	_ = b.db.SaveGroup(79896072, "Private DM", "private")
+	_ = b.db.SetGroupMonitored(79896072, true)
+
+	// When banning across all groups with currentChatID being private chat ID (79896072)
+	// It should skip private chats and successfully mark user as banned in DB without errors.
+	err := b.BanUserAcrossAllGroups(targetUserID, 79896072)
+	if err != nil {
+		t.Errorf("expected BanUserAcrossAllGroups to succeed and skip private chats, got error: %v", err)
+	}
+
+	u, err := b.db.GetUserByID(targetUserID)
+	if err != nil {
+		t.Fatalf("failed to query user: %v", err)
+	}
+	if !u.IsBanned {
+		t.Errorf("expected user to be marked as banned in DB")
+	}
+
+	// Unban across groups should also skip private chats
+	err = b.UnbanUserAcrossAllGroups(targetUserID, 79896072)
+	if err != nil {
+		t.Errorf("expected UnbanUserAcrossAllGroups to succeed, got error: %v", err)
+	}
+
+	u, _ = b.db.GetUserByID(targetUserID)
+	if u.IsBanned {
+		t.Errorf("expected user to be unbanned in DB")
+	}
+}
+

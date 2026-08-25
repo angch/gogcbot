@@ -108,6 +108,10 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
     - **Enforced Dry-Run Prior to Live Bans**: Mass-banning rescan operations (`gogcbot rescan-users --live` or `/rescan live`) are strictly gated by the `dryrun_gates` table. A live run is refused unless a successful dry-run preview and rule pre-check were completed within the past 1 hour.
     - Consumes the gate immediately after live execution to ensure fresh dry-run verification for every subsequent batch action.
 
+17. **Robust Cross-Group Moderation Execution**:
+    - **Private Chat Safety**: Automatically filters out private 1-on-1 chat IDs (`chatID >= 0`) during multi-group bans, unbans, mutes, and ban audits so direct-message admin commands never fail on non-group chats.
+    - **Non-Fatal Absence Handling**: Safely handles Telegram `USER_NOT_PARTICIPANT` / `USERNOTPARTICIPANT` responses as non-fatal successes when kicking or auditing users who are already absent from the chat.
+
 ---
 
 ## 🚀 Installation & Usage
