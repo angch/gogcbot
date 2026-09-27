@@ -74,19 +74,27 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
      3. High user ID (>= 1,000,000,000 / 10^9).
      4. Username consists of mixed-caps letters of at least 5 length (e.g. `@cbzbQFLOuHNkJZ`).
 
-10. **Private Message Logging & Moderation Channel Mirroring**:
+10. **New High-ID User CJK Spam Detection (`new_user_cjk`)**:
+    - **Targeted CJK Language Spam Detection**: Detects CJK spam from brand new, high-ID users with low or zero reputation.
+    - **Progressive Length-Based Thresholding**:
+      - **Short messages ($\le$ 50 runes)**: Catches obfuscated spam (e.g. `六栢o壹天`, `Hello 你好`) with at least 2 CJK characters and a 10% ratio.
+      - **Medium messages (51–150 runes)**: Requires at least 5 CJK characters and 15% CJK ratio.
+      - **Long messages (> 150 runes)**: Forgiving for long technical posts containing incidental CJK terms, code snippets, or kaomojis (requires $\ge$ 10 CJK chars and 15% ratio, or $\ge$ 25 CJK chars).
+    - **Punctuation & Whitespace Safety**: Exempts whitespace (including ideographic full-width spaces `\u3000`), symbols, and punctuation (`【】`, `〜`, etc.) to prevent false-positive bans on emoticons and brackets.
+
+11. **Private Message Logging & Moderation Channel Mirroring**:
     - **Full Visibility & Audit Trail**: Any private direct message (PM/DM) sent to the bot is automatically saved to the SQLite conversation history and logged to the system logs.
     - **Automated Mirroring to Moderation Channel**: Private messages from non-admin users (including text, media, edited messages, and forwards) are immediately formatted and mirrored directly to the Private Moderation Group (`moderation_group_id`), complete with sender information, user ID, reputation score, warning count, message timestamp, and forwarded attachments. Private messages from known bot admins (Super Admin, Bot Admins, and Moderation Group members) are kept private and excluded from mirroring.
 
-11. **Auto-Generated Username Anomaly Detection (`username_anomaly`)**:
+12. **Auto-Generated Username Anomaly Detection (`username_anomaly`)**:
     - **Algorithmic Handle Scoring**: Detects automated/farmed Telegram handles for new high-ID users using mixed-case patterns, interleaved digit sequences (e.g. `nykrr_v9cl2t`), and Shannon entropy gated with low vowel ratios (e.g. `qtdulcljcptk6950`).
     - **Moderator Review & Flagging**: Flags suspicious posts to the Private Moderation Group for human moderator review and action (`flag_only: true` by default). Configurable score thresholds (`min_score: 3`) and optional immediate kickban mode (`flag_only: false`).
 
-12. **Profile Name Spam Keyword Ban (`profile_name_keyword_ban`)**:
+13. **Profile Name Spam Keyword Ban (`profile_name_keyword_ban`)**:
     - **Homoglyph Normalization**: Folds visually confusable digits and letters (`o/O/零/〇 -> 0`, `l/L -> 1`) to catch evasive name variations (e.g. `六o0壹天` or `玖Oo壹天` hitting `0壹天`).
     - Evaluates display names against calibrated blocklists for new high-ID users with low reputation.
 
-13. **Primary & Secondary Group Hierarchy & Cross-Group Join Rule (`secondary_group_not_in_primary`)**:
+14. **Primary & Secondary Group Hierarchy & Cross-Group Join Rule (`secondary_group_not_in_primary`)**:
     - **Primary vs. Secondary Groups**: Categorizes monitored Telegram groups into Primary Groups (`is_primary = true`) and Secondary Groups (`is_primary = false`).
     - **Cross-Group Membership Gate on Join, Message & Rescan**: When a user joins any secondary group, sends a message in a secondary group, or is audited during user rescans (`/rescanusers` or `gogcbot rescan-users`), the bot checks if they are currently an active member in the primary group(s). If they are not a member of the primary group, the bot immediately:
       - Issues a permanent ban across **all** monitored channels and groups (`BanUserAcrossAllGroups`).
@@ -96,19 +104,19 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
     - **Exemptions**: Bot administrators, whitelisted users with maximum reputation (>= 100), and users with reputation exceeding the configured threshold (`max_reputation`, default 5, including rep 50+) are exempt.
     - **Commands**: Configure group roles on the fly via `/setprimarygroup [chat_id]` and `/setsecondarygroup [chat_id]`, with role badges (`[⭐ Primary]` / `[Secondary]`) displayed in `/listgroups`.
 
-14. **Unified Detection Pipeline & Lifecycle Integration**:
+15. **Unified Detection Pipeline & Lifecycle Integration**:
     - Centralized modular detection engine evaluating across all lifecycle entrypoints: **Message Processing**, **Chat/Channel Join Events**, and **Offline Rescan Audits** (`/rescanusers`).
 
-15. **Known Good & Known Bad Regression Suite (`known_good_data`, `known_bad_data`)**:
+16. **Known Good & Known Bad Regression Suite (`known_good_data`, `known_bad_data`)**:
     - **Regression Protection**: Stores persistent datasets of Known Good community members (`reputation >= 50`) and Known Bad banned spammers in dedicated SQLite tables.
     - **Bypassed Rep/Admin Simulation**: When validating rules via `gogcbot validate-rules` or pre-scan checks, tests simulated profiles with reputation (`rep = 0`), admin status (`admin = false`), and banned status (`banned = false`) across join, rescan, message snippet, and secondary group contexts to ensure 0 false-positive regressions.
     - **Automated Kickban Button**: Automated rule hits do NOT automatically pollute known datasets. Instead, kickban alerts in the moderation group include an interactive `🏷️ Add to Known Bad` inline button allowing human moderators to deliberately add confirmed spam patterns to the Known Bad dataset.
 
-16. **Explicit Dry-Run Gating for Mass Actions**:
+17. **Explicit Dry-Run Gating for Mass Actions**:
     - **Enforced Dry-Run Prior to Live Bans**: Mass-banning rescan operations (`gogcbot rescan-users --live` or `/rescan live`) are strictly gated by the `dryrun_gates` table. A live run is refused unless a successful dry-run preview and rule pre-check were completed within the past 1 hour.
     - Consumes the gate immediately after live execution to ensure fresh dry-run verification for every subsequent batch action.
 
-17. **Robust Cross-Group Moderation Execution**:
+18. **Robust Cross-Group Moderation Execution**:
     - **Private Chat Safety**: Automatically filters out private 1-on-1 chat IDs (`chatID >= 0`) during multi-group bans, unbans, mutes, and ban audits so direct-message admin commands never fail on non-group chats.
     - **Non-Fatal Absence Handling**: Safely handles Telegram `USER_NOT_PARTICIPANT` / `USERNOTPARTICIPANT` responses as non-fatal successes when kicking or auditing users who are already absent from the chat.
 
@@ -255,6 +263,8 @@ detector:
     min_high_user_id: 1000000000       # User ID threshold for newly generated accounts
     max_reputation: 5                  # Maximum reputation score to apply detection
     max_user_posts: 5                  # Post count window for new user evaluation
+    min_cjk_chars: 2                   # Minimum CJK characters required (default 2)
+    min_cjk_ratio: 0.15                # Minimum CJK character ratio for longer messages (default 0.15)
     rep_penalty: 20                    # Reputation penalty applied upon detection
   new_user_spam_bio:
     enabled: true                      # Kick/ban new users with spam/scam profile bios

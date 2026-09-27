@@ -106,6 +106,8 @@ func DefaultConfig() Config {
 				MinHighUserID: 1000000000,
 				MaxReputation: 5,
 				MaxUserPosts:  5,
+				MinCJKChars:   2,
+				MinCJKRatio:   0.15,
 				RepPenalty:    20,
 			},
 			NewUserSpamBio: detector.NewUserSpamBioTriggerConfig{
@@ -202,12 +204,16 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.new_user_cjk.min_high_user_id", int64(1000000000))
 	v.SetDefault("detector.new_user_cjk.max_reputation", 5)
 	v.SetDefault("detector.new_user_cjk.max_user_posts", 5)
+	v.SetDefault("detector.new_user_cjk.min_cjk_chars", 2)
+	v.SetDefault("detector.new_user_cjk.min_cjk_ratio", 0.15)
 	v.SetDefault("detector.new_user_cjk.rep_penalty", 20)
 
 	v.SetDefault("detector.new_user_chinese.enabled", true)
 	v.SetDefault("detector.new_user_chinese.min_high_user_id", int64(1000000000))
 	v.SetDefault("detector.new_user_chinese.max_reputation", 5)
 	v.SetDefault("detector.new_user_chinese.max_user_posts", 5)
+	v.SetDefault("detector.new_user_chinese.min_chinese_chars", 2)
+	v.SetDefault("detector.new_user_chinese.min_cjk_ratio", 0.15)
 	v.SetDefault("detector.new_user_chinese.rep_penalty", 20)
 
 	v.SetDefault("detector.new_user_spam_bio.enabled", true)

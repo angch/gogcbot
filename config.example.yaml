@@ -35,6 +35,8 @@ detector:
     min_high_user_id: 1000000000
     max_reputation: 5
     max_user_posts: 5
+    min_cjk_chars: 2
+    min_cjk_ratio: 0.15
     rep_penalty: 20
   new_user_spam_bio:
     enabled: true
