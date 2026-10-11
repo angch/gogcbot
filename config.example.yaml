@@ -10,6 +10,7 @@ auto_flag:
   enabled: true
   low_rep_threshold: 50
   flag_on_links: true
+  delete_on_links: true # Aggressively remove messages containing web links from untrusted users and forward to moderation
   new_user_min_posts: 3
   blocked_keywords:
     - "crypto giveaway"
@@ -86,6 +87,10 @@ detector:
     enabled: true
     max_reputation: 5
     rep_penalty: 20
+  custom_sticker:
+    enabled: true
+    max_reputation: 5
+    rep_penalty: 50
 
 shieldy:
   enabled: true

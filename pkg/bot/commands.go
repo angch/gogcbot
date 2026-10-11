@@ -383,12 +383,26 @@ func (b *Bot) cmdFlag(msg *tgbotapi.Message, args string) {
 		b.replyText(msg, "❌ Failed to retrieve target user for flagging.")
 		return
 	}
+	var stickerInfo *db.StickerInfo
+	if targetMsg.Sticker != nil {
+		stickerInfo = &db.StickerInfo{
+			SetName:      targetMsg.Sticker.SetName,
+			FileID:       targetMsg.Sticker.FileID,
+			FileUniqueID: targetMsg.Sticker.FileUniqueID,
+			Emoji:        targetMsg.Sticker.Emoji,
+			Width:        targetMsg.Sticker.Width,
+			Height:       targetMsg.Sticker.Height,
+			FileSize:     targetMsg.Sticker.FileSize,
+			IsAnimated:   targetMsg.Sticker.IsAnimated,
+		}
+	}
 	dbMsg := &db.Message{
 		ChatID:    targetMsg.Chat.ID,
 		MessageID: targetMsg.MessageID,
 		UserID:    targetUser.UserID,
-		Text:      targetMsg.Text,
+		Text:      extractMessageText(targetMsg),
 		CreatedAt: targetMsg.Time(),
+		Sticker:   stickerInfo,
 	}
 	flag, err := b.db.CreateFlaggedPost(targetMsg.Chat.ID, targetMsg.MessageID, targetUser.UserID, reason)
 	if err != nil {

@@ -37,8 +37,8 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
 
 4. **Auto-Flagging & Moderation Engine**:
    - Automatically detects suspicious messages:
-     - Low reputation user (< 50) posting links.
-     - New account (<= 3 posts) posting links.
+     - Low reputation user (< 50) posting links (aggressively removes telegram message from the group when `delete_on_links: true`, forwarding to moderation group).
+     - New account (<= 3 posts) posting links (aggressively removes telegram message from the group when `delete_on_links: true`, forwarding to moderation group).
      - Blocked spam/crypto keywords or custom regexes.
      - Reputation falling below threshold.
    - Dispatches automated ban notifications (`🚫 TRIGGER BAN EXECUTED`) directly to the Private Moderation Group / management monitoring channel whenever a ban is triggered by detection rules.
@@ -104,19 +104,40 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
     - **Exemptions**: Bot administrators, whitelisted users with maximum reputation (>= 100), and users with reputation exceeding the configured threshold (`max_reputation`, default 5, including rep 50+) are exempt.
     - **Commands**: Configure group roles on the fly via `/setprimarygroup [chat_id]` and `/setsecondarygroup [chat_id]`, with role badges (`[⭐ Primary]` / `[Secondary]`) displayed in `/listgroups`.
 
-15. **Unified Detection Pipeline & Lifecycle Integration**:
+15. **Low Reputation User Custom Sticker Kickban (`custom_sticker`) & Sticker Moderation Signals**:
+    - **Custom Sticker Exploitation Defense**: Spammers frequently craft custom stickers (or custom sticker packs) associated with standard emojis like thumbs up (`👍`) containing unwanted advertisements, adult content, or scams to circumvent text-based filters (e.g. Message ID `66607`).
+    - **Normal Emoji vs. Custom Sticker Detection**:
+      - Normal emojis sent from mobile/desktop keyboards arrive strictly as standard Unicode text messages (`msg.Text = "👍"`, `msg.Sticker == nil`).
+      - Custom stickers arrive as dedicated Telegram sticker media objects (`msg.Sticker != nil`), containing pack names, dimensions, format, and file IDs.
+    - **Automated Immediate Kickban**: Whenever a user with low reputation (`reputation <= max_reputation`, default 5) posts a custom sticker or custom emoji, the bot immediately:
+      - Deletes the offending sticker message from the group chat (`ActionDeleteMessage`).
+      - Kickbans the spammer across all monitored channels and supergroups (`ActionBanUser`).
+      - Deducts reputation points (`-50`).
+      - Dispatches a trigger ban notification with full sticker details to the Private Moderation Group (`SendTriggerBanAlert`).
+    - **Rich Sticker Metadata in Moderation Cards & Database**: When any message containing a sticker is flagged for review or auto-banned, the moderation alert includes rich sticker signals:
+      - **Pack Name**: originating sticker set (e.g. `crypto_rocket_pack` or `(none / custom in-app editor)`).
+      - **Dimensions**: exact `Width x Height` resolution (e.g. `512x512` or `512x256`) and aspect ratio.
+      - **Format**: Static (WebP), Animated (TGS/Lottie), or Video (WebM).
+      - **Emoji & File IDs**: Associated emoji (`👍`), `FileID`, `FileUniqueID`, and file size in bytes.
+      - **Persistence**: Persisted in the `messages` table via `sticker_json` for auditing and historical training data.
+    - **Preparedness for Future Multimodal LLM Vision Inspection**:
+      - Sticker metadata signals are logged with structured prefix `[Sticker Signals]` and `[Sticker Detected]` for log ingestion pipelines.
+      - The bot provides `GetStickerDirectURL(fileID)` via Telegram Bot API to download sticker images/frames for automated visual safety classification with multimodal LLMs.
+    - **Exemptions**: Bot administrators, whitelisted members (`reputation >= 100`), and established users with reputation exceeding `max_reputation` are exempt. Built-in official Telegram animated emojis can optionally be permitted via `allow_official_animated_emoji`.
+
+16. **Unified Detection Pipeline & Lifecycle Integration**:
     - Centralized modular detection engine evaluating across all lifecycle entrypoints: **Message Processing**, **Chat/Channel Join Events**, and **Offline Rescan Audits** (`/rescanusers`).
 
-16. **Known Good & Known Bad Regression Suite (`known_good_data`, `known_bad_data`)**:
+17. **Known Good & Known Bad Regression Suite (`known_good_data`, `known_bad_data`)**:
     - **Regression Protection**: Stores persistent datasets of Known Good community members (`reputation >= 50`) and Known Bad banned spammers in dedicated SQLite tables.
     - **Bypassed Rep/Admin Simulation**: When validating rules via `gogcbot validate-rules` or pre-scan checks, tests simulated profiles with reputation (`rep = 0`), admin status (`admin = false`), and banned status (`banned = false`) across join, rescan, message snippet, and secondary group contexts to ensure 0 false-positive regressions.
     - **Automated Kickban Button**: Automated rule hits do NOT automatically pollute known datasets. Instead, kickban alerts in the moderation group include an interactive `🏷️ Add to Known Bad` inline button allowing human moderators to deliberately add confirmed spam patterns to the Known Bad dataset.
 
-17. **Explicit Dry-Run Gating for Mass Actions**:
+18. **Explicit Dry-Run Gating for Mass Actions**:
     - **Enforced Dry-Run Prior to Live Bans**: Mass-banning rescan operations (`gogcbot rescan-users --live` or `/rescan live`) are strictly gated by the `dryrun_gates` table. A live run is refused unless a successful dry-run preview and rule pre-check were completed within the past 1 hour.
     - Consumes the gate immediately after live execution to ensure fresh dry-run verification for every subsequent batch action.
 
-18. **Robust Cross-Group Moderation Execution**:
+19. **Robust Cross-Group Moderation Execution**:
     - **Private Chat Safety**: Automatically filters out private 1-on-1 chat IDs (`chatID >= 0`) during multi-group bans, unbans, mutes, and ban audits so direct-message admin commands never fail on non-group chats.
     - **Non-Fatal Absence Handling**: Safely handles Telegram `USER_NOT_PARTICIPANT` / `USERNOTPARTICIPANT` responses as non-fatal successes when kicking or auditing users who are already absent from the chat.
 
@@ -240,6 +261,7 @@ auto_flag:
   enabled: true
   low_rep_threshold: 50
   flag_on_links: true
+  delete_on_links: true
   new_user_min_posts: 3
   blocked_keywords:
     - "crypto giveaway"
@@ -309,6 +331,12 @@ detector:
     enabled: true
     max_reputation: 5
     rep_penalty: 20
+  custom_sticker:
+    enabled: true                      # Auto kick/ban low-reputation users sending custom stickers (e.g. spammed thumbs up / crypto stickers)
+    max_reputation: 5                  # Maximum reputation score to apply detection
+    max_user_posts: 5                  # Post count window for new user evaluation
+    rep_penalty: 20                    # Reputation penalty applied upon detection
+    allow_official_animated_emoji: false # Allow official Telegram animated emoji pack stickers
 
 shieldy:
   enabled: true                       # Enable Shieldy captcha bot verification

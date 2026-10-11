@@ -91,6 +91,11 @@ func buildStandardTestDetector() *Detector {
 			MaxReputation: 5,
 			RepPenalty:    20,
 		}),
+		NewCustomStickerTrigger(CustomStickerTriggerConfig{
+			Enabled:       true,
+			MaxReputation: 5,
+			RepPenalty:    50,
+		}),
 	)
 }
 

@@ -2462,7 +2462,10 @@ func TestBot_ValidateRulesAgainstHighRepUsers(t *testing.T) {
 	defer cleanup()
 
 	// Insert high rep users (rep > 40)
-	u1, _, _ := b.db.GetOrCreateUser(10104269, "angch", "Ang", "ChinHan", 100)
+	u1, _, err := b.db.GetOrCreateUser(10104269, "angch", "Ang", "ChinHan", 100)
+	if err != nil {
+		t.Fatalf("failed to create user u1: %v", err)
+	}
 	_ = b.db.SetReputation(u1.UserID, 100, "Admin setup", 0)
 	_ = b.db.SaveMessage(&db.Message{
 		ChatID:    -100123,
@@ -2472,7 +2475,10 @@ func TestBot_ValidateRulesAgainstHighRepUsers(t *testing.T) {
 		CreatedAt: time.Now(),
 	})
 
-	u2, _, _ := b.db.GetOrCreateUser(5000000001, "cbzbQFLOuHNkJZ", "每日首发🧧", "", 50)
+	u2, _, err := b.db.GetOrCreateUser(5000000001, "cbzbQFLOuHNkJZ", "每日首发🧧", "", 50)
+	if err != nil {
+		t.Fatalf("failed to create user u2: %v", err)
+	}
 	_ = b.db.SetReputation(u2.UserID, 50, "Setup", 0)
 	_ = b.db.SaveUserProfile(&db.UserProfile{
 		UserID:    u2.UserID,
@@ -3042,7 +3048,10 @@ func TestAutomatedKickban_DoesNotAutoAddToKnownData(t *testing.T) {
 	initialBadCount, _ := b.db.GetKnownBadCount()
 	initialGoodCount, _ := b.db.GetKnownGoodCount()
 
-	user, _, _ := b.db.GetOrCreateUser(776655, "autospam", "Auto", "Spam", 0)
+	user, _, err := b.db.GetOrCreateUser(776655, "autospam", "Auto", "Spam", 0)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
 	msg := &db.Message{
 		ChatID:    -1001,
 		MessageID: 99,
@@ -3187,9 +3196,509 @@ func TestBanUserAcrossAllGroups_IgnoresPrivateChats(t *testing.T) {
 		t.Errorf("expected UnbanUserAcrossAllGroups to succeed, got error: %v", err)
 	}
 
-	u, _ = b.db.GetUserByID(targetUserID)
+	u, err = b.db.GetUserByID(targetUserID)
+	if err != nil {
+		t.Fatalf("failed to query user: %v", err)
+	}
 	if u.IsBanned {
 		t.Errorf("expected user to be unbanned in DB")
 	}
 }
+
+func TestContainsLinks_AggressiveWebLinkDetection(t *testing.T) {
+	testCases := []struct {
+		name     string
+		msg      *tgbotapi.Message
+		expected bool
+	}{
+		{"nil message", nil, false},
+		{"plain text without link", &tgbotapi.Message{Text: "Hello everyone, nice to meet you!"}, false},
+		{"text with decimal numbers", &tgbotapi.Message{Text: "The score was 3.14 and 1.27.2 is Go version."}, false},
+		{"text with period at sentence end", &tgbotapi.Message{Text: "Good morning. I am ready."}, false},
+		{"standard http link", &tgbotapi.Message{Text: "Visit http://example.com for info"}, true},
+		{"standard https link", &tgbotapi.Message{Text: "Secure link at https://secure.org/path?q=1"}, true},
+		{"mixed case HTTPS", &tgbotapi.Message{Text: "HTTPS://SPAM.COM/AIRDROP"}, true},
+		{"ftp scheme", &tgbotapi.Message{Text: "ftp://files.example.com/download"}, true},
+		{"tg scheme", &tgbotapi.Message{Text: "tg://join?invite=12345"}, true},
+		{"t.me short link", &tgbotapi.Message{Text: "Join my channel t.me/freecrypto"}, true},
+		{"telegram.me link", &tgbotapi.Message{Text: "Join at telegram.me/coolgroup"}, true},
+		{"telegram.dog link", &tgbotapi.Message{Text: "Join at telegram.dog/spamchannel"}, true},
+		{"www prefix without scheme", &tgbotapi.Message{Text: "Check out www.google.com right now"}, true},
+		{"raw domain with .xyz", &tgbotapi.Message{Text: "Claim airdrop at free-airdrop.xyz immediately"}, true},
+		{"raw domain with .vip", &tgbotapi.Message{Text: "VIP access at vip-casino.vip/login"}, true},
+		{"raw domain with .top", &tgbotapi.Message{Text: "Big bonus at cryptobonus.top"}, true},
+		{"raw domain with .site", &tgbotapi.Message{Text: "Check this out at myscam.site/index"}, true},
+		{"raw domain with .online", &tgbotapi.Message{Text: "Visit shop.online today"}, true},
+		{"raw domain with .me and path", &tgbotapi.Message{Text: "Profile at linktr.me/user123"}, true},
+		{"caption with link", &tgbotapi.Message{Caption: "Photo caption with https://t.me/invite"}, true},
+		{"caption with .xyz domain", &tgbotapi.Message{Caption: "Photo caption with bonus.xyz"}, true},
+		{"message entity url", &tgbotapi.Message{
+			Text: "Check this link",
+			Entities: []tgbotapi.MessageEntity{
+				{Type: "url", Offset: 11, Length: 4},
+			},
+		}, true},
+		{"message entity text_link", &tgbotapi.Message{
+			Text: "Click here to win",
+			Entities: []tgbotapi.MessageEntity{
+				{Type: "text_link", Offset: 0, Length: 10, URL: "https://phishing.site"},
+			},
+		}, true},
+		{"caption entity url", &tgbotapi.Message{
+			Caption: "Look here",
+			CaptionEntities: []tgbotapi.MessageEntity{
+				{Type: "url", Offset: 0, Length: 9},
+			},
+		}, true},
+		{"inline keyboard button with url", &tgbotapi.Message{
+			Text: "A message with button",
+			ReplyMarkup: &tgbotapi.InlineKeyboardMarkup{
+				InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
+					{
+						{Text: "Claim", URL: func() *string { s := "https://scam.org"; return &s }()},
+					},
+				},
+			},
+		}, true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := containsLinks(tc.msg)
+			if actual != tc.expected {
+				t.Errorf("expected containsLinks to be %t, got %t", tc.expected, actual)
+			}
+		})
+	}
+}
+
+func TestCheckAutoFlagRules_AggressiveLinkRemoval(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	chatID := int64(-1001234567890)
+	modGroupID := int64(-1009988776655)
+	untrustedUserID := int64(777666555)
+
+	b.cfg.ModerationGroupID = modGroupID
+	b.cfg.AutoFlag.Enabled = true
+	b.cfg.AutoFlag.FlagOnLinks = true
+	b.cfg.AutoFlag.DeleteOnLinks = true
+	b.cfg.AutoFlag.LowRepThreshold = 50
+	b.cfg.AutoFlag.NewUserMinPosts = 3
+
+	// User has 0 reputation and 0 posts (untrusted new user)
+	user, _, err := b.db.GetOrCreateUser(untrustedUserID, "spammer_link", "Spam", "Link", 0)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	deletedMessageID := 0
+	deletedChatID := int64(0)
+	b.SetMockRequestFunc(func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+		if del, ok := c.(tgbotapi.DeleteMessageConfig); ok {
+			deletedChatID = del.ChatID
+			deletedMessageID = del.MessageID
+		}
+		return &tgbotapi.APIResponse{Ok: true}, nil
+	})
+
+	var sentModAlert tgbotapi.MessageConfig
+	b.SetMockSendFunc(func(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+		if msgConfig, ok := c.(tgbotapi.MessageConfig); ok {
+			sentModAlert = msgConfig
+		}
+		return tgbotapi.Message{MessageID: 999111}, nil
+	})
+
+	testMsg := &tgbotapi.Message{
+		MessageID: 1042,
+		Chat:      &tgbotapi.Chat{ID: chatID, Title: "Golang Group", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: untrustedUserID, UserName: "spammer_link"},
+		Text:      "Claim free rewards at https://airdrop-token.xyz/claim now!",
+	}
+	dbMsg := &db.Message{
+		ChatID:    chatID,
+		MessageID: testMsg.MessageID,
+		UserID:    untrustedUserID,
+		Text:      testMsg.Text,
+		HasLinks:  true,
+		CreatedAt: time.Now(),
+	}
+
+	flagged := b.checkAutoFlagRules(testMsg, dbMsg, user, "Golang Group")
+	if !flagged {
+		t.Fatalf("expected checkAutoFlagRules to return true (flagged)")
+	}
+
+	// 1. Message MUST be deleted from group
+	if deletedChatID != chatID || deletedMessageID != testMsg.MessageID {
+		t.Errorf("expected DeleteGroupMessage to delete message %d in chat %d, got chat %d msg %d",
+			testMsg.MessageID, chatID, deletedChatID, deletedMessageID)
+	}
+
+	// 2. Mod alert MUST be sent to moderation group
+	if sentModAlert.ChatID != modGroupID {
+		t.Errorf("expected mod alert sent to mod group %d, got %d", modGroupID, sentModAlert.ChatID)
+	}
+
+	// 3. Mod alert text MUST indicate auto-removal
+	if !strings.Contains(sentModAlert.Text, "AUTO-REMOVED") {
+		t.Errorf("expected mod alert text to mention AUTO-REMOVED, got:\n%s", sentModAlert.Text)
+	}
+
+	// 4. DB flagged post MUST be recorded with [Auto-Removed] in reason
+	flags, err := b.db.GetUserFlaggedPosts(untrustedUserID, 10)
+	if err != nil || len(flags) == 0 {
+		t.Fatalf("expected flagged post in DB, err=%v, count=%d", err, len(flags))
+	}
+	flag := flags[0]
+	if !strings.Contains(flag.Reason, "[Auto-Removed]") {
+		t.Errorf("expected flagged post reason to include '[Auto-Removed]', got %q", flag.Reason)
+	}
+}
+
+func TestCheckAutoFlagRules_TrustedUserLinkNotDeleted(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	chatID := int64(-1001234567890)
+	modGroupID := int64(-1009988776655)
+	trustedUserID := int64(111222333)
+
+	b.cfg.ModerationGroupID = modGroupID
+	b.cfg.AutoFlag.Enabled = true
+	b.cfg.AutoFlag.FlagOnLinks = true
+	b.cfg.AutoFlag.DeleteOnLinks = true
+	b.cfg.AutoFlag.LowRepThreshold = 50
+
+	// User has 50 reputation (established/trusted member)
+	user, _, err := b.db.GetOrCreateUser(trustedUserID, "trusted_dev", "Trusted", "Dev", 50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	user.Reputation = 50
+
+	deletedCalled := false
+	b.SetMockRequestFunc(func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+		if _, ok := c.(tgbotapi.DeleteMessageConfig); ok {
+			deletedCalled = true
+		}
+		return &tgbotapi.APIResponse{Ok: true}, nil
+	})
+
+	testMsg := &tgbotapi.Message{
+		MessageID: 2001,
+		Chat:      &tgbotapi.Chat{ID: chatID, Title: "Golang Group", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: trustedUserID, UserName: "trusted_dev"},
+		Text:      "Check out the release notes at https://go.dev/doc/go1.27",
+	}
+	dbMsg := &db.Message{
+		ChatID:    chatID,
+		MessageID: testMsg.MessageID,
+		UserID:    trustedUserID,
+		Text:      testMsg.Text,
+		HasLinks:  true,
+		CreatedAt: time.Now(),
+	}
+
+	flagged := b.checkAutoFlagRules(testMsg, dbMsg, user, "Golang Group")
+	if flagged {
+		t.Errorf("expected trusted user with rep=50 posting legitimate link NOT to be flagged")
+	}
+	if deletedCalled {
+		t.Errorf("expected trusted user message NOT to be deleted")
+	}
+}
+
+func TestCheckAutoFlagRules_DeleteOnLinksDisabled(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	chatID := int64(-1001234567890)
+	modGroupID := int64(-1009988776655)
+	untrustedUserID := int64(444555666)
+
+	b.cfg.ModerationGroupID = modGroupID
+	b.cfg.AutoFlag.Enabled = true
+	b.cfg.AutoFlag.FlagOnLinks = true
+	b.cfg.AutoFlag.DeleteOnLinks = false // Disabling auto deletion
+	b.cfg.AutoFlag.LowRepThreshold = 50
+
+	user, _, err := b.db.GetOrCreateUser(untrustedUserID, "lowrep_user", "Low", "Rep", 10)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	user.Reputation = 10
+
+	deletedCalled := false
+	b.SetMockRequestFunc(func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+		if _, ok := c.(tgbotapi.DeleteMessageConfig); ok {
+			deletedCalled = true
+		}
+		return &tgbotapi.APIResponse{Ok: true}, nil
+	})
+
+	testMsg := &tgbotapi.Message{
+		MessageID: 3001,
+		Chat:      &tgbotapi.Chat{ID: chatID, Title: "Golang Group", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: untrustedUserID, UserName: "lowrep_user"},
+		Text:      "See this link: https://somewhere.com",
+	}
+	dbMsg := &db.Message{
+		ChatID:    chatID,
+		MessageID: testMsg.MessageID,
+		UserID:    untrustedUserID,
+		Text:      testMsg.Text,
+		HasLinks:  true,
+		CreatedAt: time.Now(),
+	}
+
+	flagged := b.checkAutoFlagRules(testMsg, dbMsg, user, "Golang Group")
+	if !flagged {
+		t.Fatalf("expected message to be flagged")
+	}
+	if deletedCalled {
+		t.Errorf("expected message NOT to be deleted when DeleteOnLinks is false")
+	}
+}
+
+func TestMessage66607_CustomThumbsUpSticker_AutoKickbanned(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	groupChatID := int64(-1001072966891)
+	modGroupID := int64(-5576645586)
+	spammerUserID := int64(8927451894)
+	targetMessageID := 66607
+
+	// Enable detector and custom sticker rule
+	b.cfg.ModerationGroupID = modGroupID
+	b.cfg.Detector.Enabled = true
+	b.cfg.Detector.CustomSticker.Enabled = true
+	b.cfg.Detector.CustomSticker.MaxReputation = 5
+	b.cfg.Detector.CustomSticker.RepPenalty = 50
+	b.detector = BuildDetector(b.cfg, b.db)
+
+	_ = b.db.SaveGroup(groupChatID, "Golang Malaysia", "supergroup")
+
+	// User initially created with rep 0 (matching message 66607)
+	user, _, err := b.db.GetOrCreateUser(spammerUserID, "", "Matthew", "Schultz", 0)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	user.Reputation = 0
+
+	var deletedMessageIDs []int
+	var bannedUserIDs []int64
+	b.SetMockRequestFunc(func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+		switch v := c.(type) {
+		case tgbotapi.DeleteMessageConfig:
+			deletedMessageIDs = append(deletedMessageIDs, v.MessageID)
+		case tgbotapi.BanChatMemberConfig:
+			bannedUserIDs = append(bannedUserIDs, v.UserID)
+		}
+		return &tgbotapi.APIResponse{Ok: true}, nil
+	})
+
+	var sentMessages []tgbotapi.MessageConfig
+	b.SetMockSendFunc(func(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+		if mc, ok := c.(tgbotapi.MessageConfig); ok {
+			sentMessages = append(sentMessages, mc)
+		}
+		return tgbotapi.Message{MessageID: 1075}, nil
+	})
+
+	// Message 66607: Custom thumbs up sticker from low reputation user
+	msg := &tgbotapi.Message{
+		MessageID: targetMessageID,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: spammerUserID, FirstName: "Matthew", LastName: "Schultz"},
+		Sticker: &tgbotapi.Sticker{
+			FileID:   "sticker_custom_thumbs_up",
+			Emoji:    "👍",
+			SetName:  "custom_pack_spam",
+			Width:    512,
+			Height:   512,
+			FileSize: 10240,
+		},
+	}
+
+	b.handleMessage(msg)
+
+	// 1. Offending sticker message MUST be deleted
+	deletedFound := false
+	for _, id := range deletedMessageIDs {
+		if id == targetMessageID {
+			deletedFound = true
+			break
+		}
+	}
+	if !deletedFound {
+		t.Errorf("expected message %d to be deleted, got deleted list: %v", targetMessageID, deletedMessageIDs)
+	}
+
+	// 2. Spammer MUST be kickbanned across groups
+	bannedFound := false
+	for _, uid := range bannedUserIDs {
+		if uid == spammerUserID {
+			bannedFound = true
+			break
+		}
+	}
+	if !bannedFound {
+		t.Errorf("expected user %d to be banned, got banned list: %v", spammerUserID, bannedUserIDs)
+	}
+
+	// 3. User in DB MUST be marked banned with reputation deducted
+	updatedUser, err := b.db.GetUserByID(spammerUserID)
+	if err != nil || updatedUser == nil {
+		t.Fatalf("failed to fetch updated user: %v", err)
+	}
+	if !updatedUser.IsBanned {
+		t.Errorf("expected user IsBanned to be true")
+	}
+	if updatedUser.Reputation > -50 {
+		t.Errorf("expected reputation <= -50, got %d", updatedUser.Reputation)
+	}
+
+	// 4. Trigger ban alert MUST be sent to moderation channel and MUST show sticker details
+	modAlertFound := false
+	for _, sm := range sentMessages {
+		if sm.ChatID == modGroupID && strings.Contains(sm.Text, "TRIGGER BAN EXECUTED") && (strings.Contains(sm.Text, "custom_sticker") || strings.Contains(sm.Text, "custom\\_sticker")) {
+			modAlertFound = true
+			if !strings.Contains(sm.Text, "custom_pack_spam") {
+				t.Errorf("expected sticker pack name 'custom_pack_spam' in alert text, got:\n%s", sm.Text)
+			}
+			if !strings.Contains(sm.Text, "512x512") {
+				t.Errorf("expected sticker dimensions '512x512' in alert text, got:\n%s", sm.Text)
+			}
+			if !strings.Contains(sm.Text, "sticker_custom_thumbs_up") {
+				t.Errorf("expected sticker file ID 'sticker_custom_thumbs_up' in alert text, got:\n%s", sm.Text)
+			}
+			break
+		}
+	}
+	if !modAlertFound {
+		t.Errorf("expected trigger ban alert in mod group %d, sent messages: %+v", modGroupID, sentMessages)
+	}
+}
+
+func TestSendModAlert_ShowsStickerDetails(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	modGroupID := int64(-100998877)
+	b.cfg.ModerationGroupID = modGroupID
+
+	user, _, err := b.db.GetOrCreateUser(888111, "poster", "Sticker", "Poster", 10)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	flag, err := b.db.CreateFlaggedPost(-100123, 501, user.UserID, "Low reputation user activity")
+	if err != nil {
+		t.Fatalf("failed to create flagged post: %v", err)
+	}
+
+	dbMsg := &db.Message{
+		ChatID:    -100123,
+		MessageID: 501,
+		UserID:    user.UserID,
+		Text:      "[Sticker 🚀]",
+		HasMedia:  true,
+		CreatedAt: time.Now(),
+		Sticker: &db.StickerInfo{
+			SetName:      "crypto_rocket_pack",
+			FileID:       "file_rocket_999",
+			FileUniqueID: "unique_rocket_999",
+			Emoji:        "🚀",
+			Width:        512,
+			Height:       256,
+			FileSize:     20480,
+			IsAnimated:   false,
+		},
+	}
+
+	var sentAlert tgbotapi.MessageConfig
+	b.SetMockSendFunc(func(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+		if mc, ok := c.(tgbotapi.MessageConfig); ok {
+			sentAlert = mc
+		}
+		return tgbotapi.Message{MessageID: 7001}, nil
+	})
+
+	if err := b.SendModAlert(flag, dbMsg, user, "Golang Group"); err != nil {
+		t.Fatalf("unexpected error calling SendModAlert: %v", err)
+	}
+
+	// Verify all required sticker signals are present in the mod alert text
+	if !strings.Contains(sentAlert.Text, "crypto_rocket_pack") {
+		t.Errorf("expected pack name 'crypto_rocket_pack' in mod alert text, got:\n%s", sentAlert.Text)
+	}
+	if !strings.Contains(sentAlert.Text, "512x256") || !strings.Contains(sentAlert.Text, "Width: 512, Height: 256") {
+		t.Errorf("expected dimensions '512x256' in mod alert text, got:\n%s", sentAlert.Text)
+	}
+	if !strings.Contains(sentAlert.Text, "file_rocket_999") {
+		t.Errorf("expected file ID 'file_rocket_999' in mod alert text, got:\n%s", sentAlert.Text)
+	}
+}
+
+func TestCustomSticker_TrustedUserNotKickbanned(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	groupChatID := int64(-1001072966891)
+	trustedUserID := int64(12345678)
+	targetMessageID := 77701
+
+	b.cfg.Detector.Enabled = true
+	b.cfg.Detector.CustomSticker.Enabled = true
+	b.cfg.Detector.CustomSticker.MaxReputation = 5
+	b.detector = BuildDetector(b.cfg, b.db)
+
+	_ = b.db.SaveGroup(groupChatID, "Golang Malaysia", "supergroup")
+
+	// Trusted user with reputation 50
+	user, _, err := b.db.GetOrCreateUser(trustedUserID, "good_dev", "Good", "Dev", 50)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	user.Reputation = 50
+	_ = b.db.SetReputation(trustedUserID, 50, "Established member", trustedUserID)
+
+	deletedCalled := false
+	bannedCalled := false
+	b.SetMockRequestFunc(func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+		if _, ok := c.(tgbotapi.DeleteMessageConfig); ok {
+			deletedCalled = true
+		}
+		if _, ok := c.(tgbotapi.BanChatMemberConfig); ok {
+			bannedCalled = true
+		}
+		return &tgbotapi.APIResponse{Ok: true}, nil
+	})
+
+	msg := &tgbotapi.Message{
+		MessageID: targetMessageID,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: trustedUserID, UserName: "good_dev", FirstName: "Good", LastName: "Dev"},
+		Sticker: &tgbotapi.Sticker{
+			FileID:  "sticker_custom_thumbs_up",
+			Emoji:   "👍",
+			SetName: "fun_dev_pack",
+		},
+	}
+
+	b.handleMessage(msg)
+
+	if deletedCalled {
+		t.Errorf("expected trusted member sticker message NOT to be deleted")
+	}
+	if bannedCalled {
+		t.Errorf("expected trusted member NOT to be banned")
+	}
+}
+
+
 

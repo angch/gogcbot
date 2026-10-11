@@ -12,7 +12,11 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-var shieldyUsernameRegex = regexp.MustCompile(`@([a-zA-Z0-9_]{4,})`)
+var (
+	shieldyUsernameRegex = regexp.MustCompile(`@([a-zA-Z0-9_]{4,})`)
+	// webLinkRegex aggressively matches URLs with schemes, Telegram links, or common domain formats
+	webLinkRegex = regexp.MustCompile(`(?i)(?:https?://|ftp://|tg://|t\.me/|telegram\.me/|telegram\.dog/|www\.)\S+|(?:[a-zA-Z0-9-]+\.)+(?:com|org|net|xyz|top|io|cc|co|info|site|online|vip|app|link|club|shop|live|dev|biz|pro|space|store|trade|click|fun|icu|work|tech|chat|news|tv|ru|cn|asia)\b(?:/[^\s]*)?|(?:[a-zA-Z0-9-]+\.)+me/[^\s]*`)
+)
 
 func (b *Bot) handleUpdate(update tgbotapi.Update) {
 	if update.CallbackQuery != nil {
@@ -207,6 +211,20 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	hasMedia := msg.Photo != nil || msg.Video != nil || msg.Document != nil || msg.Audio != nil || msg.Animation != nil || msg.Sticker != nil || msg.Voice != nil || msg.VideoNote != nil
 	hasLinks := containsLinks(msg)
 
+	var stickerInfo *db.StickerInfo
+	if msg.Sticker != nil {
+		stickerInfo = &db.StickerInfo{
+			SetName:      msg.Sticker.SetName,
+			FileID:       msg.Sticker.FileID,
+			FileUniqueID: msg.Sticker.FileUniqueID,
+			Emoji:        msg.Sticker.Emoji,
+			Width:        msg.Sticker.Width,
+			Height:       msg.Sticker.Height,
+			FileSize:     msg.Sticker.FileSize,
+			IsAnimated:   msg.Sticker.IsAnimated,
+		}
+	}
+
 	groupName := chat.Title
 	if groupName == "" {
 		if chat.IsPrivate() {
@@ -218,6 +236,15 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 	log.Printf("[Received Message] Sender ID: %d (@%s) | Group: '%s' (ID: %d) | Content: %q",
 		msg.From.ID, msg.From.UserName, groupName, chat.ID, text)
+
+	if msg.Sticker != nil {
+		log.Printf("[Sticker Detected] Sender ID: %d (@%s) | Group: '%s' (%d) | MsgID: %d | Pack: %q | Emoji: %q | Dimensions: %dx%d (Width: %d, Height: %d) | FileID: %q | UniqueID: %q | Size: %d bytes | Animated: %t (Capturing metadata for LLM vision inspection)",
+			msg.From.ID, msg.From.UserName, groupName, chat.ID, msg.MessageID,
+			msg.Sticker.SetName, msg.Sticker.Emoji, msg.Sticker.Width, msg.Sticker.Height,
+			msg.Sticker.Width, msg.Sticker.Height,
+			msg.Sticker.FileID, msg.Sticker.FileUniqueID, msg.Sticker.FileSize,
+			msg.Sticker.IsAnimated)
+	}
 
 	if chat.IsPrivate() {
 		editTag := ""
@@ -237,6 +264,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		HasMedia:  hasMedia,
 		HasLinks:  hasLinks,
 		CreatedAt: msg.Time(),
+		Sticker:   stickerInfo,
 	}
 	if err := b.db.SaveMessage(dbMsg); err != nil {
 		log.Printf("[Bot] Error saving message: %v", err)
@@ -384,7 +412,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 }
 
 func (b *Bot) bumpUnflaggedReputation(user *db.User) {
-	if user.Reputation >= 100 {
+	if user == nil || user.Reputation >= 100 {
 		return
 	}
 
@@ -406,24 +434,39 @@ func (b *Bot) bumpUnflaggedReputation(user *db.User) {
 }
 
 func (b *Bot) checkAutoFlagRules(msg *tgbotapi.Message, dbMsg *db.Message, user *db.User, groupTitle string) bool {
-	if !b.cfg.AutoFlag.Enabled {
+	if !b.cfg.AutoFlag.Enabled || msg == nil || msg.Chat == nil || dbMsg == nil || user == nil {
 		return false
 	}
 
 	var reasons []string
+	deletedMessage := false
 
-	// Rule 1: Low Reputation + Link
-	if b.cfg.AutoFlag.FlagOnLinks && dbMsg.HasLinks && user.Reputation < b.cfg.AutoFlag.LowRepThreshold {
-		reasons = append(reasons, fmt.Sprintf("Low Reputation (%d < %d) with link", user.Reputation, b.cfg.AutoFlag.LowRepThreshold))
-	}
-
-	// Rule 2: New User with Low Reputation + Link
 	userMsgCount, _ := b.db.GetUserMessageCount(user.UserID)
-	if b.cfg.AutoFlag.FlagOnLinks && dbMsg.HasLinks && userMsgCount <= b.cfg.AutoFlag.NewUserMinPosts && user.Reputation < b.cfg.AutoFlag.LowRepThreshold {
-		reasons = append(reasons, fmt.Sprintf("New user (%d <= %d posts) with low reputation (%d < %d) and link", userMsgCount, b.cfg.AutoFlag.NewUserMinPosts, user.Reputation, b.cfg.AutoFlag.LowRepThreshold))
+
+	// Rule 1: Untrusted User with Web Link (Aggressively removed and forwarded to moderation)
+	if b.cfg.AutoFlag.FlagOnLinks && dbMsg.HasLinks {
+		isNewUser := userMsgCount <= b.cfg.AutoFlag.NewUserMinPosts
+		isLowRep := user.Reputation < b.cfg.AutoFlag.LowRepThreshold
+
+		if isNewUser && isLowRep {
+			reasons = append(reasons, fmt.Sprintf("Untrusted new user (%d <= %d posts) with low reputation (%d < %d) posted web link",
+				userMsgCount, b.cfg.AutoFlag.NewUserMinPosts, user.Reputation, b.cfg.AutoFlag.LowRepThreshold))
+		} else if isLowRep {
+			reasons = append(reasons, fmt.Sprintf("Untrusted user with low reputation (%d < %d) posted web link",
+				user.Reputation, b.cfg.AutoFlag.LowRepThreshold))
+		}
+
+		if len(reasons) > 0 && b.cfg.AutoFlag.DeleteOnLinks {
+			log.Printf("[AutoFlag] Aggressively removing message %d in chat %d (%s) from untrusted user %d (@%s, rep=%d, posts=%d) containing web link",
+				msg.MessageID, msg.Chat.ID, groupTitle, user.UserID, user.Username, user.Reputation, userMsgCount)
+			deletedMessage = true
+			if err := b.DeleteGroupMessage(msg.Chat.ID, msg.MessageID); err != nil {
+				log.Printf("[AutoFlag Error] Failed to delete message %d in chat %d: %v", msg.MessageID, msg.Chat.ID, err)
+			}
+		}
 	}
 
-	// Rule 3: Blocked Keywords & DB Spam Snippets
+	// Rule 2: Blocked Keywords & DB Spam Snippets
 	lowerText := strings.ToLower(dbMsg.Text)
 	matchedKw := false
 	for _, kw := range b.cfg.AutoFlag.BlockedKeywords {
@@ -443,12 +486,15 @@ func (b *Bot) checkAutoFlagRules(msg *tgbotapi.Message, dbMsg *db.Message, user 
 		}
 	}
 
-	// Rule 4: Reputation below flag threshold
+	// Rule 3: Reputation below flag threshold
 	if user.Reputation <= b.cfg.Reputation.FlagThreshold {
 		reasons = append(reasons, fmt.Sprintf("Reputation at/below threshold (%d <= %d)", user.Reputation, b.cfg.Reputation.FlagThreshold))
 	}
 
 	if len(reasons) > 0 {
+		if deletedMessage {
+			reasons[0] = "[Auto-Removed] " + reasons[0]
+		}
 		reasonStr := strings.Join(reasons, " | ")
 		log.Printf("[AutoFlag] Triggered for user %d in chat %d (%s): %s", user.UserID, msg.Chat.ID, groupTitle, reasonStr)
 
@@ -471,23 +517,27 @@ func containsLinks(msg *tgbotapi.Message) bool {
 		return false
 	}
 
-	text := msg.Text
-	if text == "" {
-		text = msg.Caption
-	}
-
-	if strings.Contains(text, "http://") || strings.Contains(text, "https://") || strings.Contains(text, "t.me/") || strings.Contains(text, "telegram.me/") {
-		return true
-	}
-
-	entities := msg.Entities
-	if entities == nil {
-		entities = msg.CaptionEntities
-	}
-
-	for _, e := range entities {
-		if e.Type == "url" || e.Type == "text_link" {
+	for _, text := range []string{msg.Text, msg.Caption} {
+		if text != "" && webLinkRegex.MatchString(text) {
 			return true
+		}
+	}
+
+	for _, entities := range [][]tgbotapi.MessageEntity{msg.Entities, msg.CaptionEntities} {
+		for _, e := range entities {
+			if e.Type == "url" || e.Type == "text_link" {
+				return true
+			}
+		}
+	}
+
+	if msg.ReplyMarkup != nil {
+		for _, row := range msg.ReplyMarkup.InlineKeyboard {
+			for _, btn := range row {
+				if btn.URL != nil && *btn.URL != "" {
+					return true
+				}
+			}
 		}
 	}
 

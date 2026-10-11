@@ -55,15 +55,29 @@ type Group struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// StickerInfo captures metadata about a sticker for moderation signals and future vision model inspection.
+type StickerInfo struct {
+	SetName      string `json:"set_name,omitempty"`
+	FileID       string `json:"file_id,omitempty"`
+	FileUniqueID string `json:"file_unique_id,omitempty"`
+	Emoji        string `json:"emoji,omitempty"`
+	Width        int    `json:"width,omitempty"`
+	Height       int    `json:"height,omitempty"`
+	FileSize     int    `json:"file_size,omitempty"`
+	IsAnimated   bool   `json:"is_animated,omitempty"`
+	IsVideo      bool   `json:"is_video,omitempty"`
+}
+
 type Message struct {
-	ID        int64     `json:"id"`
-	ChatID    int64     `json:"chat_id"`
-	MessageID int       `json:"message_id"`
-	UserID    int64     `json:"user_id"`
-	Text      string    `json:"text"`
-	HasMedia  bool      `json:"has_media"`
-	HasLinks  bool      `json:"has_links"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        int64        `json:"id"`
+	ChatID    int64        `json:"chat_id"`
+	MessageID int          `json:"message_id"`
+	UserID    int64        `json:"user_id"`
+	Text      string       `json:"text"`
+	HasMedia  bool         `json:"has_media"`
+	HasLinks  bool         `json:"has_links"`
+	CreatedAt time.Time    `json:"created_at"`
+	Sticker   *StickerInfo `json:"sticker,omitempty"`
 }
 
 type FlaggedPost struct {
@@ -411,6 +425,7 @@ func (d *DB) AutoMigrate() error {
 			details TEXT NOT NULL DEFAULT ''
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_dryrun_gates_type ON dryrun_gates(action_type, executed_at DESC);`,
+		`ALTER TABLE messages ADD COLUMN sticker_json TEXT NOT NULL DEFAULT '';`,
 	}
 
 	for _, stmt := range migrations {
@@ -457,6 +472,7 @@ func (d *DB) InitSchema() error {
 		has_media BOOLEAN NOT NULL DEFAULT 0,
 		has_links BOOLEAN NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL,
+		sticker_json TEXT NOT NULL DEFAULT '',
 		UNIQUE(chat_id, message_id)
 	);
 
@@ -1094,14 +1110,21 @@ func (d *DB) IsPrimaryGroup(chatID int64) (bool, error) {
 // Message Methods
 
 func (d *DB) SaveMessage(msg *Message) error {
+	var stickerJSON string
+	if msg.Sticker != nil {
+		if b, err := json.Marshal(msg.Sticker); err == nil {
+			stickerJSON = string(b)
+		}
+	}
 	_, err := d.Exec(`
-		INSERT INTO messages (chat_id, message_id, user_id, text, has_media, has_links, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id, message_id) DO UPDATE SET
 			text = excluded.text,
 			has_media = excluded.has_media,
-			has_links = excluded.has_links
-	`, msg.ChatID, msg.MessageID, msg.UserID, msg.Text, msg.HasMedia, msg.HasLinks, msg.CreatedAt)
+			has_links = excluded.has_links,
+			sticker_json = excluded.sticker_json
+	`, msg.ChatID, msg.MessageID, msg.UserID, msg.Text, msg.HasMedia, msg.HasLinks, msg.CreatedAt, stickerJSON)
 	return err
 }
 
@@ -1113,7 +1136,7 @@ func (d *DB) GetUserMessageCount(userID int64) (int, error) {
 
 func (d *DB) GetRecentUserMessages(userID int64, limit int) ([]Message, error) {
 	rows, err := d.Query(`
-		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at
+		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json
 		FROM messages WHERE user_id = ?
 		ORDER BY created_at DESC LIMIT ?
 	`, userID, limit)
@@ -1125,8 +1148,15 @@ func (d *DB) GetRecentUserMessages(userID int64, limit int) ([]Message, error) {
 	var msgs []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt); err != nil {
+		var stickerJSON string
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON); err != nil {
 			return nil, err
+		}
+		if stickerJSON != "" {
+			var st StickerInfo
+			if err := json.Unmarshal([]byte(stickerJSON), &st); err == nil {
+				m.Sticker = &st
+			}
 		}
 		msgs = append(msgs, m)
 	}
@@ -1136,7 +1166,7 @@ func (d *DB) GetRecentUserMessages(userID int64, limit int) ([]Message, error) {
 // GetAllUserMessages retrieves all messages sent by a user, ordered newest to oldest.
 func (d *DB) GetAllUserMessages(userID int64) ([]Message, error) {
 	rows, err := d.Query(`
-		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at
+		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json
 		FROM messages WHERE user_id = ?
 		ORDER BY created_at DESC
 	`, userID)
@@ -1148,12 +1178,39 @@ func (d *DB) GetAllUserMessages(userID int64) ([]Message, error) {
 	var msgs []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt); err != nil {
+		var stickerJSON string
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON); err != nil {
 			return nil, err
+		}
+		if stickerJSON != "" {
+			var st StickerInfo
+			if err := json.Unmarshal([]byte(stickerJSON), &st); err == nil {
+				m.Sticker = &st
+			}
 		}
 		msgs = append(msgs, m)
 	}
 	return msgs, nil
+}
+
+// GetMessage retrieves a single message by chat ID and message ID.
+func (d *DB) GetMessage(chatID int64, messageID int) (*Message, error) {
+	var m Message
+	var stickerJSON string
+	err := d.QueryRow(`
+		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json
+		FROM messages WHERE chat_id = ? AND message_id = ?
+	`, chatID, messageID).Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON)
+	if err != nil {
+		return nil, err
+	}
+	if stickerJSON != "" {
+		var st StickerInfo
+		if err := json.Unmarshal([]byte(stickerJSON), &st); err == nil {
+			m.Sticker = &st
+		}
+	}
+	return &m, nil
 }
 
 // Flagged Posts Methods

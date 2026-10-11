@@ -53,8 +53,20 @@ func (b *Bot) SendModAlert(flag *db.FlaggedPost, msg *db.Message, user *db.User,
 
 	totalUserMsgs, _ := b.db.GetUserMessageCount(user.UserID)
 
+	header := "🚨 **FLAGGED POST REVIEW**"
+	if strings.Contains(flag.Reason, "[Auto-Removed]") {
+		header = "🚨 **FLAGGED & AUTO-REMOVED POST REVIEW**\n*(Message was removed from group chat)*"
+	}
+
+	stickerSection := ""
+	if msg != nil && msg.Sticker != nil {
+		stickerSection = FormatStickerDetailsMarkdown(msg.Sticker)
+		log.Printf("[Flagged Post Sticker Signals] FlagID: %d | ChatID: %d | MsgID: %d | UserID: %d | Pack: %q | Emoji: %q | Dimensions: %dx%d (Width: %d, Height: %d) | FileID: %q | UniqueID: %q | Size: %d bytes | (Captured for LLM vision inspection)",
+			flag.ID, msg.ChatID, msg.MessageID, user.UserID, msg.Sticker.SetName, msg.Sticker.Emoji, msg.Sticker.Width, msg.Sticker.Height, msg.Sticker.Width, msg.Sticker.Height, msg.Sticker.FileID, msg.Sticker.FileUniqueID, msg.Sticker.FileSize)
+	}
+
 	text := fmt.Sprintf(
-		"🚨 **FLAGGED POST REVIEW**\n\n"+
+		"%s\n\n"+
 			"📌 **Reason**: `%s`\n\n"+
 			"👤 **Poster**: %s (@%s)\n"+
 			"🆔 **User ID**: `%d`\n"+
@@ -62,7 +74,8 @@ func (b *Bot) SendModAlert(flag *db.FlaggedPost, msg *db.Message, user *db.User,
 			"👥 **Group**: %s (`%d`)\n"+
 			"🆔 **Message ID**: `%d`\n"+
 			"🕒 **Time**: `%s`\n\n"+
-			"📝 **Message Snippet**:\n```\n%s\n```",
+			"📝 **Message Snippet**:\n```\n%s\n```%s",
+		header,
 		escapeMarkdown(flag.Reason),
 		escapeMarkdown(user.FirstName+" "+user.LastName),
 		escapeMarkdown(user.Username),
@@ -75,6 +88,7 @@ func (b *Bot) SendModAlert(flag *db.FlaggedPost, msg *db.Message, user *db.User,
 		msg.MessageID,
 		flag.FlaggedAt.Format("2006-01-02 15:04:05 MST"),
 		truncateText(msg.Text, 500),
+		stickerSection,
 	)
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
@@ -113,6 +127,50 @@ func (b *Bot) SendModAlert(flag *db.FlaggedPost, msg *db.Message, user *db.User,
 
 	// Record mod group message ID in flagged_posts table
 	return b.db.UpdateFlagModMessageID(flag.ID, sentMsg.MessageID)
+}
+
+// FormatStickerDetailsMarkdown formats sticker metadata into a structured markdown block
+// for moderation review alerts, capturing pack name, dimensions, format, and file IDs.
+func FormatStickerDetailsMarkdown(s *db.StickerInfo) string {
+	if s == nil {
+		return ""
+	}
+	packName := s.SetName
+	if packName == "" {
+		packName = "(none / custom in-app editor)"
+	}
+	emojiStr := s.Emoji
+	if emojiStr == "" {
+		emojiStr = "(none)"
+	}
+	formatStr := "Static (WebP)"
+	if s.IsAnimated {
+		formatStr = "Animated (TGS/Lottie)"
+	} else if s.IsVideo {
+		formatStr = "Video (WebM)"
+	}
+
+	cleanPackName := strings.ReplaceAll(packName, "`", "'")
+	cleanFileID := strings.ReplaceAll(s.FileID, "`", "'")
+	cleanUniqueID := strings.ReplaceAll(s.FileUniqueID, "`", "'")
+
+	var sb strings.Builder
+	sb.WriteString("\n\n🎨 **Sticker Details**:\n")
+	sb.WriteString(fmt.Sprintf("• **Pack Name**: `%s`\n", cleanPackName))
+	sb.WriteString(fmt.Sprintf("• **Emoji**: %s\n", emojiStr))
+	sb.WriteString(fmt.Sprintf("• **Dimensions**: `%dx%d` (Width: %d, Height: %d)\n", s.Width, s.Height, s.Width, s.Height))
+	sb.WriteString(fmt.Sprintf("• **Format**: `%s`\n", formatStr))
+	if cleanFileID != "" {
+		sb.WriteString(fmt.Sprintf("• **File ID**: `%s`\n", cleanFileID))
+	}
+	if cleanUniqueID != "" {
+		sb.WriteString(fmt.Sprintf("• **Unique ID**: `%s`\n", cleanUniqueID))
+	}
+	if s.FileSize > 0 {
+		sb.WriteString(fmt.Sprintf("• **File Size**: `%d bytes`\n", s.FileSize))
+	}
+	sb.WriteString("*(Captured for moderation signals and future LLM vision inspection)*")
+	return sb.String()
 }
 
 func (b *Bot) DeleteGroupMessage(chatID int64, messageID int) error {
@@ -405,6 +463,13 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, msg *db.Message, 
 		}
 	}
 
+	stickerSection := ""
+	if msg != nil && msg.Sticker != nil {
+		stickerSection = FormatStickerDetailsMarkdown(msg.Sticker)
+		log.Printf("[Trigger Ban Sticker Signals] ChatID: %d | MsgID: %d | UserID: %d | Pack: %q | Emoji: %q | Dimensions: %dx%d (Width: %d, Height: %d) | FileID: %q | UniqueID: %q | Size: %d bytes | (Captured for LLM vision inspection)",
+			chatID, msgID, user.UserID, msg.Sticker.SetName, msg.Sticker.Emoji, msg.Sticker.Width, msg.Sticker.Height, msg.Sticker.Width, msg.Sticker.Height, msg.Sticker.FileID, msg.Sticker.FileUniqueID, msg.Sticker.FileSize)
+	}
+
 	text := fmt.Sprintf(
 		"🚫 **TRIGGER BAN EXECUTED**\n\n"+
 			"📌 **Reason**: `%s`\n\n"+
@@ -414,7 +479,7 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, msg *db.Message, 
 			"👥 **Group**: %s (`%d`)\n"+
 			"🆔 **Message ID**: `%d`\n"+
 			"🕒 **Time**: `%s`\n\n"+
-			"📝 **Message Snippet**:\n```\n%s\n```",
+			"📝 **Message Snippet**:\n```\n%s\n```%s",
 		escapeMarkdown(reason),
 		escapeMarkdown(userDisplayName),
 		escapeMarkdown(usernameStr),
@@ -427,6 +492,7 @@ func (b *Bot) SendTriggerBanAlert(chatID int64, user *db.User, msg *db.Message, 
 		msgID,
 		time.Now().Format("2006-01-02 15:04:05 MST"),
 		msgContent,
+		stickerSection,
 	)
 
 	msgConfig := tgbotapi.NewMessage(modGroupID, text)

@@ -46,6 +46,7 @@ type DetectorConfig struct {
 	ProfileNameKeywordBan detector.ProfileNameKeywordBanConfig  `mapstructure:"profile_name_keyword_ban" yaml:"profile_name_keyword_ban,omitempty"`
 	NonsenseBio           detector.NonsenseBioTriggerConfig     `mapstructure:"nonsense_bio" yaml:"nonsense_bio,omitempty"`
 	SecondaryGroup        detector.SecondaryGroupTriggerConfig  `mapstructure:"secondary_group" yaml:"secondary_group,omitempty"`
+	CustomSticker         detector.CustomStickerTriggerConfig   `mapstructure:"custom_sticker" yaml:"custom_sticker,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -53,6 +54,7 @@ type AutoFlagConfig struct {
 	Enabled         bool     `mapstructure:"enabled" yaml:"enabled"`
 	LowRepThreshold int      `mapstructure:"low_rep_threshold" yaml:"low_rep_threshold"`
 	FlagOnLinks     bool     `mapstructure:"flag_on_links" yaml:"flag_on_links"`
+	DeleteOnLinks   bool     `mapstructure:"delete_on_links" yaml:"delete_on_links"`
 	NewUserMinPosts int      `mapstructure:"new_user_min_posts" yaml:"new_user_min_posts"`
 	BlockedKeywords []string `mapstructure:"blocked_keywords" yaml:"blocked_keywords"`
 }
@@ -80,6 +82,7 @@ func DefaultConfig() Config {
 			Enabled:         true,
 			LowRepThreshold: 50,
 			FlagOnLinks:     true,
+			DeleteOnLinks:   true,
 			NewUserMinPosts: 3,
 			BlockedKeywords: []string{
 				"crypto giveaway",
@@ -159,6 +162,11 @@ func DefaultConfig() Config {
 				MaxReputation: 5,
 				RepPenalty:    20,
 			},
+			CustomSticker: detector.CustomStickerTriggerConfig{
+				Enabled:       true,
+				MaxReputation: 5,
+				RepPenalty:    50,
+			},
 		},
 		Shieldy: ShieldyConfig{
 			Enabled:             true,
@@ -181,6 +189,7 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("auto_flag.enabled", true)
 	v.SetDefault("auto_flag.low_rep_threshold", 50)
 	v.SetDefault("auto_flag.flag_on_links", true)
+	v.SetDefault("auto_flag.delete_on_links", true)
 	v.SetDefault("auto_flag.new_user_min_posts", 3)
 	v.SetDefault("auto_flag.blocked_keywords", []string{
 		"crypto giveaway",
@@ -258,6 +267,9 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.secondary_group.enabled", true)
 	v.SetDefault("detector.secondary_group.max_reputation", 5)
 	v.SetDefault("detector.secondary_group.rep_penalty", 20)
+	v.SetDefault("detector.custom_sticker.enabled", true)
+	v.SetDefault("detector.custom_sticker.max_reputation", 5)
+	v.SetDefault("detector.custom_sticker.rep_penalty", 50)
 	v.SetDefault("shieldy.enabled", true)
 	v.SetDefault("shieldy.rep_bonus", 5)
 	v.SetDefault("shieldy.max_messages", 5)

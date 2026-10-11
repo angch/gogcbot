@@ -30,6 +30,7 @@ type Bot struct {
 	stopChan           chan struct{}
 	mockChatMemberFunc func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error)
 	mockSendFunc       func(c tgbotapi.Chattable) (tgbotapi.Message, error)
+	mockRequestFunc    func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
 	banCheckMu         sync.Mutex
 	isBanCheckRunning  bool
 }
@@ -189,6 +190,9 @@ func (b *Bot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 func (b *Bot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 	c = sanitizeChattable(c)
 	log.Printf("[Telegram API Call] Request -> Payload: %#v", c)
+	if b.mockRequestFunc != nil {
+		return b.mockRequestFunc(c)
+	}
 	if b.api == nil {
 		return &tgbotapi.APIResponse{Ok: true}, nil
 	}
@@ -209,6 +213,23 @@ func (b *Bot) SetMockChatMemberFunc(f func(config tgbotapi.GetChatMemberConfig) 
 // SetMockSendFunc sets a mock callback for Send for testing.
 func (b *Bot) SetMockSendFunc(f func(c tgbotapi.Chattable) (tgbotapi.Message, error)) {
 	b.mockSendFunc = f
+}
+
+// SetMockRequestFunc sets a mock callback for Request (e.g. DeleteMessage, RestrictChatMember) for testing.
+func (b *Bot) SetMockRequestFunc(f func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error)) {
+	b.mockRequestFunc = f
+}
+
+// GetStickerDirectURL returns the direct Telegram CDN download URL for a sticker file ID.
+// This allows downloading sticker image files for multimodal / vision LLM content inspection.
+func (b *Bot) GetStickerDirectURL(fileID string) (string, error) {
+	if fileID == "" {
+		return "", fmt.Errorf("fileID cannot be empty")
+	}
+	if b.api == nil {
+		return "", fmt.Errorf("bot api is not initialized")
+	}
+	return b.api.GetFileDirectURL(fileID)
 }
 
 // SendMessageOptions holds configuration options for sending messages via Bot.
@@ -811,6 +832,10 @@ func BuildDetector(cfg *config.Config, database *db.DB) *detector.Detector {
 
 	if cfg.Detector.SecondaryGroup.Enabled {
 		det.RegisterTrigger(detector.NewSecondaryGroupTrigger(cfg.Detector.SecondaryGroup))
+	}
+
+	if cfg.Detector.CustomSticker.Enabled {
+		det.RegisterTrigger(detector.NewCustomStickerTrigger(cfg.Detector.CustomSticker))
 	}
 
 	return det
