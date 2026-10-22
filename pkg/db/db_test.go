@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1932,5 +1933,78 @@ func TestKnownData_And_DryRunGates(t *testing.T) {
 	consumedGate, _ := database.GetValidDryRunGate("rescan_users")
 	if consumedGate != nil {
 		t.Errorf("expected dry run gate to be consumed/empty, got %+v", consumedGate)
+	}
+}
+
+func TestFlaggedPost_DeduplicationAndQueries(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	chatID := int64(-1001072966891)
+	msgID := 66953
+	userID := int64(6626612315)
+
+	// Initially no pending or approved flag
+	hasPending, err := database.HasPendingFlag(chatID, msgID)
+	if err != nil || hasPending {
+		t.Fatalf("expected HasPendingFlag = false, got %v, err: %v", hasPending, err)
+	}
+	hasApproved, err := database.HasApprovedFlag(chatID, msgID)
+	if err != nil || hasApproved {
+		t.Fatalf("expected HasApprovedFlag = false, got %v, err: %v", hasApproved, err)
+	}
+
+	// First flag creation succeeds
+	fp1, err := database.CreateFlaggedPost(chatID, msgID, userID, "Reputation at/below threshold (15 <= 40)")
+	if err != nil {
+		t.Fatalf("unexpected error creating first flag: %v", err)
+	}
+	if fp1.ID == 0 || fp1.Status != "pending" {
+		t.Fatalf("unexpected flagged post: %+v", fp1)
+	}
+
+	// HasPendingFlag should now be true
+	hasPending, err = database.HasPendingFlag(chatID, msgID)
+	if err != nil || !hasPending {
+		t.Fatalf("expected HasPendingFlag = true, got %v, err: %v", hasPending, err)
+	}
+
+	// Fetch pending post
+	pendingFp, err := database.GetPendingFlaggedPost(chatID, msgID)
+	if err != nil || pendingFp == nil {
+		t.Fatalf("expected pending post, got %v, err: %v", pendingFp, err)
+	}
+	if pendingFp.ID != fp1.ID {
+		t.Errorf("expected pending post ID %d, got %d", fp1.ID, pendingFp.ID)
+	}
+
+	// Attempting to create duplicate pending flag for same chatID & msgID must fail with ErrAlreadyFlagged
+	fp2, err := database.CreateFlaggedPost(chatID, msgID, userID, "Reputation at/below threshold (15 <= 40)")
+	if !errors.Is(err, ErrAlreadyFlagged) {
+		t.Fatalf("expected ErrAlreadyFlagged, got fp: %+v, err: %v", fp2, err)
+	}
+
+	// Resolve the flag as approved
+	if err := database.ResolveFlaggedPost(fp1.ID, "approved", 10104269); err != nil {
+		t.Fatalf("failed to resolve flagged post: %v", err)
+	}
+
+	// HasPendingFlag should now be false, HasApprovedFlag should be true
+	hasPending, err = database.HasPendingFlag(chatID, msgID)
+	if err != nil || hasPending {
+		t.Fatalf("expected HasPendingFlag = false after approval, got %v, err: %v", hasPending, err)
+	}
+	hasApproved, err = database.HasApprovedFlag(chatID, msgID)
+	if err != nil || !hasApproved {
+		t.Fatalf("expected HasApprovedFlag = true after approval, got %v, err: %v", hasApproved, err)
+	}
+
+	// Latest post should still be returned
+	latestFp, err := database.GetLatestFlaggedPost(chatID, msgID)
+	if err != nil || latestFp == nil {
+		t.Fatalf("expected latest post, got nil, err: %v", err)
+	}
+	if latestFp.Status != "approved" {
+		t.Errorf("expected latest post status approved, got %s", latestFp.Status)
 	}
 }

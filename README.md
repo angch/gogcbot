@@ -141,6 +141,11 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
     - **Private Chat Safety**: Automatically filters out private 1-on-1 chat IDs (`chatID >= 0`) during multi-group bans, unbans, mutes, and ban audits so direct-message admin commands never fail on non-group chats.
     - **Non-Fatal Absence Handling**: Safely handles Telegram `USER_NOT_PARTICIPANT` / `USERNOTPARTICIPANT` responses as non-fatal successes when kicking or auditing users who are already absent from the chat.
 
+20. **Moderation Review Deduplication & Edited Message Guards**:
+    - **Single Active Flag per Message**: Enforces pending moderation review uniqueness per message `(group_chat_id, group_message_id)` via DB-level checks (`HasPendingFlag`) and `ErrAlreadyFlagged`. When a message is already pending review in the Private Moderation Group, subsequent edits or duplicate updates cannot generate duplicate review cards.
+    - **Edited Message Safety**: Restricts AutoFlag low-reputation threshold checks (`user.Reputation <= FlagThreshold`) and unflagged daily activity bumps to initial messages (`msg.EditDate == 0`). Edits on pending or approved messages will not re-trigger moderation alerts or double-award approval reputation, while content-based additions (new web links or blocked keywords) in edits continue to be intercepted.
+    - **Multi-Trigger Pipeline Deduplication**: Trigger rules executing `ActionFlagMessage` mark moderation action as taken to prevent pipeline fall-through from double-flagging with AutoFlag rules.
+
 ---
 
 ## 🚀 Installation & Usage

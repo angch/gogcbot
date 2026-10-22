@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -383,7 +384,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 					log.Printf("[Bot Trigger] Rule '%s' fired for user %d in chat %d: %s", res.TriggerID, user.UserID, chat.ID, res.Reason)
 					b.ExecuteActions(chat.ID, user, dbMsg, res.Actions)
 					for _, act := range res.Actions {
-						if act.Type == detector.ActionDeleteMessage || act.Type == detector.ActionBanUser {
+						if act.Type == detector.ActionDeleteMessage || act.Type == detector.ActionBanUser || act.Type == detector.ActionFlagMessage {
 							actionTaken = true
 						}
 					}
@@ -396,7 +397,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 		// First message seen from user in monitored channel/group and message is empty:
 		// Don't flag, just send a silent info message to the moderation channel.
-		if (isNewUser || userMsgCount <= 1) && strings.TrimSpace(text) == "" {
+		if (isNewUser || userMsgCount <= 1) && strings.TrimSpace(text) == "" && msg.EditDate == 0 {
 			log.Printf("[Bot] First message from user %d in chat %d is empty. Sending silent info message to moderation channel.", user.UserID, chat.ID)
 			if err := b.SendFirstEmptyMessageInfo(chat.ID, dbMsg, user, chat.Title); err != nil {
 				log.Printf("[Bot] Error sending first empty message info: %v", err)
@@ -405,7 +406,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		}
 
 		flagged := b.checkAutoFlagRules(msg, dbMsg, user, chat.Title)
-		if !flagged && strings.TrimSpace(text) != "" {
+		if !flagged && strings.TrimSpace(text) != "" && msg.EditDate == 0 {
 			b.bumpUnflaggedReputation(user)
 		}
 	}
@@ -436,6 +437,14 @@ func (b *Bot) bumpUnflaggedReputation(user *db.User) {
 func (b *Bot) checkAutoFlagRules(msg *tgbotapi.Message, dbMsg *db.Message, user *db.User, groupTitle string) bool {
 	if !b.cfg.AutoFlag.Enabled || msg == nil || msg.Chat == nil || dbMsg == nil || user == nil {
 		return false
+	}
+
+	// If this message already has an active pending flag, avoid duplicate processing or duplicate alerts.
+	if msg.MessageID > 0 {
+		if hasPending, err := b.db.HasPendingFlag(msg.Chat.ID, msg.MessageID); err == nil && hasPending {
+			log.Printf("[AutoFlag] Message %d in chat %d is already pending moderation review. Skipping duplicate check.", msg.MessageID, msg.Chat.ID)
+			return true
+		}
 	}
 
 	var reasons []string
@@ -487,8 +496,13 @@ func (b *Bot) checkAutoFlagRules(msg *tgbotapi.Message, dbMsg *db.Message, user 
 	}
 
 	// Rule 3: Reputation below flag threshold
-	if user.Reputation <= b.cfg.Reputation.FlagThreshold {
-		reasons = append(reasons, fmt.Sprintf("Reputation at/below threshold (%d <= %d)", user.Reputation, b.cfg.Reputation.FlagThreshold))
+	// Only evaluate on original messages (not edits), and skip if already approved
+	if msg.EditDate == 0 && user.Reputation <= b.cfg.Reputation.FlagThreshold {
+		if hasApproved, err := b.db.HasApprovedFlag(msg.Chat.ID, msg.MessageID); err == nil && hasApproved {
+			log.Printf("[AutoFlag] Message %d in chat %d was previously approved. Skipping low-reputation re-flag.", msg.MessageID, msg.Chat.ID)
+		} else {
+			reasons = append(reasons, fmt.Sprintf("Reputation at/below threshold (%d <= %d)", user.Reputation, b.cfg.Reputation.FlagThreshold))
+		}
 	}
 
 	if len(reasons) > 0 {
@@ -500,6 +514,10 @@ func (b *Bot) checkAutoFlagRules(msg *tgbotapi.Message, dbMsg *db.Message, user 
 
 		flag, err := b.db.CreateFlaggedPost(msg.Chat.ID, msg.MessageID, user.UserID, reasonStr)
 		if err != nil {
+			if errors.Is(err, db.ErrAlreadyFlagged) {
+				log.Printf("[AutoFlag] Message %d in chat %d is already pending moderation review. Skipping duplicate alert.", msg.MessageID, msg.Chat.ID)
+				return true
+			}
 			log.Printf("[AutoFlag] Error saving flagged post: %v", err)
 			return true
 		}

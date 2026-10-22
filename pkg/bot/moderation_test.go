@@ -3700,5 +3700,121 @@ func TestCustomSticker_TrustedUserNotKickbanned(t *testing.T) {
 	}
 }
 
+func TestMessageEdit_NoDuplicateModerationAlert(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	modGroupID := int64(-5576645586)
+	b.cfg.ModerationGroupID = modGroupID
+	b.cfg.Reputation.FlagThreshold = 40
+	b.cfg.AutoFlag.Enabled = true
+	b.cfg.AutoFlag.BlockedKeywords = []string{"crypto giveaway"}
+
+	groupChatID := int64(-1001072966891)
+	userID := int64(6626612315)
+	msgID := 66953
+
+	user, _, err := b.db.GetOrCreateUser(userID, "mxltosa", "Mal", "", 15)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	var modAlertCount int
+	b.SetMockSendFunc(func(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+		if mc, ok := c.(tgbotapi.MessageConfig); ok && mc.ChatID == modGroupID {
+			modAlertCount++
+		}
+		return tgbotapi.Message{MessageID: 1188 + modAlertCount}, nil
+	})
+
+	// Step 1: User sends message 66953 (initial post, EditDate == 0)
+	initialMsg := &tgbotapi.Message{
+		MessageID: msgID,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Group", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: userID, UserName: "mxltosa", FirstName: "Mal"},
+		Text:      "I just learned php. Be nice to me. What could possibly go wrong",
+		Date:      int(time.Now().Unix()),
+		EditDate:  0,
+	}
+
+	b.handleMessage(initialMsg)
+
+	if modAlertCount != 1 {
+		t.Fatalf("expected exactly 1 moderation alert on initial message, got %d", modAlertCount)
+	}
+
+	pendingFlag, err := b.db.GetPendingFlaggedPost(groupChatID, msgID)
+	if err != nil || pendingFlag == nil {
+		t.Fatalf("expected 1 pending flag in db, got %v, err: %v", pendingFlag, err)
+	}
+
+	// Step 2: User edits message 66953 while flag is still pending
+	editedMsg := &tgbotapi.Message{
+		MessageID: msgID,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Group", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: userID, UserName: "mxltosa", FirstName: "Mal"},
+		Text:      "I just learned php. Be nice to me. What could possibly go wrong 🫪",
+		Date:      int(time.Now().Unix()),
+		EditDate:  int(time.Now().Unix()) + 60,
+	}
+
+	b.handleUpdate(tgbotapi.Update{
+		UpdateID:      1001,
+		EditedMessage: editedMsg,
+	})
+
+	// modAlertCount should STILL be 1 (no duplicate popup!)
+	if modAlertCount != 1 {
+		t.Fatalf("expected modAlertCount to remain 1 after editing pending message, got %d", modAlertCount)
+	}
+
+	// Step 3: Moderator approves the message (+5 reputation)
+	if err := b.db.ResolveFlaggedPost(pendingFlag.ID, "approved", 10104269); err != nil {
+		t.Fatalf("failed to resolve flag: %v", err)
+	}
+	_, _ = b.db.AdjustReputation(userID, 5, "Approved by moderator", 10104269)
+	user.Reputation = 20
+
+	// Step 4: User edits message again after approval (rep 20 is still <= FlagThreshold 40)
+	secondEditMsg := &tgbotapi.Message{
+		MessageID: msgID,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Group", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: userID, UserName: "mxltosa", FirstName: "Mal"},
+		Text:      "I just learned php. Be nice to me. What could possibly go wrong 🫪 (fixed typo)",
+		Date:      int(time.Now().Unix()),
+		EditDate:  int(time.Now().Unix()) + 120,
+	}
+
+	b.handleUpdate(tgbotapi.Update{
+		UpdateID:      1002,
+		EditedMessage: secondEditMsg,
+	})
+
+	// modAlertCount should STILL be 1 (already approved post must not re-trigger low reputation flag)
+	if modAlertCount != 1 {
+		t.Fatalf("expected modAlertCount to remain 1 after editing approved message, got %d", modAlertCount)
+	}
+
+	// Step 5: User edits message to add a blocked keyword (content spam)
+	spamEditMsg := &tgbotapi.Message{
+		MessageID: msgID,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Group", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: userID, UserName: "mxltosa", FirstName: "Mal"},
+		Text:      "Join crypto giveaway now at https://t.me/scam",
+		Date:      int(time.Now().Unix()),
+		EditDate:  int(time.Now().Unix()) + 180,
+	}
+
+	b.handleUpdate(tgbotapi.Update{
+		UpdateID:      1003,
+		EditedMessage: spamEditMsg,
+	})
+
+	// A new flag for keyword spam should trigger
+	if modAlertCount != 2 {
+		t.Fatalf("expected modAlertCount = 2 after editing message to add spam keyword, got %d", modAlertCount)
+	}
+}
+
 
 

@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -624,9 +625,23 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, msg *db.Message, actio
 			}
 
 		case detector.ActionFlagMessage:
+			if messageID > 0 {
+				if hasPending, err := b.db.HasPendingFlag(chatID, messageID); err == nil && hasPending {
+					log.Printf("[Bot Action] Message %d in chat %d is already pending moderation review. Skipping duplicate flag.", messageID, chatID)
+					continue
+				}
+			}
 			log.Printf("[Bot Action] Flagging message %d in chat %d for moderation review (reason: %s)", messageID, chatID, act.Reason)
 			flag, err := b.db.CreateFlaggedPost(chatID, messageID, user.UserID, act.Reason)
-			if err == nil && b.cfg.ModerationGroupID != 0 {
+			if err != nil {
+				if errors.Is(err, db.ErrAlreadyFlagged) {
+					log.Printf("[Bot Action] Message %d in chat %d is already pending moderation review. Skipping duplicate alert.", messageID, chatID)
+				} else {
+					log.Printf("[Bot Action Error] Failed to create flagged post for message %d in chat %d: %v", messageID, chatID, err)
+				}
+				continue
+			}
+			if b.cfg.ModerationGroupID != 0 {
 				groupTitle := fmt.Sprintf("Chat %d", chatID)
 				if group, err := b.db.GetGroup(chatID); err == nil && group != nil && group.Title != "" {
 					groupTitle = group.Title

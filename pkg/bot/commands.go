@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -406,6 +407,10 @@ func (b *Bot) cmdFlag(msg *tgbotapi.Message, args string) {
 	}
 	flag, err := b.db.CreateFlaggedPost(targetMsg.Chat.ID, targetMsg.MessageID, targetUser.UserID, reason)
 	if err != nil {
+		if errors.Is(err, db.ErrAlreadyFlagged) {
+			b.replyText(msg, "⚠️ This message is already pending moderation review.")
+			return
+		}
 		b.replyText(msg, fmt.Sprintf("❌ Error flagging message: %v", err))
 		return
 	}

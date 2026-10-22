@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,11 @@ import (
 	"unicode"
 
 	_ "modernc.org/sqlite"
+)
+
+var (
+	// ErrAlreadyFlagged indicates a message already has a pending moderation review flag.
+	ErrAlreadyFlagged = errors.New("message is already flagged for moderation review")
 )
 
 type DB struct {
@@ -494,6 +500,7 @@ func (d *DB) InitSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_flagged_posts_status ON flagged_posts(status);
+	CREATE INDEX IF NOT EXISTS idx_flagged_posts_chat_msg ON flagged_posts(group_chat_id, group_message_id);
 
 	CREATE TABLE IF NOT EXISTS reputation_logs (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1216,6 +1223,20 @@ func (d *DB) GetMessage(chatID int64, messageID int) (*Message, error) {
 // Flagged Posts Methods
 
 func (d *DB) CreateFlaggedPost(chatID int64, messageID int, userID int64, reason string) (*FlaggedPost, error) {
+	if messageID > 0 {
+		var existingID int64
+		err := d.QueryRow(`
+			SELECT id FROM flagged_posts 
+			WHERE group_chat_id = ? AND group_message_id = ? AND status = 'pending' 
+			LIMIT 1
+		`, chatID, messageID).Scan(&existingID)
+		if err == nil {
+			return nil, ErrAlreadyFlagged
+		} else if err != sql.ErrNoRows {
+			return nil, err
+		}
+	}
+
 	now := time.Now()
 	res, err := d.Exec(`
 		INSERT INTO flagged_posts (group_chat_id, group_message_id, user_id, reason, status, flagged_at)
@@ -1239,6 +1260,76 @@ func (d *DB) CreateFlaggedPost(chatID int64, messageID int, userID int64, reason
 		Status:         "pending",
 		FlaggedAt:      now,
 	}, nil
+}
+
+// HasPendingFlag checks whether a specific message in a chat currently has a pending moderation review flag.
+func (d *DB) HasPendingFlag(chatID int64, messageID int) (bool, error) {
+	if messageID == 0 {
+		return false, nil
+	}
+	var count int
+	err := d.QueryRow(`SELECT COUNT(*) FROM flagged_posts WHERE group_chat_id = ? AND group_message_id = ? AND status = 'pending'`, chatID, messageID).Scan(&count)
+	return count > 0, err
+}
+
+// HasApprovedFlag checks whether a specific message in a chat was previously reviewed and approved.
+func (d *DB) HasApprovedFlag(chatID int64, messageID int) (bool, error) {
+	if messageID == 0 {
+		return false, nil
+	}
+	var count int
+	err := d.QueryRow(`SELECT COUNT(*) FROM flagged_posts WHERE group_chat_id = ? AND group_message_id = ? AND status = 'approved'`, chatID, messageID).Scan(&count)
+	return count > 0, err
+}
+
+// GetPendingFlaggedPost retrieves the pending flagged post for a specific chat message, if any.
+func (d *DB) GetPendingFlaggedPost(chatID int64, messageID int) (*FlaggedPost, error) {
+	if messageID == 0 {
+		return nil, nil
+	}
+	var fp FlaggedPost
+	var resolvedAt sql.NullTime
+	err := d.QueryRow(`
+		SELECT id, group_chat_id, group_message_id, mod_group_message_id, user_id, reason, status, flagged_at, resolved_at, resolved_by
+		FROM flagged_posts 
+		WHERE group_chat_id = ? AND group_message_id = ? AND status = 'pending'
+		ORDER BY id DESC LIMIT 1
+	`, chatID, messageID).Scan(&fp.ID, &fp.GroupChatID, &fp.GroupMessageID, &fp.ModGroupMessageID, &fp.UserID, &fp.Reason, &fp.Status, &fp.FlaggedAt, &resolvedAt, &fp.ResolvedBy)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if resolvedAt.Valid {
+		fp.ResolvedAt = &resolvedAt.Time
+	}
+	return &fp, nil
+}
+
+// GetLatestFlaggedPost retrieves the latest flagged post record for a specific chat message, if any.
+func (d *DB) GetLatestFlaggedPost(chatID int64, messageID int) (*FlaggedPost, error) {
+	if messageID == 0 {
+		return nil, nil
+	}
+	var fp FlaggedPost
+	var resolvedAt sql.NullTime
+	err := d.QueryRow(`
+		SELECT id, group_chat_id, group_message_id, mod_group_message_id, user_id, reason, status, flagged_at, resolved_at, resolved_by
+		FROM flagged_posts 
+		WHERE group_chat_id = ? AND group_message_id = ?
+		ORDER BY id DESC LIMIT 1
+	`, chatID, messageID).Scan(&fp.ID, &fp.GroupChatID, &fp.GroupMessageID, &fp.ModGroupMessageID, &fp.UserID, &fp.Reason, &fp.Status, &fp.FlaggedAt, &resolvedAt, &fp.ResolvedBy)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if resolvedAt.Valid {
+		fp.ResolvedAt = &resolvedAt.Time
+	}
+	return &fp, nil
 }
 
 func (d *DB) CreateResolvedFlaggedPost(chatID int64, messageID int, userID int64, reason string, status string, resolvedBy int64) (*FlaggedPost, error) {
