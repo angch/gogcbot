@@ -189,7 +189,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 				user.Reputation = targetRep
 			}
 		} else {
+			log.Printf("[Banned User Message] User %d is marked banned. Deleting message %d and purging recent posts in chat %d", user.UserID, msg.MessageID, chat.ID)
 			_ = b.DeleteGroupMessage(chat.ID, msg.MessageID)
+			b.DeleteRecentMessagesForUser(user.UserID, chat.ID)
 			_ = b.BanUserInGroup(chat.ID, user.UserID)
 			return
 		}
@@ -235,8 +237,21 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		}
 	}
 
-	log.Printf("[Received Message] Sender ID: %d (@%s) | Group: '%s' (ID: %d) | Content: %q",
-		msg.From.ID, msg.From.UserName, groupName, chat.ID, text)
+	fwdTag := ""
+	if isForwardedMessage(msg) {
+		if msg.ForwardFrom != nil {
+			fwdTag = fmt.Sprintf(" [Forwarded from @%s (%d, bot: %t)]", msg.ForwardFrom.UserName, msg.ForwardFrom.ID, msg.ForwardFrom.IsBot)
+		} else if msg.ForwardFromChat != nil {
+			fwdTag = fmt.Sprintf(" [Forwarded from %s (%d)]", msg.ForwardFromChat.Title, msg.ForwardFromChat.ID)
+		} else if msg.ForwardSenderName != "" {
+			fwdTag = fmt.Sprintf(" [Forwarded from %s (Hidden)]", msg.ForwardSenderName)
+		} else {
+			fwdTag = " [Forwarded]"
+		}
+	}
+
+	log.Printf("[Received Message] Sender ID: %d (@%s)%s | Group: '%s' (ID: %d) | Content: %q",
+		msg.From.ID, msg.From.UserName, fwdTag, groupName, chat.ID, text)
 
 	if msg.Sticker != nil {
 		log.Printf("[Sticker Detected] Sender ID: %d (@%s) | Group: '%s' (%d) | MsgID: %d | Pack: %q | Emoji: %q | Dimensions: %dx%d (Width: %d, Height: %d) | FileID: %q | UniqueID: %q | Size: %d bytes | Animated: %t (Capturing metadata for LLM vision inspection)",
@@ -632,7 +647,37 @@ func extractMessageText(msg *tgbotapi.Message) string {
 		}
 		return "[Venue]"
 	}
+	if isForwardedMessage(msg) {
+		if msg.ForwardFrom != nil {
+			botTag := ""
+			if msg.ForwardFrom.IsBot {
+				botTag = " bot"
+			}
+			if msg.ForwardFrom.UserName != "" {
+				return fmt.Sprintf("[Forwarded from%s @%s]", botTag, msg.ForwardFrom.UserName)
+			}
+			fName := strings.TrimSpace(msg.ForwardFrom.FirstName + " " + msg.ForwardFrom.LastName)
+			if fName != "" {
+				return fmt.Sprintf("[Forwarded from%s %s (%d)]", botTag, fName, msg.ForwardFrom.ID)
+			}
+			return fmt.Sprintf("[Forwarded from%s ID %d]", botTag, msg.ForwardFrom.ID)
+		}
+		if msg.ForwardFromChat != nil {
+			return fmt.Sprintf("[Forwarded from %s (`%d`)]", msg.ForwardFromChat.Title, msg.ForwardFromChat.ID)
+		}
+		if msg.ForwardSenderName != "" {
+			return fmt.Sprintf("[Forwarded from %s]", msg.ForwardSenderName)
+		}
+		return "[Forwarded Message]"
+	}
 	return ""
+}
+
+func isForwardedMessage(msg *tgbotapi.Message) bool {
+	if msg == nil {
+		return false
+	}
+	return msg.ForwardFrom != nil || msg.ForwardFromChat != nil || msg.ForwardSenderName != "" || msg.ForwardDate != 0
 }
 
 // handleUserJoined handles a user joining a group, supergroup, or channel.

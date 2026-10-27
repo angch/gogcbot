@@ -9,10 +9,10 @@ import (
 
 // NewUserCJKTriggerConfig configures thresholds for the CJK spam detection trigger.
 type NewUserCJKTriggerConfig struct {
-	Enabled         bool  `mapstructure:"enabled" yaml:"enabled"`
-	MinHighUserID   int64 `mapstructure:"min_high_user_id" yaml:"min_high_user_id"`
-	MaxReputation   int   `mapstructure:"max_reputation" yaml:"max_reputation"`
-	MaxUserPosts    int   `mapstructure:"max_user_posts" yaml:"max_user_posts"`
+	Enabled         bool    `mapstructure:"enabled" yaml:"enabled"`
+	MinHighUserID   int64   `mapstructure:"min_high_user_id" yaml:"min_high_user_id"`
+	MaxReputation   int     `mapstructure:"max_reputation" yaml:"max_reputation"`
+	MaxUserPosts    int     `mapstructure:"max_user_posts" yaml:"max_user_posts"`
 	MinCJKChars     int     `mapstructure:"min_cjk_chars" yaml:"min_cjk_chars"`
 	MinChineseChars int     `mapstructure:"min_chinese_chars" yaml:"min_chinese_chars"` // Backwards compatibility alias
 	MinCJKRatio     float64 `mapstructure:"min_cjk_ratio" yaml:"min_cjk_ratio"`
@@ -156,10 +156,10 @@ func IsCJK(r rune) bool {
 
 // ContainsCJK returns true if text contains enough CJK script characters to be considered CJK spam.
 // It applies progressive thresholding that is forgiving for longer messages containing incidental CJK characters:
-// - Short messages (<= 50 non-space runes): requires at least MinCJKChars (default 2) and CJK ratio >= 0.10 (or >= 5 CJK chars).
-// - Medium messages (51-150 non-space runes): requires at least 5 CJK chars and CJK ratio >= MinCJKRatio (default 0.15).
-// - Long messages (> 150 non-space runes): requires at least 10 CJK chars and CJK ratio >= MinCJKRatio (default 0.15),
-//   or at least 25 CJK chars (substantial CJK block).
+//   - Short messages (<= 50 non-space runes): requires at least MinCJKChars (default 2) and CJK ratio >= 0.10 (or >= 5 CJK chars).
+//   - Medium messages (51-150 non-space runes): requires at least 5 CJK chars and CJK ratio >= MinCJKRatio (default 0.15).
+//   - Long messages (> 150 non-space runes): requires at least 10 CJK chars and CJK ratio >= MinCJKRatio (default 0.15),
+//     or at least 25 CJK chars (substantial CJK block).
 func (t *NewUserCJKTrigger) ContainsCJK(text string) bool {
 	minChars := t.cfg.MinCJKChars
 	if minChars <= 0 {

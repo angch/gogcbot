@@ -175,9 +175,50 @@ func FormatStickerDetailsMarkdown(s *db.StickerInfo) string {
 }
 
 func (b *Bot) DeleteGroupMessage(chatID int64, messageID int) error {
+	if chatID >= 0 || messageID <= 0 {
+		return nil
+	}
 	deleteMsgConfig := tgbotapi.NewDeleteMessage(chatID, messageID)
 	_, err := b.Request(deleteMsgConfig)
-	return err
+	if err != nil {
+		if isNonFatalDeleteError(err) {
+			log.Printf("[Bot] Message %d delete in chat %d reported non-fatal status (%v), treating as success", messageID, chatID, err)
+			return nil
+		}
+		return fmt.Errorf("telegram delete error: %w", err)
+	}
+	return nil
+}
+
+func isNonFatalDeleteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "message to delete not found") ||
+		strings.Contains(errStr, "message can't be deleted") ||
+		strings.Contains(errStr, "message_id_invalid") ||
+		isNonFatalBanError(err)
+}
+
+// DeleteRecentMessagesForUser retrieves all recent recorded messages for a user from the database
+// and deletes them from Telegram across monitored groups and the specified chats.
+// This ensures forwarded messages (which Telegram's server-side banChatMember revoke_messages=true often misses)
+// and all historical posts by the banned user are explicitly purged.
+func (b *Bot) DeleteRecentMessagesForUser(userID int64, currentChatID ...int64) {
+	msgs, err := b.db.GetRecentUserMessages(userID, 50)
+	if err != nil {
+		log.Printf("[Bot Error] Failed to retrieve recent messages for user %d: %v", userID, err)
+		return
+	}
+	for _, m := range msgs {
+		if m.ChatID < 0 && m.MessageID > 0 {
+			log.Printf("[Bot Action] Deleting recent message %d in chat %d for banned user %d", m.MessageID, m.ChatID, userID)
+			if err := b.DeleteGroupMessage(m.ChatID, m.MessageID); err != nil {
+				log.Printf("[Bot Error] Failed to delete message %d in chat %d for banned user %d: %v", m.MessageID, m.ChatID, userID, err)
+			}
+		}
+	}
 }
 
 func isNonFatalBanError(err error) bool {
@@ -252,6 +293,10 @@ func (b *Bot) BanUserInGroup(chatID int64, userID int64) error {
 func (b *Bot) BanUserAcrossAllGroups(userID int64, currentChatID ...int64) error {
 	var errs []string
 
+	// Explicitly delete all recent messages from this user in DB across groups
+	// This ensures forwarded messages (which Telegram's server-side revoke_messages misses) are purged.
+	b.DeleteRecentMessagesForUser(userID, currentChatID...)
+
 	chatIDs := make(map[int64]bool)
 	for _, cid := range currentChatID {
 		if cid < 0 {
@@ -269,6 +314,7 @@ func (b *Bot) BanUserAcrossAllGroups(userID int64, currentChatID ...int64) error
 	}
 
 	for cid := range chatIDs {
+		b.DeleteShieldyMessagesForUser(cid, userID, "")
 		if err := b.BanUserInGroup(cid, userID); err != nil {
 			log.Printf("[Bot] Failed to ban user %d in chat %d: %v", userID, cid, err)
 			errs = append(errs, fmt.Sprintf("chat %d (%v)", cid, err))

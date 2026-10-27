@@ -133,6 +133,13 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
     - **Bypassed Rep/Admin Simulation**: When validating rules via `gogcbot validate-rules` or pre-scan checks, tests simulated profiles with reputation (`rep = 0`), admin status (`admin = false`), and banned status (`banned = false`) across join, rescan, message snippet, and secondary group contexts to ensure 0 false-positive regressions.
     - **Automated Kickban Button**: Automated rule hits do NOT automatically pollute known datasets. Instead, kickban alerts in the moderation group include an interactive `🏷️ Add to Known Bad` inline button allowing human moderators to deliberately add confirmed spam patterns to the Known Bad dataset.
 
+18. **Comprehensive Post-Ban Message Purge & Forwarded Message Tracking**:
+    - **All Recent User Messages Purged on Ban**: When a user is banned (via moderation card button `mod:ban`, automated trigger kickban `ActionBanUser`, `/ban` command, or `/rescan`), the bot retrieves all recent recorded messages for that user from the SQLite database (`DeleteRecentMessagesForUser`) and explicitly calls `DeleteGroupMessage` across the monitored groups.
+    - **Forwarded Message Deletion**: Overcomes Telegram's server-side limitation where `banChatMember(revoke_messages=true)` fails to delete messages forwarded from another bot, channel, or user.
+    - **Forwarded Message Tracking & Extraction**: Automatically detects and extracts forward metadata (`ForwardFrom`, `ForwardFromChat`, `ForwardSenderName`, `ForwardDate`) in `extractMessageText` and `handleMessage`, ensuring forwarded messages are always saved to `messages` history and attributed to the forwarding user.
+    - **Idempotent & Non-Fatal Delete Error Handling**: Uses `isNonFatalDeleteError` to treat `message to delete not found`, `message can't be deleted`, and `message_id_invalid` as non-fatal successes, ensuring reliable execution even if messages were already removed manually.
+
+
 18. **Explicit Dry-Run Gating for Mass Actions**:
     - **Enforced Dry-Run Prior to Live Bans**: Mass-banning rescan operations (`gogcbot rescan-users --live` or `/rescan live`) are strictly gated by the `dryrun_gates` table. A live run is refused unless a successful dry-run preview and rule pre-check were completed within the past 1 hour.
     - Consumes the gate immediately after live execution to ensure fresh dry-run verification for every subsequent batch action.

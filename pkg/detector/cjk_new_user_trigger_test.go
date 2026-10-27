@@ -443,48 +443,48 @@ func TestNewUserCJKTrigger_ForgivingForLongerMessages(t *testing.T) {
 		wantTriggered bool
 	}{
 		{
-			name: "Noah's full original message (message 66322) - English post with kaomoji",
-			text: "Hi everyone! Have you ever played a game on Linux with a controller but your Wayland session completely ignores its input and idles/sleeps/locks midgame? That happened to me on hyprland with hypridle. I just fixed that issue with a tool i created in Rust: \n\nhttps://gitlab.com/noahpolimon/gamepad-idle-inhibit\n\nI still am not fully sure it works correctly on all setup, or if i am the only one facing this problem at all. I could test it only with my 8Bit Ultimate 2C controller and it works perfectly so far with near 0% cpu and around 1-2MiB of memory.\n\nEven if you are not a Linux gamer and just interested in Rust / programming in general, I could use some feedback! If you do game on Linux and have this problem, I would appreciate if you start using and breaking this tool while reporting issues you might face. \nThank you in advance!　(..◜ᴗ◝..)",
+			name:          "Noah's full original message (message 66322) - English post with kaomoji",
+			text:          "Hi everyone! Have you ever played a game on Linux with a controller but your Wayland session completely ignores its input and idles/sleeps/locks midgame? That happened to me on hyprland with hypridle. I just fixed that issue with a tool i created in Rust: \n\nhttps://gitlab.com/noahpolimon/gamepad-idle-inhibit\n\nI still am not fully sure it works correctly on all setup, or if i am the only one facing this problem at all. I could test it only with my 8Bit Ultimate 2C controller and it works perfectly so far with near 0% cpu and around 1-2MiB of memory.\n\nEven if you are not a Linux gamer and just interested in Rust / programming in general, I could use some feedback! If you do game on Linux and have this problem, I would appreciate if you start using and breaking this tool while reporting issues you might face. \nThank you in advance!　(..◜ᴗ◝..)",
 			wantTriggered: false,
 		},
 		{
-			name: "Long English message with incidental Japanese mention (東京)",
-			text: "Hi everyone! Have you ever played a game on Linux with a controller but your Wayland session completely ignores its input and idles/sleeps/locks midgame? That happened to me on hyprland with hypridle. I just fixed that issue with a tool i created in Rust. We tested this during our trip to Tokyo (東京) and it worked smoothly across all devices.",
+			name:          "Long English message with incidental Japanese mention (東京)",
+			text:          "Hi everyone! Have you ever played a game on Linux with a controller but your Wayland session completely ignores its input and idles/sleeps/locks midgame? That happened to me on hyprland with hypridle. I just fixed that issue with a tool i created in Rust. We tested this during our trip to Tokyo (東京) and it worked smoothly across all devices.",
 			wantTriggered: false,
 		},
 		{
-			name: "Long English message with incidental Chinese input mention (测试)",
-			text: "Here is a long message discussing some code in Go and how we handle Unicode characters. For example, testing the Chinese character 测试 and checking how it renders in the UI. Everything looks good and works as expected across all platforms. We encourage anyone interested in internationalization to help test.",
+			name:          "Long English message with incidental Chinese input mention (测试)",
+			text:          "Here is a long message discussing some code in Go and how we handle Unicode characters. For example, testing the Chinese character 测试 and checking how it renders in the UI. Everything looks good and works as expected across all platforms. We encourage anyone interested in internationalization to help test.",
 			wantTriggered: false,
 		},
 		{
-			name: "Medium English message with single/few CJK characters (cjkCount < 5)",
-			text: "I was reading about the new anime movie 君の名は and wanted to know if anyone here watched it on Linux via VLC or mpv?",
+			name:          "Medium English message with single/few CJK characters (cjkCount < 5)",
+			text:          "I was reading about the new anime movie 君の名は and wanted to know if anyone here watched it on Linux via VLC or mpv?",
 			wantTriggered: false,
 		},
 		{
-			name: "Short message with lone single CJK char (cjkCount < minChars 2)",
-			text: "Single char 中",
+			name:          "Short message with lone single CJK char (cjkCount < minChars 2)",
+			text:          "Single char 中",
 			wantTriggered: false,
 		},
 		{
-			name: "Short spam message with high CJK ratio (六栢o壹天)",
-			text: "六栢o壹天",
+			name:          "Short spam message with high CJK ratio (六栢o壹天)",
+			text:          "六栢o壹天",
 			wantTriggered: true,
 		},
 		{
-			name: "Short mixed spam message (Hello 你好)",
-			text: "Hello 你好",
+			name:          "Short mixed spam message (Hello 你好)",
+			text:          "Hello 你好",
 			wantTriggered: true,
 		},
 		{
-			name: "Medium spam message with contact info (油管联盟...)",
-			text: "油管联盟-fb联盟-外汇盘-币盘-商城盘-NFT盘-刷单盘-提供模特视频-可以挂自己地址和客服-联系; @ Ai16811",
+			name:          "Medium spam message with contact info (油管联盟...)",
+			text:          "油管联盟-fb联盟-外汇盘-币盘-商城盘-NFT盘-刷单盘-提供模特视频-可以挂自己地址和客服-联系; @ Ai16811",
 			wantTriggered: true,
 		},
 		{
-			name: "Long Chinese spam advertisement (high CJK ratio)",
-			text: "恭喜发财 万事如意 兼职日结 六佰一天 真实靠谱 赶快联系客服 稳定出金 免费领红包 随时提现 欢迎加入我们的大家庭 享受更多福利待遇 本团队诚信经营 长期招募代理 佣金丰厚 提现秒到账",
+			name:          "Long Chinese spam advertisement (high CJK ratio)",
+			text:          "恭喜发财 万事如意 兼职日结 六佰一天 真实靠谱 赶快联系客服 稳定出金 免费领红包 随时提现 欢迎加入我们的大家庭 享受更多福利待遇 本团队诚信经营 长期招募代理 佣金丰厚 提现秒到账",
 			wantTriggered: true,
 		},
 	}
@@ -498,4 +498,3 @@ func TestNewUserCJKTrigger_ForgivingForLongerMessages(t *testing.T) {
 		})
 	}
 }
-

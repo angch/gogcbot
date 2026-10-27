@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -3816,5 +3817,206 @@ func TestMessageEdit_NoDuplicateModerationAlert(t *testing.T) {
 	}
 }
 
+func TestDeleteRecentMessagesOnBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
 
+	targetUserID := int64(5093929737)
+	groupChatID := int64(-1001072966891)
+	_ = b.db.SaveGroup(groupChatID, "Main Group", "supergroup")
+	_ = b.db.SetGroupMonitored(groupChatID, true)
+	_, _, _ = b.db.GetOrCreateUser(targetUserID, "spammer", "Robin", "", 0)
 
+	// Save multiple messages for the user (including forwarded posts)
+	msgIDs := []int{67040, 67041, 67042, 67043}
+	for _, mid := range msgIDs {
+		_ = b.db.SaveMessage(&db.Message{
+			ChatID:    groupChatID,
+			MessageID: mid,
+			UserID:    targetUserID,
+			Text:      fmt.Sprintf("Message %d", mid),
+			CreatedAt: time.Now(),
+		})
+	}
+
+	var deletedMessageIDs []int
+	b.SetMockRequestFunc(func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+		if del, ok := c.(tgbotapi.DeleteMessageConfig); ok {
+			deletedMessageIDs = append(deletedMessageIDs, del.MessageID)
+		}
+		return &tgbotapi.APIResponse{Ok: true}, nil
+	})
+
+	// When user is banned across all groups, DeleteRecentMessagesForUser must purge all messages
+	err := b.BanUserAcrossAllGroups(targetUserID, groupChatID)
+	if err != nil {
+		t.Fatalf("unexpected error calling BanUserAcrossAllGroups: %v", err)
+	}
+
+	// Verify all messages were deleted
+	for _, expectedID := range msgIDs {
+		found := false
+		for _, delID := range deletedMessageIDs {
+			if delID == expectedID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected message %d to be deleted, got deleted list: %v", expectedID, deletedMessageIDs)
+		}
+	}
+}
+
+func TestCallbackBan_DeletesAllRecentMessages(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	targetUserID := int64(8812345678)
+	groupChatID := int64(-1001072966891)
+	modGroupID := int64(-5576645586)
+	b.cfg.ModerationGroupID = modGroupID
+
+	_ = b.db.SaveGroup(groupChatID, "Main Group", "supergroup")
+	_ = b.db.SetGroupMonitored(groupChatID, true)
+	_, _, _ = b.db.GetOrCreateUser(targetUserID, "spammer", "Bob", "", 0)
+
+	// User posted 3 messages
+	msgIDs := []int{101, 102, 103}
+	for _, mid := range msgIDs {
+		_ = b.db.SaveMessage(&db.Message{
+			ChatID:    groupChatID,
+			MessageID: mid,
+			UserID:    targetUserID,
+			Text:      fmt.Sprintf("Spam %d", mid),
+			CreatedAt: time.Now(),
+		})
+	}
+
+	// Flag post 103
+	flag, err := b.db.CreateFlaggedPost(groupChatID, 103, targetUserID, "Spam detected")
+	if err != nil {
+		t.Fatalf("failed to create flag: %v", err)
+	}
+
+	var deletedMessageIDs []int
+	b.SetMockRequestFunc(func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+		if del, ok := c.(tgbotapi.DeleteMessageConfig); ok {
+			deletedMessageIDs = append(deletedMessageIDs, del.MessageID)
+		}
+		return &tgbotapi.APIResponse{Ok: true}, nil
+	})
+
+	cb := &tgbotapi.CallbackQuery{
+		ID:   "cb_ban_test",
+		From: &tgbotapi.User{ID: 10104269, UserName: "mod_admin"},
+		Data: fmt.Sprintf("mod:ban:%d", flag.ID),
+		Message: &tgbotapi.Message{
+			MessageID: 555,
+			Chat:      &tgbotapi.Chat{ID: modGroupID, Type: "group"},
+			Text:      "Mod card review",
+		},
+	}
+
+	b.handleCallbackQuery(cb)
+
+	// Verify all 3 user messages were deleted
+	for _, expectedID := range msgIDs {
+		found := false
+		for _, delID := range deletedMessageIDs {
+			if delID == expectedID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected message %d to be deleted on callback ban, got deleted list: %v", expectedID, deletedMessageIDs)
+		}
+	}
+}
+
+func TestIsNonFatalDeleteError(t *testing.T) {
+	tests := []struct {
+		err      error
+		expected bool
+	}{
+		{nil, false},
+		{errors.New("Bad Request: message to delete not found"), true},
+		{errors.New("Bad Request: message can't be deleted"), true},
+		{errors.New("Bad Request: message_id_invalid"), true},
+		{errors.New("Bad Request: USER_NOT_PARTICIPANT"), true},
+		{errors.New("Fatal network error: connection reset"), false},
+	}
+
+	for _, tt := range tests {
+		got := isNonFatalDeleteError(tt.err)
+		if got != tt.expected {
+			t.Errorf("isNonFatalDeleteError(%v) = %t, want %t", tt.err, got, tt.expected)
+		}
+	}
+}
+
+func TestExtractMessageText_ForwardedMessages(t *testing.T) {
+	// 1. Forwarded from bot
+	msgFromBot := &tgbotapi.Message{
+		ForwardFrom: &tgbotapi.User{
+			ID:       123456,
+			UserName: "some_bot",
+			IsBot:    true,
+		},
+		ForwardDate: int(time.Now().Unix()),
+	}
+	text1 := extractMessageText(msgFromBot)
+	if text1 != "[Forwarded from bot @some_bot]" {
+		t.Errorf("unexpected extracted text: %q", text1)
+	}
+
+	// 2. Forwarded from user with name
+	msgFromUser := &tgbotapi.Message{
+		ForwardFrom: &tgbotapi.User{
+			ID:        654321,
+			FirstName: "Alice",
+			LastName:  "Smith",
+			IsBot:     false,
+		},
+		ForwardDate: int(time.Now().Unix()),
+	}
+	text2 := extractMessageText(msgFromUser)
+	if text2 != "[Forwarded from Alice Smith (654321)]" {
+		t.Errorf("unexpected extracted text: %q", text2)
+	}
+
+	// 3. Forwarded from channel
+	msgFromChannel := &tgbotapi.Message{
+		ForwardFromChat: &tgbotapi.Chat{
+			ID:    -100999888,
+			Title: "Crypto Signals",
+		},
+		ForwardDate: int(time.Now().Unix()),
+	}
+	text3 := extractMessageText(msgFromChannel)
+	if text3 != "[Forwarded from Crypto Signals (`-100999888`)]" {
+		t.Errorf("unexpected extracted text: %q", text3)
+	}
+
+	// 4. Forwarded from hidden account
+	msgHidden := &tgbotapi.Message{
+		ForwardSenderName: "Anonymous Trader",
+		ForwardDate:       int(time.Now().Unix()),
+	}
+	text4 := extractMessageText(msgHidden)
+	if text4 != "[Forwarded from Anonymous Trader]" {
+		t.Errorf("unexpected extracted text: %q", text4)
+	}
+
+	// 5. Forwarded message with explicit text retains original text
+	msgWithText := &tgbotapi.Message{
+		Text:              "Buy tokens now",
+		ForwardSenderName: "Spammer",
+		ForwardDate:       int(time.Now().Unix()),
+	}
+	text5 := extractMessageText(msgWithText)
+	if text5 != "Buy tokens now" {
+		t.Errorf("expected original text, got %q", text5)
+	}
+}

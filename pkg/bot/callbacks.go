@@ -171,6 +171,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 
 	case "ban":
 		_ = b.DeleteGroupMessage(flag.GroupChatID, flag.GroupMessageID)
+		b.DeleteRecentMessagesForUser(user.UserID, flag.GroupChatID)
 		err := b.BanUserAcrossAllGroups(user.UserID, flag.GroupChatID)
 		banResult := "Banned across all monitored groups."
 		if err != nil {

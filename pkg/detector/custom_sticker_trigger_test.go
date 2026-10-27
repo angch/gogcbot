@@ -75,9 +75,9 @@ func TestCustomStickerTrigger_LowRepCustomStickerBan(t *testing.T) {
 			descContains:  "spam_set",
 		},
 		{
-			name:   "DB replay fallback with [Sticker 👍] format",
-			rawMsg: nil,
-			text:   "[Sticker 👍]",
+			name:          "DB replay fallback with [Sticker 👍] format",
+			rawMsg:        nil,
+			text:          "[Sticker 👍]",
 			shouldTrigger: true,
 			descContains:  "👍",
 		},
