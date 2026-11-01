@@ -2008,3 +2008,189 @@ func TestFlaggedPost_DeduplicationAndQueries(t *testing.T) {
 		t.Errorf("expected latest post status approved, got %s", latestFp.Status)
 	}
 }
+
+func TestUserInvitesAndRecursiveAssociated(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// User A (100) invites Bot B1 (201) and Bot B2 (202)
+	// Bot B2 invites Bot C (301)
+	userA := int64(100)
+	botB1 := int64(201)
+	botB2 := int64(202)
+	botC := int64(301)
+	chatID := int64(-100123)
+
+	_ = database.RecordUserInvite(userA, botB1, chatID)
+	_ = database.RecordUserInvite(userA, botB2, chatID)
+	_ = database.RecordUserInvite(botB2, botC, chatID)
+
+	// Test GetInvitedUserIDs for userA
+	invitedByA, err := database.GetInvitedUserIDs(userA)
+	if err != nil {
+		t.Fatalf("failed to get invited by A: %v", err)
+	}
+	if len(invitedByA) != 2 {
+		t.Errorf("expected 2 invitees for A, got %d", len(invitedByA))
+	}
+
+	// Test GetInviterUserIDs for botC
+	invitersOfC, err := database.GetInviterUserIDs(botC)
+	if err != nil {
+		t.Fatalf("failed to get inviters of C: %v", err)
+	}
+	if len(invitersOfC) != 1 || invitersOfC[0] != botB2 {
+		t.Errorf("expected botB2 to be inviter of C, got %v", invitersOfC)
+	}
+
+	// Test GetRecursiveAssociatedUserIDs starting from userA
+	assocA, err := database.GetRecursiveAssociatedUserIDs(userA)
+	if err != nil {
+		t.Fatalf("failed to get associated IDs for A: %v", err)
+	}
+	if len(assocA) != 4 {
+		t.Errorf("expected 4 associated accounts for A (100, 201, 202, 301), got %d (%v)", len(assocA), assocA)
+	}
+
+	// Test GetRecursiveAssociatedUserIDs starting from botC (leaf node)
+	assocC, err := database.GetRecursiveAssociatedUserIDs(botC)
+	if err != nil {
+		t.Fatalf("failed to get associated IDs for C: %v", err)
+	}
+	if len(assocC) != 4 {
+		t.Errorf("expected 4 associated accounts starting from C (should traverse up to A and siblings), got %d (%v)", len(assocC), assocC)
+	}
+}
+
+func TestUpdateUserIsBot(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	botID := int64(888123)
+	u, _, err := database.GetOrCreateUser(botID, "sample_bot", "Sample", "Bot", 0)
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	if u.IsBot {
+		t.Errorf("expected is_bot to be false initially")
+	}
+
+	if err := database.UpdateUserIsBot(botID, true); err != nil {
+		t.Fatalf("failed to update is_bot: %v", err)
+	}
+
+	fetched, err := database.GetUserByID(botID)
+	if err != nil {
+		t.Fatalf("failed to get user: %v", err)
+	}
+	if !fetched.IsBot {
+		t.Errorf("expected is_bot to be true after update")
+	}
+}
+
+func TestMessageForwardMetadata(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	msg := &Message{
+		ChatID:            -100123,
+		MessageID:         5001,
+		UserID:            999888,
+		Text:              "Forwarded spam content",
+		CreatedAt:         time.Now(),
+		IsForward:         true,
+		ForwardFromChatID: -100999,
+		ForwardFromMsgID:  777,
+		ForwardFromUserID: 123456,
+		ForwardSenderName: "Channel Admin",
+	}
+
+	if err := database.SaveMessage(msg); err != nil {
+		t.Fatalf("failed to save message with forward metadata: %v", err)
+	}
+
+	// Retrieve via GetRecentUserMessages
+	recent, err := database.GetRecentUserMessages(999888, 5)
+	if err != nil || len(recent) == 0 {
+		t.Fatalf("failed to get recent messages: %v", err)
+	}
+	r := recent[0]
+	if !r.IsForward {
+		t.Errorf("expected is_forward to be true")
+	}
+	if r.ForwardFromChatID != -100999 {
+		t.Errorf("expected forward_from_chat_id -100999, got %d", r.ForwardFromChatID)
+	}
+	if r.ForwardFromMsgID != 777 {
+		t.Errorf("expected forward_from_msg_id 777, got %d", r.ForwardFromMsgID)
+	}
+	if r.ForwardFromUserID != 123456 {
+		t.Errorf("expected forward_from_user_id 123456, got %d", r.ForwardFromUserID)
+	}
+	if r.ForwardSenderName != "Channel Admin" {
+		t.Errorf("expected forward_sender_name 'Channel Admin', got %q", r.ForwardSenderName)
+	}
+
+	// Retrieve via GetMessage
+	single, err := database.GetMessage(-100123, 5001)
+	if err != nil || single == nil {
+		t.Fatalf("failed to get single message: %v", err)
+	}
+	if !single.IsForward || single.ForwardFromMsgID != 777 {
+		t.Errorf("expected forward metadata intact on GetMessage, got %+v", single)
+	}
+}
+
+func TestBannedUsernamesAndAutoban(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Add banned username
+	err := database.AddBannedUsername("@kc15_cghbot", 0, 1079944493, -1001072966891, "Mentioned by new unknown user 1079944493", true)
+	if err != nil {
+		t.Fatalf("failed to add banned username: %v", err)
+	}
+
+	// 2. Query banned username
+	banned, rec, err := database.IsUsernameBanned("kc15_cghbot")
+	if err != nil || !banned || rec == nil {
+		t.Fatalf("expected kc15_cghbot to be banned, got banned=%v, rec=%+v, err=%v", banned, rec, err)
+	}
+	if rec.BannedByUserID != 1079944493 || !rec.IsBot {
+		t.Errorf("unexpected record data: %+v", rec)
+	}
+
+	// 3. Also check case-insensitivity and leading '@'
+	bannedUpper, _, _ := database.IsUsernameBanned("@KC15_CGHBOT")
+	if !bannedUpper {
+		t.Errorf("expected @KC15_CGHBOT to match case-insensitively")
+	}
+
+	// 4. Update user ID once known
+	err = database.UpdateBannedUsernameUserID("kc15_cghbot", 88888888)
+	if err != nil {
+		t.Fatalf("failed to update user ID: %v", err)
+	}
+
+	recUpdated, _ := database.GetBannedUsername("kc15_cghbot")
+	if recUpdated == nil || recUpdated.UserID != 88888888 {
+		t.Errorf("expected updated UserID 88888888, got %+v", recUpdated)
+	}
+
+	// 5. GetOrCreateUser automatically marks user as banned if username is in ban list
+	u, isNew, err := database.GetOrCreateUser(99999999, "kc15_cghbot", "KC", "Bot", 0)
+	if err != nil {
+		t.Fatalf("GetOrCreateUser failed: %v", err)
+	}
+	if !isNew || !u.IsBanned {
+		t.Errorf("expected user 99999999 to be created as banned, got isNew=%v, isBanned=%v", isNew, u.IsBanned)
+	}
+
+	// 6. Test RemoveBannedUsername
+	_ = database.RemoveBannedUsername("kc15_cghbot")
+	_ = database.SetUserBanned(99999999, false)
+	bannedAfter, _, _ := database.IsUsernameBanned("kc15_cghbot")
+	if bannedAfter {
+		t.Errorf("expected kc15_cghbot to no longer be banned after removal")
+	}
+}

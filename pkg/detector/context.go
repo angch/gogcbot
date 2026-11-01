@@ -28,6 +28,15 @@ type TriggerContext struct {
 	IsSecondaryGroup       bool   // True if the current chat is a secondary group
 	IsMemberOfPrimaryGroup bool   // True if user is verified to be a member of the primary group(s)
 	PrimaryGroupNames      string // Descriptive titles/IDs of primary group(s) checked
+	MentionedEntities      []MentionedEntity // Users and bots mentioned in the message
+}
+
+// MentionedEntity represents a user or bot mentioned in a message and whether they belong to the chat.
+type MentionedEntity struct {
+	Username  string // Username without '@'
+	UserID    int64  // Telegram User ID (0 if unresolved)
+	IsBot     bool   // True if username ends with 'bot' or confirmed bot
+	IsInGroup bool   // True if currently verified as member/admin in the group
 }
 
 // DisplayName returns the trimmed combined display name of the context user, or empty string.

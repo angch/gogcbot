@@ -1084,10 +1084,21 @@ func (b *Bot) cmdUnban(msg *tgbotapi.Message, args string, isAuthorized bool) {
 	}
 	targetUser := b.resolveUserFromArgsOrReply(msg, args)
 	if targetUser == nil {
+		cleanUname := db.CleanUsername(args)
+		if cleanUname != "" {
+			if banned, _, _ := b.db.IsUsernameBanned(cleanUname); banned {
+				_ = b.db.RemoveBannedUsername(cleanUname)
+				b.replyText(msg, fmt.Sprintf("✅ Removed @%s from pre-ban list.", cleanUname))
+				return
+			}
+		}
 		b.replyText(msg, "Usage: `/unban <user_id|@username>`")
 		return
 	}
 	_ = b.UnbanUserAcrossAllGroups(targetUser.UserID, msg.Chat.ID)
+	if targetUser.Username != "" {
+		_ = b.db.RemoveBannedUsername(targetUser.Username)
+	}
 	b.replyText(msg, fmt.Sprintf("✅ Unbanned @%s across monitored groups.", targetUser.Username))
 }
 

@@ -47,6 +47,7 @@ type DetectorConfig struct {
 	NonsenseBio           detector.NonsenseBioTriggerConfig     `mapstructure:"nonsense_bio" yaml:"nonsense_bio,omitempty"`
 	SecondaryGroup        detector.SecondaryGroupTriggerConfig  `mapstructure:"secondary_group" yaml:"secondary_group,omitempty"`
 	CustomSticker         detector.CustomStickerTriggerConfig   `mapstructure:"custom_sticker" yaml:"custom_sticker,omitempty"`
+	NewUserMention        detector.NewUserMentionTriggerConfig  `mapstructure:"new_user_mention" yaml:"new_user_mention,omitempty"`
 }
 
 // AutoFlagConfig defines automated moderation rules and keyword detection thresholds.
@@ -167,6 +168,13 @@ func DefaultConfig() Config {
 				MaxReputation: 5,
 				RepPenalty:    50,
 			},
+			NewUserMention: detector.NewUserMentionTriggerConfig{
+				Enabled:       true,
+				MinHighUserID: 0,
+				MaxReputation: 5,
+				MaxUserPosts:  5,
+				RepPenalty:    50,
+			},
 		},
 		Shieldy: ShieldyConfig{
 			Enabled:             true,
@@ -270,6 +278,11 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.custom_sticker.enabled", true)
 	v.SetDefault("detector.custom_sticker.max_reputation", 5)
 	v.SetDefault("detector.custom_sticker.rep_penalty", 50)
+	v.SetDefault("detector.new_user_mention.enabled", true)
+	v.SetDefault("detector.new_user_mention.min_high_user_id", int64(0))
+	v.SetDefault("detector.new_user_mention.max_reputation", 5)
+	v.SetDefault("detector.new_user_mention.max_user_posts", 5)
+	v.SetDefault("detector.new_user_mention.rep_penalty", 50)
 	v.SetDefault("shieldy.enabled", true)
 	v.SetDefault("shieldy.rep_bonus", 5)
 	v.SetDefault("shieldy.max_messages", 5)

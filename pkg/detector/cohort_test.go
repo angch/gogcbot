@@ -89,6 +89,24 @@ func TestMatchesCohort(t *testing.T) {
 			maxPosts: 5,
 			want:     true,
 		},
+		{
+			name: "low user ID bot matches cohort",
+			ctx: &TriggerContext{
+				IsNewUser: true,
+				User:      &db.User{UserID: 123456, Reputation: 0, IsBot: true},
+			},
+			minHighUserID: 1000000000,
+			want:          true,
+		},
+		{
+			name: "high reputation bot exempt from cohort",
+			ctx: &TriggerContext{
+				IsNewUser: true,
+				User:      &db.User{UserID: 123456, Reputation: 100, IsBot: true},
+			},
+			minHighUserID: 1000000000,
+			want:          false,
+		},
 	}
 
 	for _, tt := range tests {

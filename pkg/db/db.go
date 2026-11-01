@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ type User struct {
 	WarnCount    int       `json:"warn_count"`
 	IsBanned     bool      `json:"is_banned"`
 	IsAdmin      bool      `json:"is_admin"`
+	IsBot        bool      `json:"is_bot,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -84,6 +86,12 @@ type Message struct {
 	HasLinks  bool         `json:"has_links"`
 	CreatedAt time.Time    `json:"created_at"`
 	Sticker   *StickerInfo `json:"sticker,omitempty"`
+	// Forward metadata
+	IsForward         bool   `json:"is_forward,omitempty"`
+	ForwardFromChatID int64  `json:"forward_from_chat_id,omitempty"`
+	ForwardFromMsgID  int    `json:"forward_from_msg_id,omitempty"`
+	ForwardFromUserID int64  `json:"forward_from_user_id,omitempty"`
+	ForwardSenderName string `json:"forward_sender_name,omitempty"`
 }
 
 type FlaggedPost struct {
@@ -432,6 +440,36 @@ func (d *DB) AutoMigrate() error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_dryrun_gates_type ON dryrun_gates(action_type, executed_at DESC);`,
 		`ALTER TABLE messages ADD COLUMN sticker_json TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE users ADD COLUMN is_bot BOOLEAN NOT NULL DEFAULT 0;`,
+		`CREATE TABLE IF NOT EXISTS user_invites (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			inviter_user_id INTEGER NOT NULL,
+			invited_user_id INTEGER NOT NULL,
+			chat_id INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			UNIQUE(inviter_user_id, invited_user_id, chat_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_invites_inviter ON user_invites(inviter_user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_invites_invited ON user_invites(invited_user_id);`,
+		`ALTER TABLE messages ADD COLUMN is_forward BOOLEAN NOT NULL DEFAULT 0;`,
+		`ALTER TABLE messages ADD COLUMN forward_from_chat_id INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE messages ADD COLUMN forward_from_msg_id INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE messages ADD COLUMN forward_from_user_id INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE messages ADD COLUMN forward_sender_name TEXT NOT NULL DEFAULT '';`,
+		`CREATE TABLE IF NOT EXISTS banned_usernames (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL COLLATE NOCASE,
+			user_id INTEGER NOT NULL DEFAULT 0,
+			banned_by_user_id INTEGER NOT NULL DEFAULT 0,
+			chat_id INTEGER NOT NULL DEFAULT 0,
+			reason TEXT NOT NULL DEFAULT '',
+			is_bot BOOLEAN NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			UNIQUE(username)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_banned_usernames_user_id ON banned_usernames(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_banned_usernames_username ON banned_usernames(username);`,
 	}
 
 	for _, stmt := range migrations {
@@ -439,6 +477,7 @@ func (d *DB) AutoMigrate() error {
 	}
 
 	_ = d.EnsureKnownDataSeeded()
+	_ = d.backfillBannedBotMentions()
 	return nil
 }
 
@@ -455,6 +494,7 @@ func (d *DB) InitSchema() error {
 		warn_count INTEGER NOT NULL DEFAULT 0,
 		is_banned BOOLEAN NOT NULL DEFAULT 0,
 		is_admin BOOLEAN NOT NULL DEFAULT 0,
+		is_bot BOOLEAN NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
@@ -479,12 +519,45 @@ func (d *DB) InitSchema() error {
 		has_links BOOLEAN NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL,
 		sticker_json TEXT NOT NULL DEFAULT '',
+		is_forward BOOLEAN NOT NULL DEFAULT 0,
+		forward_from_chat_id INTEGER NOT NULL DEFAULT 0,
+		forward_from_msg_id INTEGER NOT NULL DEFAULT 0,
+		forward_from_user_id INTEGER NOT NULL DEFAULT 0,
+		forward_sender_name TEXT NOT NULL DEFAULT '',
 		UNIQUE(chat_id, message_id)
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_messages_user_created ON messages(user_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages(chat_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+
+	CREATE TABLE IF NOT EXISTS banned_usernames (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		username TEXT NOT NULL COLLATE NOCASE,
+		user_id INTEGER NOT NULL DEFAULT 0,
+		banned_by_user_id INTEGER NOT NULL DEFAULT 0,
+		chat_id INTEGER NOT NULL DEFAULT 0,
+		reason TEXT NOT NULL DEFAULT '',
+		is_bot BOOLEAN NOT NULL DEFAULT 1,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		UNIQUE(username)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_banned_usernames_user_id ON banned_usernames(user_id);
+	CREATE INDEX IF NOT EXISTS idx_banned_usernames_username ON banned_usernames(username);
+
+	CREATE TABLE IF NOT EXISTS user_invites (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		inviter_user_id INTEGER NOT NULL,
+		invited_user_id INTEGER NOT NULL,
+		chat_id INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL,
+		UNIQUE(inviter_user_id, invited_user_id, chat_id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_user_invites_inviter ON user_invites(inviter_user_id);
+	CREATE INDEX IF NOT EXISTS idx_user_invites_invited ON user_invites(invited_user_id);
 
 	CREATE TABLE IF NOT EXISTS flagged_posts (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -653,11 +726,26 @@ func (d *DB) InitSchema() error {
 
 func (d *DB) GetOrCreateUser(userID int64, username, firstName, lastName string, defaultRep int) (*User, bool, error) {
 	now := time.Now()
+
+	// Check if this username is in the ban list
+	isPreBanned := false
+	if username != "" {
+		if banned, bRec, _ := d.IsUsernameBanned(username); banned {
+			isPreBanned = true
+			if bRec != nil && bRec.UserID == 0 {
+				_ = d.UpdateBannedUsernameUserID(username, userID)
+			}
+			if bRec != nil && bRec.BannedByUserID != 0 {
+				_ = d.RecordUserInvite(bRec.BannedByUserID, userID, bRec.ChatID)
+			}
+		}
+	}
+
 	var user User
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, is_bot, created_at, updated_at
 		FROM users WHERE user_id = ?
-	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.LanguageCode, &user.IsPremium, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
+	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.LanguageCode, &user.IsPremium, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.IsBot, &user.CreatedAt, &user.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		user = User{
@@ -669,21 +757,27 @@ func (d *DB) GetOrCreateUser(userID int64, username, firstName, lastName string,
 			IsPremium:    false,
 			Reputation:   defaultRep,
 			WarnCount:    0,
-			IsBanned:     false,
+			IsBanned:     isPreBanned,
 			IsAdmin:      false,
+			IsBot:        false,
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		}
 		_, err := d.Exec(`
-			INSERT INTO users (user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, user.UserID, user.Username, user.FirstName, user.LastName, user.LanguageCode, user.IsPremium, user.Reputation, user.WarnCount, user.IsBanned, user.IsAdmin, user.CreatedAt, user.UpdatedAt)
+			INSERT INTO users (user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, is_bot, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, user.UserID, user.Username, user.FirstName, user.LastName, user.LanguageCode, user.IsPremium, user.Reputation, user.WarnCount, user.IsBanned, user.IsAdmin, user.IsBot, user.CreatedAt, user.UpdatedAt)
 		if err != nil {
 			return nil, false, err
 		}
 		return &user, true, nil
 	} else if err != nil {
 		return nil, false, err
+	}
+
+	if isPreBanned && !user.IsBanned {
+		user.IsBanned = true
+		_ = d.SetUserBanned(userID, true)
 	}
 
 	// Update names/username if changed
@@ -712,6 +806,13 @@ func (d *DB) UpdateUserMetadata(userID int64, lang string, isPremium bool) error
 	return err
 }
 
+// UpdateUserIsBot updates the user's is_bot flag.
+func (d *DB) UpdateUserIsBot(userID int64, isBot bool) error {
+	now := time.Now()
+	_, err := d.Exec(`UPDATE users SET is_bot = ?, updated_at = ? WHERE user_id = ?`, isBot, now, userID)
+	return err
+}
+
 // UpdateUserName updates a user's username, first name, and last name.
 func (d *DB) UpdateUserName(userID int64, username, firstName, lastName string) error {
 	now := time.Now()
@@ -723,9 +824,9 @@ func (d *DB) UpdateUserName(userID int64, username, firstName, lastName string) 
 func (d *DB) GetUserByID(userID int64) (*User, error) {
 	var user User
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, is_bot, created_at, updated_at
 		FROM users WHERE user_id = ?
-	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.LanguageCode, &user.IsPremium, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
+	`, userID).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.LanguageCode, &user.IsPremium, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.IsBot, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -742,9 +843,9 @@ func (d *DB) GetUserByUsername(username string) (*User, error) {
 
 	var user User
 	err := d.QueryRow(`
-		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, is_bot, created_at, updated_at
 		FROM users WHERE LOWER(TRIM(username, '@ ')) = LOWER(?)
-	`, username).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.LanguageCode, &user.IsPremium, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
+	`, username).Scan(&user.UserID, &user.Username, &user.FirstName, &user.LastName, &user.LanguageCode, &user.IsPremium, &user.Reputation, &user.WarnCount, &user.IsBanned, &user.IsAdmin, &user.IsBot, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -756,7 +857,7 @@ func (d *DB) GetAllUsers(limit int) ([]User, error) {
 		limit = 100
 	}
 	rows, err := d.Query(`
-		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, is_bot, created_at, updated_at
 		FROM users
 		ORDER BY reputation DESC, created_at DESC
 		LIMIT ?
@@ -769,7 +870,7 @@ func (d *DB) GetAllUsers(limit int) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.IsBot, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -780,7 +881,7 @@ func (d *DB) GetAllUsers(limit int) ([]User, error) {
 // GetBannedUsers returns all users marked as banned (is_banned = 1) in the database.
 func (d *DB) GetBannedUsers() ([]User, error) {
 	rows, err := d.Query(`
-		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, is_bot, created_at, updated_at
 		FROM users
 		WHERE is_banned = 1
 		ORDER BY updated_at DESC, user_id ASC
@@ -793,7 +894,7 @@ func (d *DB) GetBannedUsers() ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.IsBot, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -804,7 +905,7 @@ func (d *DB) GetBannedUsers() ([]User, error) {
 // GetUsersWithReputationAbove returns all users with reputation strictly greater than minRep.
 func (d *DB) GetUsersWithReputationAbove(minRep int) ([]User, error) {
 	rows, err := d.Query(`
-		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, created_at, updated_at
+		SELECT user_id, username, first_name, last_name, language_code, is_premium, reputation, warn_count, is_banned, is_admin, is_bot, created_at, updated_at
 		FROM users
 		WHERE reputation > ?
 		ORDER BY reputation DESC, user_id ASC
@@ -817,7 +918,7 @@ func (d *DB) GetUsersWithReputationAbove(minRep int) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.UserID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsPremium, &u.Reputation, &u.WarnCount, &u.IsBanned, &u.IsAdmin, &u.IsBot, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -973,6 +1074,200 @@ func (d *DB) SetUserBanned(userID int64, banned bool) error {
 	return err
 }
 
+// BannedUsernameRecord represents a pre-banned or banned username tracked in the ban list.
+type BannedUsernameRecord struct {
+	ID             int64     `json:"id"`
+	Username       string    `json:"username"`
+	UserID         int64     `json:"user_id"`
+	BannedByUserID int64     `json:"banned_by_user_id"`
+	ChatID         int64     `json:"chat_id"`
+	Reason         string    `json:"reason"`
+	IsBot          bool      `json:"is_bot"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// CleanUsername normalizes a Telegram username by trimming whitespace, leading '@', and converting to lowercase.
+func CleanUsername(u string) string {
+	u = strings.TrimSpace(u)
+	u = strings.TrimPrefix(u, "@")
+	return strings.ToLower(u)
+}
+
+// AddBannedUsername adds or updates a username in the ban list.
+func (d *DB) AddBannedUsername(username string, userID int64, bannedByUserID int64, chatID int64, reason string, isBot bool) error {
+	uname := CleanUsername(username)
+	if uname == "" {
+		return errors.New("empty username")
+	}
+	now := time.Now()
+	_, err := d.Exec(`
+		INSERT INTO banned_usernames (username, user_id, banned_by_user_id, chat_id, reason, is_bot, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(username) DO UPDATE SET
+			user_id = CASE WHEN excluded.user_id != 0 THEN excluded.user_id ELSE banned_usernames.user_id END,
+			banned_by_user_id = CASE WHEN excluded.banned_by_user_id != 0 THEN excluded.banned_by_user_id ELSE banned_usernames.banned_by_user_id END,
+			chat_id = CASE WHEN excluded.chat_id != 0 THEN excluded.chat_id ELSE banned_usernames.chat_id END,
+			reason = CASE WHEN excluded.reason != '' THEN excluded.reason ELSE banned_usernames.reason END,
+			is_bot = excluded.is_bot,
+			updated_at = excluded.updated_at
+	`, uname, userID, bannedByUserID, chatID, reason, isBot, now, now)
+	return err
+}
+
+// IsUsernameBanned checks whether a username is listed in banned_usernames or marked banned in users.
+func (d *DB) IsUsernameBanned(username string) (bool, *BannedUsernameRecord, error) {
+	uname := CleanUsername(username)
+	if uname == "" {
+		return false, nil, nil
+	}
+	var rec BannedUsernameRecord
+	err := d.QueryRow(`
+		SELECT id, username, user_id, banned_by_user_id, chat_id, reason, is_bot, created_at, updated_at
+		FROM banned_usernames
+		WHERE username = ? COLLATE NOCASE
+	`, uname).Scan(&rec.ID, &rec.Username, &rec.UserID, &rec.BannedByUserID, &rec.ChatID, &rec.Reason, &rec.IsBot, &rec.CreatedAt, &rec.UpdatedAt)
+	if err == nil {
+		return true, &rec, nil
+	}
+	if err != sql.ErrNoRows {
+		return false, nil, err
+	}
+
+	// Also check if user exists in users table and is_banned == 1
+	var u User
+	err = d.QueryRow(`
+		SELECT user_id, username, is_banned, is_bot, created_at, updated_at
+		FROM users
+		WHERE username = ? COLLATE NOCASE AND is_banned = 1
+	`, uname).Scan(&u.UserID, &u.Username, &u.IsBanned, &u.IsBot, &u.CreatedAt, &u.UpdatedAt)
+	if err == nil {
+		return true, &BannedUsernameRecord{
+			Username:  u.Username,
+			UserID:    u.UserID,
+			Reason:    "Banned user in database",
+			IsBot:     u.IsBot,
+			CreatedAt: u.CreatedAt,
+			UpdatedAt: u.UpdatedAt,
+		}, nil
+	}
+	if err != sql.ErrNoRows {
+		return false, nil, err
+	}
+
+	return false, nil, nil
+}
+
+// GetBannedUsernames returns all records in banned_usernames ordered by created_at DESC.
+func (d *DB) GetBannedUsernames() ([]*BannedUsernameRecord, error) {
+	rows, err := d.Query(`
+		SELECT id, username, user_id, banned_by_user_id, chat_id, reason, is_bot, created_at, updated_at
+		FROM banned_usernames
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []*BannedUsernameRecord
+	for rows.Next() {
+		var rec BannedUsernameRecord
+		if err := rows.Scan(&rec.ID, &rec.Username, &rec.UserID, &rec.BannedByUserID, &rec.ChatID, &rec.Reason, &rec.IsBot, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, err
+		}
+		records = append(records, &rec)
+	}
+	return records, rows.Err()
+}
+
+// GetBannedUsername returns a single banned username record by username, or nil if not found.
+func (d *DB) GetBannedUsername(username string) (*BannedUsernameRecord, error) {
+	uname := CleanUsername(username)
+	if uname == "" {
+		return nil, nil
+	}
+	var rec BannedUsernameRecord
+	err := d.QueryRow(`
+		SELECT id, username, user_id, banned_by_user_id, chat_id, reason, is_bot, created_at, updated_at
+		FROM banned_usernames
+		WHERE username = ? COLLATE NOCASE
+	`, uname).Scan(&rec.ID, &rec.Username, &rec.UserID, &rec.BannedByUserID, &rec.ChatID, &rec.Reason, &rec.IsBot, &rec.CreatedAt, &rec.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// UpdateBannedUsernameUserID updates the Telegram user ID for a banned username record once known.
+func (d *DB) UpdateBannedUsernameUserID(username string, userID int64) error {
+	uname := CleanUsername(username)
+	if uname == "" || userID == 0 {
+		return nil
+	}
+	now := time.Now()
+	_, err := d.Exec(`
+		UPDATE banned_usernames
+		SET user_id = ?, updated_at = ?
+		WHERE username = ? COLLATE NOCASE
+	`, userID, now, uname)
+	return err
+}
+
+// RemoveBannedUsername removes a username from banned_usernames.
+func (d *DB) RemoveBannedUsername(username string) error {
+	uname := CleanUsername(username)
+	if uname == "" {
+		return nil
+	}
+	_, err := d.Exec(`DELETE FROM banned_usernames WHERE username = ? COLLATE NOCASE`, uname)
+	return err
+}
+
+// backfillBannedBotMentions parses historical messages from banned users containing bot mentions
+// and automatically populates banned_usernames so they are pre-banned on join.
+func (d *DB) backfillBannedBotMentions() error {
+	rows, err := d.Query(`
+		SELECT m.user_id, m.chat_id, m.text, u.username
+		FROM messages m
+		JOIN users u ON m.user_id = u.user_id
+		WHERE u.is_banned = 1 AND m.text LIKE '%bot%'
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type mentionItem struct {
+		userID   int64
+		chatID   int64
+		text     string
+		username string
+	}
+	var items []mentionItem
+	for rows.Next() {
+		var it mentionItem
+		if err := rows.Scan(&it.userID, &it.chatID, &it.text, &it.username); err == nil {
+			items = append(items, it)
+		}
+	}
+
+	botRe := regexp.MustCompile(`(?i)@([a-zA-Z0-9_]{3,32}bot)\b`)
+	for _, it := range items {
+		matches := botRe.FindAllStringSubmatch(it.text, -1)
+		for _, m := range matches {
+			if len(m) > 1 {
+				botUname := m[1]
+				_ = d.AddBannedUsername(botUname, 0, it.userID, it.chatID, fmt.Sprintf("Mentioned by banned user %d (@%s)", it.userID, it.username), true)
+			}
+		}
+	}
+	return nil
+}
+
 func (d *DB) SetUserAdmin(userID int64, isAdmin bool) error {
 	now := time.Now()
 	_, err := d.Exec(`UPDATE users SET is_admin = ?, updated_at = ? WHERE user_id = ?`, isAdmin, now, userID)
@@ -1124,14 +1419,23 @@ func (d *DB) SaveMessage(msg *Message) error {
 		}
 	}
 	_, err := d.Exec(`
-		INSERT INTO messages (chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (
+			chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json,
+			is_forward, forward_from_chat_id, forward_from_msg_id, forward_from_user_id, forward_sender_name
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id, message_id) DO UPDATE SET
 			text = excluded.text,
 			has_media = excluded.has_media,
 			has_links = excluded.has_links,
-			sticker_json = excluded.sticker_json
-	`, msg.ChatID, msg.MessageID, msg.UserID, msg.Text, msg.HasMedia, msg.HasLinks, msg.CreatedAt, stickerJSON)
+			sticker_json = excluded.sticker_json,
+			is_forward = excluded.is_forward,
+			forward_from_chat_id = excluded.forward_from_chat_id,
+			forward_from_msg_id = excluded.forward_from_msg_id,
+			forward_from_user_id = excluded.forward_from_user_id,
+			forward_sender_name = excluded.forward_sender_name
+	`, msg.ChatID, msg.MessageID, msg.UserID, msg.Text, msg.HasMedia, msg.HasLinks, msg.CreatedAt, stickerJSON,
+		msg.IsForward, msg.ForwardFromChatID, msg.ForwardFromMsgID, msg.ForwardFromUserID, msg.ForwardSenderName)
 	return err
 }
 
@@ -1143,7 +1447,8 @@ func (d *DB) GetUserMessageCount(userID int64) (int, error) {
 
 func (d *DB) GetRecentUserMessages(userID int64, limit int) ([]Message, error) {
 	rows, err := d.Query(`
-		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json
+		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json,
+		       is_forward, forward_from_chat_id, forward_from_msg_id, forward_from_user_id, forward_sender_name
 		FROM messages WHERE user_id = ?
 		ORDER BY created_at DESC LIMIT ?
 	`, userID, limit)
@@ -1156,7 +1461,8 @@ func (d *DB) GetRecentUserMessages(userID int64, limit int) ([]Message, error) {
 	for rows.Next() {
 		var m Message
 		var stickerJSON string
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON,
+			&m.IsForward, &m.ForwardFromChatID, &m.ForwardFromMsgID, &m.ForwardFromUserID, &m.ForwardSenderName); err != nil {
 			return nil, err
 		}
 		if stickerJSON != "" {
@@ -1173,7 +1479,8 @@ func (d *DB) GetRecentUserMessages(userID int64, limit int) ([]Message, error) {
 // GetAllUserMessages retrieves all messages sent by a user, ordered newest to oldest.
 func (d *DB) GetAllUserMessages(userID int64) ([]Message, error) {
 	rows, err := d.Query(`
-		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json
+		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json,
+		       is_forward, forward_from_chat_id, forward_from_msg_id, forward_from_user_id, forward_sender_name
 		FROM messages WHERE user_id = ?
 		ORDER BY created_at DESC
 	`, userID)
@@ -1186,7 +1493,8 @@ func (d *DB) GetAllUserMessages(userID int64) ([]Message, error) {
 	for rows.Next() {
 		var m Message
 		var stickerJSON string
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON,
+			&m.IsForward, &m.ForwardFromChatID, &m.ForwardFromMsgID, &m.ForwardFromUserID, &m.ForwardSenderName); err != nil {
 			return nil, err
 		}
 		if stickerJSON != "" {
@@ -1205,9 +1513,11 @@ func (d *DB) GetMessage(chatID int64, messageID int) (*Message, error) {
 	var m Message
 	var stickerJSON string
 	err := d.QueryRow(`
-		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json
+		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json,
+		       is_forward, forward_from_chat_id, forward_from_msg_id, forward_from_user_id, forward_sender_name
 		FROM messages WHERE chat_id = ? AND message_id = ?
-	`, chatID, messageID).Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON)
+	`, chatID, messageID).Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON,
+		&m.IsForward, &m.ForwardFromChatID, &m.ForwardFromMsgID, &m.ForwardFromUserID, &m.ForwardSenderName)
 	if err != nil {
 		return nil, err
 	}
@@ -1424,6 +1734,97 @@ func (d *DB) PruneUserPostHistory(maxPostsPerUser int) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// User Invites Methods
+
+func (d *DB) RecordUserInvite(inviterUserID, invitedUserID, chatID int64) error {
+	if inviterUserID == 0 || invitedUserID == 0 || inviterUserID == invitedUserID {
+		return nil
+	}
+	_, err := d.Exec(`
+		INSERT INTO user_invites (inviter_user_id, invited_user_id, chat_id, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(inviter_user_id, invited_user_id, chat_id) DO UPDATE SET
+			created_at = excluded.created_at
+	`, inviterUserID, invitedUserID, chatID, time.Now())
+	return err
+}
+
+func (d *DB) GetInvitedUserIDs(inviterUserID int64) ([]int64, error) {
+	rows, err := d.Query(`SELECT DISTINCT invited_user_id FROM user_invites WHERE inviter_user_id = ?`, inviterUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+func (d *DB) GetInviterUserIDs(invitedUserID int64) ([]int64, error) {
+	rows, err := d.Query(`SELECT DISTINCT inviter_user_id FROM user_invites WHERE invited_user_id = ?`, invitedUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// GetRecursiveAssociatedUserIDs returns all user IDs associated with rootUserID through the invite graph
+// (including invited users/bots, inviters, and sibling invitees).
+func (d *DB) GetRecursiveAssociatedUserIDs(rootUserID int64) ([]int64, error) {
+	if rootUserID == 0 {
+		return nil, nil
+	}
+	visited := make(map[int64]bool)
+	queue := []int64{rootUserID}
+	visited[rootUserID] = true
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+
+		invitees, err := d.GetInvitedUserIDs(curr)
+		if err == nil {
+			for _, id := range invitees {
+				if id != 0 && !visited[id] {
+					visited[id] = true
+					queue = append(queue, id)
+				}
+			}
+		}
+
+		inviters, err := d.GetInviterUserIDs(curr)
+		if err == nil {
+			for _, id := range inviters {
+				if id != 0 && !visited[id] {
+					visited[id] = true
+					queue = append(queue, id)
+				}
+			}
+		}
+	}
+
+	result := make([]int64, 0, len(visited))
+	for id := range visited {
+		result = append(result, id)
+	}
+	return result, nil
 }
 
 // Stats
@@ -2664,6 +3065,41 @@ func (d *DB) GetUserDirectoryReport(superAdminID int64) ([]UserReportItem, []Use
 		}
 	}
 
+	// Include pre-banned bot usernames awaiting join
+	bannedRecs, err := d.GetBannedUsernames()
+	if err == nil {
+		for _, bRec := range bannedRecs {
+			if bRec.UserID != 0 && userMap[bRec.UserID] != nil {
+				continue
+			}
+			bannedBy := "System / Detector"
+			if bRec.BannedByUserID != 0 {
+				if inviter, ok := userMap[bRec.BannedByUserID]; ok && inviter != nil {
+					bannedBy = inviter.DisplayName()
+				} else {
+					bannedBy = fmt.Sprintf("User %d", bRec.BannedByUserID)
+				}
+			}
+			botItem := UserReportItem{
+				UserID:       bRec.UserID,
+				Username:     bRec.Username,
+				FirstName:    "[Pre-banned Bot]",
+				LastName:     "",
+				Reputation:   0,
+				IsBanned:     true,
+				IsTriggerBan: true,
+				TriggerName:  "new_user_mention",
+				BanType:      "Automated Trigger (Pre-ban)",
+				BanReason:    bRec.Reason,
+				BannedByName: bannedBy,
+				BannedAt:     &bRec.CreatedAt,
+				CreatedAt:    bRec.CreatedAt,
+				UpdatedAt:    bRec.UpdatedAt,
+			}
+			badUsers = append(badUsers, botItem)
+		}
+	}
+
 	// Sort good users: SuperAdmin first, then BotAdmin, then Reputation DESC, MessageCount DESC, CreatedAt DESC
 	sort.SliceStable(goodUsers, func(i, j int) bool {
 		if goodUsers[i].IsSuperAdmin != goodUsers[j].IsSuperAdmin {
@@ -2867,8 +3303,12 @@ func GenerateUserDirectoryMarkdown(goodUsers []UserReportItem, badUsers []UserRe
 						triggerDate = u.UpdatedAt.Format("2006-01-02 15:04")
 					}
 
-					sb.WriteString(fmt.Sprintf("| %d | `%d` | %s | %s | `%s` | %s | %d | %d | %d | %s |\n",
-						i+1, u.UserID, username, escapeMarkdownCell(name), escapeMarkdownCell(trigger), escapeMarkdownCell(reason),
+					idStr := fmt.Sprintf("`%d`", u.UserID)
+					if u.UserID == 0 {
+						idStr = "`awaiting join`"
+					}
+					sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | `%s` | %s | %d | %d | %d | %s |\n",
+						i+1, idStr, username, escapeMarkdownCell(name), escapeMarkdownCell(trigger), escapeMarkdownCell(reason),
 						u.Reputation, u.WarnCount, u.MessageCount, triggerDate))
 				}
 				sb.WriteString("\n")

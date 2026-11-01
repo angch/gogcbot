@@ -15,6 +15,7 @@ import (
 
 var (
 	shieldyUsernameRegex = regexp.MustCompile(`@([a-zA-Z0-9_]{4,})`)
+	botMentionRegex      = regexp.MustCompile(`(?i)@([a-zA-Z0-9_]{3,32}bot)\b`)
 	// webLinkRegex aggressively matches URLs with schemes, Telegram links, or common domain formats
 	webLinkRegex = regexp.MustCompile(`(?i)(?:https?://|ftp://|tg://|t\.me/|telegram\.me/|telegram\.dog/|www\.)\S+|(?:[a-zA-Z0-9-]+\.)+(?:com|org|net|xyz|top|io|cc|co|info|site|online|vip|app|link|club|shop|live|dev|biz|pro|space|store|trade|click|fun|icu|work|tech|chat|news|tv|ru|cn|asia)\b(?:/[^\s]*)?|(?:[a-zA-Z0-9-]+\.)+me/[^\s]*`)
 )
@@ -106,11 +107,32 @@ func (b *Bot) handleChatMemberUpdate(cmu *tgbotapi.ChatMemberUpdated) {
 		return
 	}
 
+	// Check if username is in ban list
+	if cmu.NewChatMember.User.UserName != "" {
+		if banned, rec, _ := b.db.IsUsernameBanned(cmu.NewChatMember.User.UserName); banned {
+			log.Printf("[ChatMemberUpdate Alert] User/Bot %d (@%s) matches ban list (%s). Enforcing autoban...",
+				userID, cmu.NewChatMember.User.UserName, rec.Reason)
+			_ = b.db.SetUserBanned(userID, true)
+			_ = b.db.UpdateBannedUsernameUserID(cmu.NewChatMember.User.UserName, userID)
+			if rec != nil && rec.BannedByUserID != 0 {
+				_ = b.db.RecordUserInvite(rec.BannedByUserID, userID, chatID)
+			}
+			b.DeleteShieldyMessagesForUser(chatID, userID, cmu.NewChatMember.User.UserName)
+			_ = b.BanUserAcrossAllGroups(userID, chatID)
+			return
+		}
+	}
+
 	// Detect if user joined the group / channel
 	isJoin := (cmu.NewChatMember.Status == "member" || cmu.NewChatMember.Status == "restricted") &&
 		(cmu.OldChatMember.Status != "member" && cmu.OldChatMember.Status != "administrator" && cmu.OldChatMember.Status != "creator")
 	if isJoin {
-		b.handleUserJoined(cmu.Chat.ID, cmu.Chat.Title, cmu.Chat.Type, cmu.NewChatMember.User, nil)
+		inviterID := int64(0)
+		if cmu.From.ID != 0 && cmu.From.ID != cmu.NewChatMember.User.ID {
+			inviterID = cmu.From.ID
+			_ = b.db.RecordUserInvite(inviterID, cmu.NewChatMember.User.ID, cmu.Chat.ID)
+		}
+		b.handleUserJoined(cmu.Chat.ID, cmu.Chat.Title, cmu.Chat.Type, cmu.NewChatMember.User, nil, inviterID)
 	}
 }
 
@@ -133,8 +155,28 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Ignore messages from other bots themselves
-	if msg.From.IsBot {
+	// Check for joining members in service messages
+	if len(msg.NewChatMembers) > 0 {
+		inviterID := int64(0)
+		if msg.From != nil {
+			inviterID = msg.From.ID
+		}
+		for _, newMember := range msg.NewChatMembers {
+			nm := newMember
+			if inviterID != 0 && inviterID != nm.ID {
+				_ = b.db.RecordUserInvite(inviterID, nm.ID, chat.ID)
+			}
+			b.handleUserJoined(chat.ID, chat.Title, chat.Type, &nm, msg, inviterID)
+		}
+	}
+
+	// Ignore service messages (user joined, left, pinned message, etc.) from being saved as user chat messages
+	if isServiceMessage(msg) {
+		return
+	}
+
+	// Ignore messages from our own bot
+	if b.botUser.ID != 0 && msg.From.ID == b.botUser.ID {
 		return
 	}
 
@@ -149,6 +191,28 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	if err != nil {
 		log.Printf("[Bot] Error getting/creating user %d: %v", msg.From.ID, err)
 		return
+	}
+
+	if msg.From.IsBot {
+		user.IsBot = true
+		_ = b.db.UpdateUserIsBot(user.UserID, true)
+	}
+
+	// Associate any mentioned bot usernames with the sender
+	botMentions := botMentionRegex.FindAllStringSubmatch(text, -1)
+	for _, m := range botMentions {
+		if len(m) > 1 {
+			botName := m[1]
+			if u, err := b.db.GetUserByUsername(botName); err == nil && u != nil && u.UserID != user.UserID {
+				_ = b.db.RecordUserInvite(user.UserID, u.UserID, chat.ID)
+				if user.IsBanned {
+					_ = b.BanUserAcrossAllGroups(u.UserID, chat.ID)
+					_ = b.db.AddBannedUsername(botName, u.UserID, user.UserID, chat.ID, fmt.Sprintf("Invited by banned user %d (@%s)", user.UserID, user.Username), true)
+				}
+			} else if user.IsBanned {
+				_ = b.db.AddBannedUsername(botName, 0, user.UserID, chat.ID, fmt.Sprintf("Invited by banned user %d (@%s)", user.UserID, user.Username), true)
+			}
+		}
 	}
 
 	// Ensure SuperAdmin, Group Admins, and Bot Admins have initial 100 reputation score
@@ -191,23 +255,17 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		} else {
 			log.Printf("[Banned User Message] User %d is marked banned. Deleting message %d and purging recent posts in chat %d", user.UserID, msg.MessageID, chat.ID)
 			_ = b.DeleteGroupMessage(chat.ID, msg.MessageID)
+			if msg.ForwardFromMessageID > 0 {
+				targetChat := chat.ID
+				if msg.ForwardFromChat != nil && msg.ForwardFromChat.ID != 0 {
+					targetChat = msg.ForwardFromChat.ID
+				}
+				_ = b.DeleteGroupMessage(targetChat, msg.ForwardFromMessageID)
+			}
 			b.DeleteRecentMessagesForUser(user.UserID, chat.ID)
-			_ = b.BanUserInGroup(chat.ID, user.UserID)
+			_ = b.BanUserAcrossAllGroups(user.UserID, chat.ID)
 			return
 		}
-	}
-
-	// Check for joining members in service messages
-	if len(msg.NewChatMembers) > 0 {
-		for _, newMember := range msg.NewChatMembers {
-			nm := newMember
-			b.handleUserJoined(chat.ID, chat.Title, chat.Type, &nm, msg)
-		}
-	}
-
-	// Ignore service messages (user joined, left, pinned message, etc.) from being saved as user chat messages
-	if isServiceMessage(msg) {
-		return
 	}
 
 	// Detect links & media
@@ -271,16 +329,41 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			editTag, msg.From.ID, msg.From.UserName, msg.From.FirstName, msg.From.LastName, msg.MessageID, text)
 	}
 
+	isFwd := isForwardedMessage(msg)
+	fwdChatID := int64(0)
+	fwdMsgID := 0
+	fwdUserID := int64(0)
+	fwdSenderName := ""
+	if isFwd {
+		if msg.ForwardFromChat != nil {
+			fwdChatID = msg.ForwardFromChat.ID
+		}
+		if msg.ForwardFromMessageID != 0 {
+			fwdMsgID = msg.ForwardFromMessageID
+		}
+		if msg.ForwardFrom != nil {
+			fwdUserID = msg.ForwardFrom.ID
+		}
+		if msg.ForwardSenderName != "" {
+			fwdSenderName = msg.ForwardSenderName
+		}
+	}
+
 	// Record message in DB for 7-day log & 50-posts history
 	dbMsg := &db.Message{
-		ChatID:    chat.ID,
-		MessageID: msg.MessageID,
-		UserID:    user.UserID,
-		Text:      text,
-		HasMedia:  hasMedia,
-		HasLinks:  hasLinks,
-		CreatedAt: msg.Time(),
-		Sticker:   stickerInfo,
+		ChatID:            chat.ID,
+		MessageID:         msg.MessageID,
+		UserID:            user.UserID,
+		Text:              text,
+		HasMedia:          hasMedia,
+		HasLinks:          hasLinks,
+		CreatedAt:         msg.Time(),
+		Sticker:           stickerInfo,
+		IsForward:         isFwd,
+		ForwardFromChatID: fwdChatID,
+		ForwardFromMsgID:  fwdMsgID,
+		ForwardFromUserID: fwdUserID,
+		ForwardSenderName: fwdSenderName,
 	}
 	if err := b.db.SaveMessage(dbMsg); err != nil {
 		log.Printf("[Bot] Error saving message: %v", err)
@@ -364,6 +447,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		}
 
 		isSec, isMember, pNames := b.CheckSecondaryGroupAndPrimaryMembership(chat.ID, user.UserID)
+		mentionedEntities := b.ExtractMentionedEntities(msg, text, chat.ID)
 
 		tCtx := &detector.TriggerContext{
 			Message:                dbMsg,
@@ -387,6 +471,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			IsSecondaryGroup:       isSec,
 			IsMemberOfPrimaryGroup: isMember,
 			PrimaryGroupNames:      pNames,
+			MentionedEntities:      mentionedEntities,
 		}
 
 		if b.Detector() != nil {
@@ -399,6 +484,27 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 					log.Printf("[Bot Trigger] Rule '%s' fired for user %d in chat %d: %s", res.TriggerID, user.UserID, chat.ID, res.Reason)
 					b.ExecuteActions(chat.ID, user, dbMsg, res.Actions)
 					for _, act := range res.Actions {
+						if act.Type == detector.ActionBanUser {
+							for _, m := range tCtx.MentionedEntities {
+								if !m.IsInGroup && m.IsBot && m.Username != "" {
+									_ = b.db.AddBannedUsername(m.Username, m.UserID, user.UserID, chat.ID, fmt.Sprintf("Mentioned by banned user %d (@%s)", user.UserID, user.Username), true)
+									log.Printf("[Bot BanList] Listed mentioned bot @%s in ban list (invited by user %d in chat %d)", m.Username, user.UserID, chat.ID)
+									_ = b.db.AddKnownBadUser(&db.KnownBadUser{
+										Username:  m.Username,
+										Pattern:   "@" + m.Username,
+										BanReason: fmt.Sprintf("Mentioned by banned user %d (@%s)", user.UserID, user.Username),
+										Source:    "mentioned_bot",
+									})
+									if m.UserID != 0 {
+										_ = b.db.RecordUserInvite(user.UserID, m.UserID, chat.ID)
+										_ = b.db.SetUserBanned(m.UserID, true)
+										_ = b.BanUserAcrossAllGroups(m.UserID, chat.ID)
+									}
+								} else if m.UserID != 0 {
+									_ = b.db.RecordUserInvite(user.UserID, m.UserID, chat.ID)
+								}
+							}
+						}
 						if act.Type == detector.ActionDeleteMessage || act.Type == detector.ActionBanUser || act.Type == detector.ActionFlagMessage {
 							actionTaken = true
 						}
@@ -677,13 +783,13 @@ func isForwardedMessage(msg *tgbotapi.Message) bool {
 	if msg == nil {
 		return false
 	}
-	return msg.ForwardFrom != nil || msg.ForwardFromChat != nil || msg.ForwardSenderName != "" || msg.ForwardDate != 0
+	return msg.ForwardFrom != nil || msg.ForwardFromChat != nil || msg.ForwardSenderName != "" || msg.ForwardDate != 0 || msg.ForwardFromMessageID != 0
 }
 
 // handleUserJoined handles a user joining a group, supergroup, or channel.
 // It logs their join event, retrieves their profile and bio, checks against spam bio filters, and bans/kicks them if matched.
-func (b *Bot) handleUserJoined(chatID int64, groupTitle, chatType string, tgUser *tgbotapi.User, joinMsg *tgbotapi.Message) {
-	if tgUser == nil || tgUser.IsBot || tgUser.ID == 0 || (b.botUser.ID != 0 && tgUser.ID == b.botUser.ID) {
+func (b *Bot) handleUserJoined(chatID int64, groupTitle, chatType string, tgUser *tgbotapi.User, joinMsg *tgbotapi.Message, inviterUserID ...int64) {
+	if tgUser == nil || tgUser.ID == 0 || (b.botUser.ID != 0 && tgUser.ID == b.botUser.ID) {
 		return
 	}
 
@@ -704,8 +810,8 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle, chatType string, tgUser
 		}
 	}
 
-	log.Printf("[User Joined] User %d (@%s - %s %s) joined chat %d (%s, type: %s)",
-		tgUser.ID, tgUser.UserName, tgUser.FirstName, tgUser.LastName, chatID, groupTitle, chatType)
+	log.Printf("[User Joined] User/Bot %d (@%s - %s %s, bot: %t) joined chat %d (%s, type: %s)",
+		tgUser.ID, tgUser.UserName, tgUser.FirstName, tgUser.LastName, tgUser.IsBot, chatID, groupTitle, chatType)
 
 	// Get or create user record in DB
 	user, _, err := b.db.GetOrCreateUser(
@@ -718,6 +824,63 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle, chatType string, tgUser
 	if err != nil {
 		log.Printf("[Bot] Error getting/creating user %d on join: %v", tgUser.ID, err)
 		return
+	}
+
+	if tgUser.IsBot {
+		user.IsBot = true
+		_ = b.db.UpdateUserIsBot(user.UserID, true)
+	}
+
+	// Check if the user who invited this member is already banned
+	var inviterID int64
+	if len(inviterUserID) > 0 {
+		inviterID = inviterUserID[0]
+	}
+	if inviterID != 0 {
+		inviter, err := b.db.GetUserByID(inviterID)
+		if err == nil && inviter != nil && inviter.IsBanned {
+			log.Printf("[Bot] User/Bot %d joined chat %d invited by banned user %d (@%s). Enforcing recursive ban...",
+				tgUser.ID, chatID, inviter.UserID, inviter.Username)
+			if joinMsg != nil {
+				_ = b.DeleteGroupMessage(chatID, joinMsg.MessageID)
+			}
+			b.DeleteShieldyMessagesForUser(chatID, user.UserID, user.Username)
+			_ = b.BanUserAcrossAllGroups(user.UserID, chatID)
+			return
+		}
+	}
+
+	// Check if this username is in the ban list
+	if tgUser.UserName != "" {
+		if banned, rec, _ := b.db.IsUsernameBanned(tgUser.UserName); banned {
+			reasonStr := "pre-banned in ban list"
+			if rec != nil && rec.Reason != "" {
+				reasonStr = rec.Reason
+			}
+			log.Printf("[Bot Autoban] Joining user/bot %d (@%s) matches ban list (%s). Autobanning...",
+				tgUser.ID, tgUser.UserName, reasonStr)
+			_ = b.db.SetUserBanned(tgUser.ID, true)
+			_ = b.db.UpdateBannedUsernameUserID(tgUser.UserName, tgUser.ID)
+			if rec != nil && rec.BannedByUserID != 0 {
+				_ = b.db.RecordUserInvite(rec.BannedByUserID, tgUser.ID, chatID)
+			}
+			user.IsBanned = true
+			if joinMsg != nil {
+				_ = b.DeleteGroupMessage(chatID, joinMsg.MessageID)
+			}
+			b.DeleteShieldyMessagesForUser(chatID, user.UserID, user.Username)
+			_ = b.BanUserAcrossAllGroups(user.UserID, chatID)
+			_, _ = b.db.AdjustReputation(user.UserID, -50, fmt.Sprintf("Autoban: in ban list (%s)", reasonStr), 0)
+			alertMsg := &db.Message{
+				ChatID:    chatID,
+				MessageID: 0,
+				UserID:    user.UserID,
+				Text:      fmt.Sprintf("[Autoban]: Joining user/bot @%s matched ban list (%s)", tgUser.UserName, reasonStr),
+				CreatedAt: time.Now(),
+			}
+			_ = b.SendTriggerBanAlert(chatID, user, alertMsg, fmt.Sprintf("Autoban: in ban list (%s)", reasonStr))
+			return
+		}
 	}
 
 	// Log the join event to SQLite
@@ -744,7 +907,7 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle, chatType string, tgUser
 			_ = b.DeleteGroupMessage(chatID, joinMsg.MessageID)
 		}
 		b.DeleteShieldyMessagesForUser(chatID, user.UserID, user.Username)
-		_ = b.BanUserInGroup(chatID, user.UserID)
+		_ = b.BanUserAcrossAllGroups(user.UserID, chatID)
 		return
 	}
 
@@ -883,4 +1046,131 @@ func (b *Bot) ExtractTargetUserFromShieldyMessage(msg *tgbotapi.Message) (target
 	}
 
 	return targetUserID, targetUsername
+}
+
+// ExtractMentionedEntities extracts all users/bots mentioned in a message and determines whether
+// each is already an active member of the specified chat.
+func (b *Bot) ExtractMentionedEntities(msg *tgbotapi.Message, text string, chatID int64) []detector.MentionedEntity {
+	if msg == nil {
+		return nil
+	}
+
+	candidates := make(map[string]detector.MentionedEntity)
+
+	// Helper to add candidate by username
+	addUsername := func(username string, isBot bool, userID int64) {
+		clean := db.CleanUsername(username)
+		if clean == "" {
+			return
+		}
+		if _, exists := candidates[clean]; !exists {
+			candidates[clean] = detector.MentionedEntity{
+				Username: clean,
+				UserID:   userID,
+				IsBot:    isBot || strings.HasSuffix(clean, "bot"),
+			}
+		} else if userID != 0 {
+			ent := candidates[clean]
+			ent.UserID = userID
+			if isBot {
+				ent.IsBot = true
+			}
+			candidates[clean] = ent
+		}
+	}
+
+	// 1. Scan message entities
+	for _, entities := range [][]tgbotapi.MessageEntity{msg.Entities, msg.CaptionEntities} {
+		for _, e := range entities {
+			if e.Type == "mention" {
+				runes := []rune(text)
+				if e.Offset >= 0 && e.Offset+e.Length <= len(runes) {
+					mentionStr := string(runes[e.Offset : e.Offset+e.Length])
+					addUsername(mentionStr, false, 0)
+				}
+			} else if e.Type == "text_mention" && e.User != nil {
+				if e.User.UserName != "" {
+					addUsername(e.User.UserName, e.User.IsBot, e.User.ID)
+				} else {
+					key := fmt.Sprintf("id:%d", e.User.ID)
+					candidates[key] = detector.MentionedEntity{
+						Username: "",
+						UserID:   e.User.ID,
+						IsBot:    e.User.IsBot,
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Scan plain text for @username regex
+	re := regexp.MustCompile(`(?i)@([a-zA-Z0-9_]{3,32})\b`)
+	matches := re.FindAllStringSubmatch(text, -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			addUsername(m[1], false, 0)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	var results []detector.MentionedEntity
+	for _, ent := range candidates {
+		// Filter out our own bot
+		if b.botUser.ID != 0 && ent.UserID == b.botUser.ID {
+			continue
+		}
+		if b.botUser.UserName != "" && strings.EqualFold(ent.Username, b.botUser.UserName) {
+			continue
+		}
+
+		// Filter out the sender
+		if msg.From != nil {
+			if ent.UserID != 0 && ent.UserID == msg.From.ID {
+				continue
+			}
+			if msg.From.UserName != "" && strings.EqualFold(ent.Username, msg.From.UserName) {
+				continue
+			}
+		}
+
+		// Determine if entity is currently in the group
+		inGroup := false
+		if chatID < 0 { // Monitored group or supergroup
+			if ent.UserID != 0 {
+				cm, err := b.GetChatMember(tgbotapi.GetChatMemberConfig{
+					ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+						ChatID: chatID,
+						UserID: ent.UserID,
+					},
+				})
+				if err == nil && (cm.Status == "member" || cm.Status == "administrator" || cm.Status == "creator" || cm.Status == "restricted") {
+					inGroup = true
+				}
+			} else if ent.Username != "" {
+				if u, err := b.db.GetUserByUsername(ent.Username); err == nil && u != nil {
+					ent.UserID = u.UserID
+					if u.IsBot {
+						ent.IsBot = true
+					}
+					cm, err := b.GetChatMember(tgbotapi.GetChatMemberConfig{
+						ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+							ChatID: chatID,
+							UserID: u.UserID,
+						},
+					})
+					if err == nil && (cm.Status == "member" || cm.Status == "administrator" || cm.Status == "creator" || cm.Status == "restricted") {
+						inGroup = true
+					}
+				}
+			}
+		}
+
+		ent.IsInGroup = inGroup
+		results = append(results, ent)
+	}
+
+	return results
 }

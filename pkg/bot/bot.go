@@ -838,6 +838,10 @@ func BuildDetector(cfg *config.Config, database *db.DB) *detector.Detector {
 		det.RegisterTrigger(detector.NewCustomStickerTrigger(cfg.Detector.CustomSticker))
 	}
 
+	if cfg.Detector.NewUserMention.Enabled {
+		det.RegisterTrigger(detector.NewNewUserMentionTrigger(cfg.Detector.NewUserMention))
+	}
+
 	return det
 }
 

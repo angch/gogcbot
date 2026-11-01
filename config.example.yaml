@@ -19,6 +19,9 @@ auto_flag:
     - "fast money"
     - "airdrop"
     - "free rolls"
+    - "最牛逼项目"
+    - "收歀码"
+    - "kbnk5mswa"
 
 reputation:
   default_initial: 0
@@ -90,6 +93,12 @@ detector:
   custom_sticker:
     enabled: true
     max_reputation: 5
+    rep_penalty: 50
+  new_user_mention:
+    enabled: true
+    min_high_user_id: 0
+    max_reputation: 5
+    max_user_posts: 5
     rep_penalty: 50
 
 shieldy:

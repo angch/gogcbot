@@ -133,25 +133,39 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
     - **Bypassed Rep/Admin Simulation**: When validating rules via `gogcbot validate-rules` or pre-scan checks, tests simulated profiles with reputation (`rep = 0`), admin status (`admin = false`), and banned status (`banned = false`) across join, rescan, message snippet, and secondary group contexts to ensure 0 false-positive regressions.
     - **Automated Kickban Button**: Automated rule hits do NOT automatically pollute known datasets. Instead, kickban alerts in the moderation group include an interactive `🏷️ Add to Known Bad` inline button allowing human moderators to deliberately add confirmed spam patterns to the Known Bad dataset.
 
-18. **Comprehensive Post-Ban Message Purge & Forwarded Message Tracking**:
+18. **Comprehensive Post-Ban Message Purge, Forwarded Message Tracking & Recursive Bot Bans**:
     - **All Recent User Messages Purged on Ban**: When a user is banned (via moderation card button `mod:ban`, automated trigger kickban `ActionBanUser`, `/ban` command, or `/rescan`), the bot retrieves all recent recorded messages for that user from the SQLite database (`DeleteRecentMessagesForUser`) and explicitly calls `DeleteGroupMessage` across the monitored groups.
-    - **Forwarded Message Deletion**: Overcomes Telegram's server-side limitation where `banChatMember(revoke_messages=true)` fails to delete messages forwarded from another bot, channel, or user.
-    - **Forwarded Message Tracking & Extraction**: Automatically detects and extracts forward metadata (`ForwardFrom`, `ForwardFromChat`, `ForwardSenderName`, `ForwardDate`) in `extractMessageText` and `handleMessage`, ensuring forwarded messages are always saved to `messages` history and attributed to the forwarding user.
+    - **Recursive Ban for Users & Invited Bots**: Tracks invite chains (`user_invites` table). When a user or bot is banned, the ban recursively cascades across the invite network: banning the user, all bots they invited, and any sibling bots, while safeguarding administrators and whitelisted accounts.
+    - **Forwarded Message Deletion & Original Message Purge**: Overcomes Telegram's server-side limitation where `banChatMember(revoke_messages=true)` fails to delete messages forwarded from another bot, channel, or user. In addition, when forwarded messages are purged, the original messages forwarded by the bots/users (`forward_from_chat_id`, `forward_from_msg_id`) are also explicitly deleted across monitored groups and channels.
+    - **Bot Message & Forward Processing**: Messages and forwarded messages from bots are fully processed and moderated (rather than discarded), ensuring spam payloads and CJK/link triggers fire immediately when a bot posts. Newly invited bots from banned users are immediately banned upon join.
+    - **Forwarded Message Tracking & Extraction**: Automatically detects and extracts forward metadata (`ForwardFrom`, `ForwardFromChat`, `ForwardSenderName`, `ForwardDate`, `ForwardFromMessageID`) in `extractMessageText` and `handleMessage`, ensuring forwarded messages are always saved to `messages` history and attributed to the forwarding user/bot.
     - **Idempotent & Non-Fatal Delete Error Handling**: Uses `isNonFatalDeleteError` to treat `message to delete not found`, `message can't be deleted`, and `message_id_invalid` as non-fatal successes, ensuring reliable execution even if messages were already removed manually.
 
-
-18. **Explicit Dry-Run Gating for Mass Actions**:
+19. **Explicit Dry-Run Gating for Mass Actions**:
     - **Enforced Dry-Run Prior to Live Bans**: Mass-banning rescan operations (`gogcbot rescan-users --live` or `/rescan live`) are strictly gated by the `dryrun_gates` table. A live run is refused unless a successful dry-run preview and rule pre-check were completed within the past 1 hour.
     - Consumes the gate immediately after live execution to ensure fresh dry-run verification for every subsequent batch action.
 
-19. **Robust Cross-Group Moderation Execution**:
+20. **Robust Cross-Group Moderation Execution**:
     - **Private Chat Safety**: Automatically filters out private 1-on-1 chat IDs (`chatID >= 0`) during multi-group bans, unbans, mutes, and ban audits so direct-message admin commands never fail on non-group chats.
     - **Non-Fatal Absence Handling**: Safely handles Telegram `USER_NOT_PARTICIPANT` / `USERNOTPARTICIPANT` responses as non-fatal successes when kicking or auditing users who are already absent from the chat.
 
-20. **Moderation Review Deduplication & Edited Message Guards**:
+21. **Moderation Review Deduplication & Edited Message Guards**:
     - **Single Active Flag per Message**: Enforces pending moderation review uniqueness per message `(group_chat_id, group_message_id)` via DB-level checks (`HasPendingFlag`) and `ErrAlreadyFlagged`. When a message is already pending review in the Private Moderation Group, subsequent edits or duplicate updates cannot generate duplicate review cards.
     - **Edited Message Safety**: Restricts AutoFlag low-reputation threshold checks (`user.Reputation <= FlagThreshold`) and unflagged daily activity bumps to initial messages (`msg.EditDate == 0`). Edits on pending or approved messages will not re-trigger moderation alerts or double-award approval reputation, while content-based additions (new web links or blocked keywords) in edits continue to be intercepted.
     - **Multi-Trigger Pipeline Deduplication**: Trigger rules executing `ActionFlagMessage` mark moderation action as taken to prevent pipeline fall-through from double-flagging with AutoFlag rules.
+
+22. **New Unknown User Non-Member Mention & Bot Pre-Ban Engine (`new_user_mention`)**:
+    - **Automatic Kickban on Non-Member Mentions**: If a new, low-reputation user (`reputation <= 5`, `posts <= 5`) sends any message mentioning users or bots who are not already active members of the group chat, the bot immediately:
+      - Deletes the offending message (`ActionDeleteMessage`).
+      - Issues a permanent ban across all monitored channels and supergroups (`ActionBanUser`).
+      - Deducts reputation points (`-50`).
+      - Dispatches a trigger ban alert to the Private Moderation Group.
+    - **Pre-Ban List Registration & Autoban on Join**: Any bots mentioned by the new unknown user that are not currently in the group are immediately recorded into the persistent `banned_usernames` ban list and associated in `user_invites` as invited by the banned sender. When any of the pre-banned bots later join any monitored group:
+      - The join service message and Shieldy challenges are purged immediately.
+      - The bot executes an immediate autoban across all monitored groups.
+      - The bot applies a -50 reputation penalty and alerts the moderation channel.
+    - **Historical Backfill**: Automatically scans historical messages from banned accounts to backfill previously mentioned bots into `banned_usernames`.
+    - **Exemptions**: Bot administrators, whitelisted users (`reputation >= 100`), and established group members with reputation exceeding the threshold are strictly exempt. Mentions of the moderation bot itself or existing group members/admins do not trigger the rule.
 
 ---
 

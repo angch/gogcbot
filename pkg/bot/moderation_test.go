@@ -4020,3 +4020,373 @@ func TestExtractMessageText_ForwardedMessages(t *testing.T) {
 		t.Errorf("expected original text, got %q", text5)
 	}
 }
+
+func TestRecursiveBan_UserAndInvitedBotsWithForwardedMessage(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	groupChatID := int64(-1001072966891)
+	channelChatID := int64(-100999888)
+	_ = b.db.SaveGroup(groupChatID, "Golang Malaysia", "supergroup")
+
+	userElizabethID := int64(1923826166)
+	bot1ID := int64(888111001)
+	bot2ID := int64(888111002)
+
+	// Elizabeth joins
+	joinMsg := &tgbotapi.Message{
+		MessageID: 67069,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: userElizabethID, UserName: "wcsud6im", FirstName: "Elizabeth"},
+		NewChatMembers: []tgbotapi.User{
+			{ID: bot1ID, UserName: "e7w8h_a2bot", FirstName: "Bot1", IsBot: true},
+			{ID: bot2ID, UserName: "foiwmcl_bot", FirstName: "Bot2", IsBot: true},
+		},
+	}
+	b.handleMessage(joinMsg)
+
+	// Verify invites recorded in DB
+	invitees, err := b.db.GetInvitedUserIDs(userElizabethID)
+	if err != nil {
+		t.Fatalf("failed to query invited user IDs: %v", err)
+	}
+	if len(invitees) != 2 {
+		t.Fatalf("expected 2 invited bots for Elizabeth, got %d (%v)", len(invitees), invitees)
+	}
+
+	// Elizabeth sent a message tagging them
+	msgTag := &tgbotapi.Message{
+		MessageID: 67070,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: userElizabethID, UserName: "wcsud6im", FirstName: "Elizabeth"},
+		Text:      "@e7w8h_a2bot @foiwmcl_bot",
+		Date:      int(time.Now().Unix()),
+	}
+	b.handleMessage(msgTag)
+
+	var (
+		deletedGroupMsg67071  bool
+		deletedGroupMsg67070  bool
+		deletedOriginalFwdMsg bool
+	)
+	b.SetMockRequestFunc(func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+		if del, ok := c.(tgbotapi.DeleteMessageConfig); ok {
+			if del.ChatID == groupChatID && del.MessageID == 67071 {
+				deletedGroupMsg67071 = true
+			}
+			if del.ChatID == groupChatID && del.MessageID == 67070 {
+				deletedGroupMsg67070 = true
+			}
+			if del.ChatID == channelChatID && del.MessageID == 12345 {
+				deletedOriginalFwdMsg = true
+			}
+		}
+		return &tgbotapi.APIResponse{Ok: true}, nil
+	})
+
+	// Bot 1 posts a forwarded spam message
+	spamText := `🔥🔥🔥2026最牛逼项目💥💥💥
+
+💠💠有一台手机能拍照就可做🏐🏐
+
+💠有执行力的来，稳定赚钱包不按头
+
+📣📣📣拍商家收歀码照片  80/张，
+
+具体了解： @kbnk5mswa`
+
+	fwdMsg := &tgbotapi.Message{
+		MessageID: 67071,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: bot1ID, UserName: "e7w8h_a2bot", FirstName: "Bot1", IsBot: true},
+		Text:      spamText,
+		Date:      int(time.Now().Unix()),
+		ForwardFromChat: &tgbotapi.Chat{
+			ID:    channelChatID,
+			Title: "Spam Channel",
+		},
+		ForwardFromMessageID: 12345,
+		ForwardDate:          int(time.Now().Unix()),
+	}
+	b.handleMessage(fwdMsg)
+
+	// 1. Verify Bot 1 was banned by CJK spam trigger
+	bot1User, err := b.db.GetUserByID(bot1ID)
+	if err != nil || bot1User == nil || !bot1User.IsBanned {
+		t.Fatalf("expected Bot 1 (%d) to be banned, got user=%+v, err=%v", bot1ID, bot1User, err)
+	}
+
+	// 2. Verify Elizabeth (inviter) was recursively banned!
+	elizabethUser, err := b.db.GetUserByID(userElizabethID)
+	if err != nil || elizabethUser == nil || !elizabethUser.IsBanned {
+		t.Fatalf("expected Elizabeth (%d) to be recursively banned, got user=%+v, err=%v", userElizabethID, elizabethUser, err)
+	}
+
+	// 3. Verify Bot 2 (sibling invitee) was recursively banned!
+	bot2User, err := b.db.GetUserByID(bot2ID)
+	if err != nil || bot2User == nil || !bot2User.IsBanned {
+		t.Fatalf("expected Bot 2 (%d) to be recursively banned, got user=%+v, err=%v", bot2ID, bot2User, err)
+	}
+
+	// 4. Verify API calls made:
+	// - Message 67071 (forwarded spam) was deleted
+	// - Message 67070 (tag message) was deleted
+	// - Original message 12345 in channel -100999888 was deleted!
+
+	if !deletedGroupMsg67071 {
+		t.Errorf("expected forwarded spam message 67071 to be deleted in group %d", groupChatID)
+	}
+	if !deletedGroupMsg67070 {
+		t.Errorf("expected inviter message 67070 to be deleted in group %d", groupChatID)
+	}
+	if !deletedOriginalFwdMsg {
+		t.Errorf("expected original message 12345 in spam channel %d to be deleted", channelChatID)
+	}
+}
+
+func TestRecursiveBan_AdminProtected(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	groupChatID := int64(-1001072966891)
+	_ = b.db.SaveGroup(groupChatID, "Golang Malaysia", "supergroup")
+
+	adminUserID := int64(10104269) // SuperAdmin
+	b.cfg.SuperAdminID = adminUserID
+	botID := int64(888111999)
+
+	// Admin invites a bot
+	joinMsg := &tgbotapi.Message{
+		MessageID: 100,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: adminUserID, UserName: "angch", FirstName: "Admin"},
+		NewChatMembers: []tgbotapi.User{
+			{ID: botID, UserName: "helper_bot", FirstName: "Helper", IsBot: true},
+		},
+	}
+	b.handleMessage(joinMsg)
+
+	// Explicitly ban the bot
+	err := b.BanUserAcrossAllGroups(botID, groupChatID)
+	if err != nil {
+		t.Fatalf("unexpected error banning bot: %v", err)
+	}
+
+	// Bot is banned
+	botUser, _ := b.db.GetUserByID(botID)
+	if botUser == nil || !botUser.IsBanned {
+		t.Fatalf("expected bot %d to be banned", botID)
+	}
+
+	// Admin user must NOT be banned!
+	adminUser, _ := b.db.GetUserByID(adminUserID)
+	if adminUser != nil && adminUser.IsBanned {
+		t.Fatalf("superadmin user %d was erroneously banned by recursive ban", adminUserID)
+	}
+
+	// Also test a regular group admin / whitelisted user (reputation = 100)
+	groupAdminID := int64(777111222)
+	botID2 := int64(888111998)
+	_, _, _ = b.db.GetOrCreateUser(groupAdminID, "group_admin", "Group", "Admin", 100)
+
+	joinMsg2 := &tgbotapi.Message{
+		MessageID: 101,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: groupAdminID, UserName: "group_admin", FirstName: "GroupAdmin"},
+		NewChatMembers: []tgbotapi.User{
+			{ID: botID2, UserName: "helper_bot2", FirstName: "Helper2", IsBot: true},
+		},
+	}
+	b.handleMessage(joinMsg2)
+
+	_ = b.BanUserAcrossAllGroups(botID2, groupChatID)
+
+	botUser2, _ := b.db.GetUserByID(botID2)
+	if botUser2 == nil || !botUser2.IsBanned {
+		t.Fatalf("expected bot2 %d to be banned", botID2)
+	}
+
+	groupAdminUser, _ := b.db.GetUserByID(groupAdminID)
+	if groupAdminUser != nil && groupAdminUser.IsBanned {
+		t.Fatalf("group admin user %d was erroneously banned by recursive ban", groupAdminID)
+	}
+}
+
+func TestInvitedBot_ImmediatelyBannedIfInviterAlreadyBanned(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	groupChatID := int64(-1001072966891)
+	_ = b.db.SaveGroup(groupChatID, "Golang Malaysia", "supergroup")
+
+	bannedUserID := int64(999888111)
+	_, _, _ = b.db.GetOrCreateUser(bannedUserID, "bad_spammer", "Bad", "Spammer", 0)
+	_ = b.db.SetUserBanned(bannedUserID, true)
+
+	botID := int64(777666555)
+
+	// Banned user invites a new bot
+	joinMsg := &tgbotapi.Message{
+		MessageID: 200,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: bannedUserID, UserName: "bad_spammer", FirstName: "Bad"},
+		NewChatMembers: []tgbotapi.User{
+			{ID: botID, UserName: "spam_bot", FirstName: "SpamBot", IsBot: true},
+		},
+	}
+	b.handleMessage(joinMsg)
+
+	// The bot should be immediately banned
+	botUser, err := b.db.GetUserByID(botID)
+	if err != nil || botUser == nil || !botUser.IsBanned {
+		t.Fatalf("expected invited bot %d to be immediately banned upon join by banned user %d", botID, bannedUserID)
+	}
+}
+
+func TestNewUser_MentionsNonMemberBots_BansSenderAndPreBansBotsAndAutobansOnJoin(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	groupChatID := int64(-1001072966891)
+	_ = b.db.SaveGroup(groupChatID, "Golang Malaysia", "supergroup")
+
+	// Mock GetChatMember:
+	// The mentioned bots and non-members return error (not in chat)
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{Status: "left"}, errors.New("user not found")
+	})
+
+	newUserID := int64(1079944493)
+	msgText := "@kc15_cghbot @jjskh_o5bot @w_7fnotwbot"
+
+	msg := &tgbotapi.Message{
+		MessageID: 67139,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: newUserID, UserName: "dfgh1566z", FirstName: "Timothy"},
+		Text:      msgText,
+		Entities: []tgbotapi.MessageEntity{
+			{Type: "mention", Offset: 0, Length: 12},
+			{Type: "mention", Offset: 13, Length: 13},
+			{Type: "mention", Offset: 27, Length: 13},
+		},
+	}
+
+	b.handleMessage(msg)
+
+	// 1. Verify sender 1079944493 is automatically banned
+	sender, err := b.db.GetUserByID(newUserID)
+	if err != nil || sender == nil {
+		t.Fatalf("failed to query sender: %v", err)
+	}
+	if !sender.IsBanned {
+		t.Errorf("expected sender 1079944493 to be banned, got is_banned=%v", sender.IsBanned)
+	}
+	if sender.Reputation > -50 {
+		t.Errorf("expected sender reputation to be penalized <= -50, got %d", sender.Reputation)
+	}
+
+	// 2. Verify mentioned bots are in the ban list
+	for _, botName := range []string{"kc15_cghbot", "jjskh_o5bot", "w_7fnotwbot"} {
+		isBanned, rec, err := b.db.IsUsernameBanned(botName)
+		if err != nil || !isBanned || rec == nil {
+			t.Errorf("expected bot %s to be listed in ban list, got banned=%v, rec=%+v, err=%v", botName, isBanned, rec, err)
+		}
+	}
+
+	// 3. Verify that when one of the bots joins later, it is immediately autobanned
+	botUID := int64(987654321)
+	joinMsg := &tgbotapi.Message{
+		MessageID: 67140,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: botUID, UserName: "kc15_cghbot", FirstName: "KC Bot", IsBot: true},
+		NewChatMembers: []tgbotapi.User{
+			{ID: botUID, UserName: "kc15_cghbot", FirstName: "KC Bot", IsBot: true},
+		},
+	}
+	b.handleMessage(joinMsg)
+
+	joiningBot, err := b.db.GetUserByID(botUID)
+	if err != nil || joiningBot == nil {
+		t.Fatalf("failed to query joining bot: %v", err)
+	}
+	if !joiningBot.IsBanned {
+		t.Errorf("expected joining bot kc15_cghbot to be immediately autobanned on join, got is_banned=%v", joiningBot.IsBanned)
+	}
+}
+
+func TestNewUser_MentionsExistingGroupMember_NotBanned(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	groupChatID := int64(-1001072966891)
+	_ = b.db.SaveGroup(groupChatID, "Golang Malaysia", "supergroup")
+
+	existingMemberID := int64(12345678)
+	_, _, _ = b.db.GetOrCreateUser(existingMemberID, "active_member", "Active", "Member", 50)
+
+	// Mock GetChatMember: active_member is an active member
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		if config.UserID == existingMemberID {
+			return tgbotapi.ChatMember{Status: "member"}, nil
+		}
+		return tgbotapi.ChatMember{Status: "left"}, errors.New("not found")
+	})
+
+	newUserID := int64(222333444)
+	msg := &tgbotapi.Message{
+		MessageID: 501,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: newUserID, UserName: "friendly_newbie", FirstName: "Friendly"},
+		Text:      "Hello @active_member, nice to meet you!",
+		Entities: []tgbotapi.MessageEntity{
+			{Type: "mention", Offset: 6, Length: 14},
+		},
+	}
+
+	b.handleMessage(msg)
+
+	sender, err := b.db.GetUserByID(newUserID)
+	if err != nil || sender == nil {
+		t.Fatalf("failed to query sender: %v", err)
+	}
+	if sender.IsBanned {
+		t.Errorf("expected friendly newbie mentioning existing member to NOT be banned")
+	}
+}
+
+func TestEstablishedUser_MentionsNonMemberBot_NotBanned(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	groupChatID := int64(-1001072966891)
+	_ = b.db.SaveGroup(groupChatID, "Golang Malaysia", "supergroup")
+
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{Status: "left"}, errors.New("not found")
+	})
+
+	establishedUserID := int64(888777666)
+	u, _, _ := b.db.GetOrCreateUser(establishedUserID, "veteran", "Vet", "Eran", 50)
+	u.Reputation = 50
+	_ = b.db.SetReputation(establishedUserID, 50, "Established member", establishedUserID)
+
+	msg := &tgbotapi.Message{
+		MessageID: 502,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: establishedUserID, UserName: "veteran", FirstName: "Vet"},
+		Text:      "Check out @some_cool_bot for formatting code",
+		Entities: []tgbotapi.MessageEntity{
+			{Type: "mention", Offset: 10, Length: 14},
+		},
+	}
+
+	b.handleMessage(msg)
+
+	sender, err := b.db.GetUserByID(establishedUserID)
+	if err != nil || sender == nil {
+		t.Fatalf("failed to query sender: %v", err)
+	}
+	if sender.IsBanned {
+		t.Errorf("expected established user with rep 50 to NOT be banned")
+	}
+}

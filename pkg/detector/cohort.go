@@ -41,7 +41,7 @@ func MatchesCohort(ctx *TriggerContext, minHighUserID int64, maxReputation, maxU
 	if minHighID <= 0 {
 		minHighID = 1000000000
 	}
-	if ctx.User.UserID < minHighID {
+	if ctx.User.UserID < minHighID && !ctx.User.IsBot {
 		return false
 	}
 

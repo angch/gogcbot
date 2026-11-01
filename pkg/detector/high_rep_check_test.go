@@ -96,6 +96,12 @@ func buildStandardTestDetector() *Detector {
 			MaxReputation: 5,
 			RepPenalty:    50,
 		}),
+		NewNewUserMentionTrigger(NewUserMentionTriggerConfig{
+			Enabled:       true,
+			MaxReputation: 5,
+			MaxUserPosts:  5,
+			RepPenalty:    50,
+		}),
 	)
 }
 

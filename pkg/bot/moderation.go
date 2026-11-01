@@ -205,6 +205,7 @@ func isNonFatalDeleteError(err error) bool {
 // and deletes them from Telegram across monitored groups and the specified chats.
 // This ensures forwarded messages (which Telegram's server-side banChatMember revoke_messages=true often misses)
 // and all historical posts by the banned user are explicitly purged.
+// In addition, if a message was forwarded from a chat/channel, the original message is also deleted.
 func (b *Bot) DeleteRecentMessagesForUser(userID int64, currentChatID ...int64) {
 	msgs, err := b.db.GetRecentUserMessages(userID, 50)
 	if err != nil {
@@ -218,7 +219,34 @@ func (b *Bot) DeleteRecentMessagesForUser(userID int64, currentChatID ...int64) 
 				log.Printf("[Bot Error] Failed to delete message %d in chat %d for banned user %d: %v", m.MessageID, m.ChatID, userID, err)
 			}
 		}
+		// If this was a forwarded message, also delete the original message that was forwarded
+		if m.ForwardFromMsgID > 0 {
+			origChatID := m.ForwardFromChatID
+			if origChatID == 0 {
+				origChatID = m.ChatID
+			}
+			if origChatID < 0 {
+				log.Printf("[Bot Action] Deleting original message %d in chat %d that was forwarded by banned user %d", m.ForwardFromMsgID, origChatID, userID)
+				if err := b.DeleteGroupMessage(origChatID, m.ForwardFromMsgID); err != nil {
+					log.Printf("[Bot Error] Non-fatal: failed to delete original forwarded message %d in chat %d: %v", m.ForwardFromMsgID, origChatID, err)
+				}
+			}
+		}
 	}
+}
+
+// isProtectedUser checks if a user is an admin or whitelisted user exempt from recursive bans.
+func (b *Bot) isProtectedUser(userID int64) bool {
+	if b.cfg.SuperAdminID != 0 && userID == b.cfg.SuperAdminID {
+		return true
+	}
+	user, err := b.db.GetUserByID(userID)
+	if err == nil && user != nil {
+		if user.IsAdmin || user.Reputation >= 100 {
+			return true
+		}
+	}
+	return false
 }
 
 func isNonFatalBanError(err error) bool {
@@ -293,9 +321,11 @@ func (b *Bot) BanUserInGroup(chatID int64, userID int64) error {
 func (b *Bot) BanUserAcrossAllGroups(userID int64, currentChatID ...int64) error {
 	var errs []string
 
-	// Explicitly delete all recent messages from this user in DB across groups
-	// This ensures forwarded messages (which Telegram's server-side revoke_messages misses) are purged.
-	b.DeleteRecentMessagesForUser(userID, currentChatID...)
+	// Recursively collect all associated users and invited bots
+	associatedIDs, err := b.db.GetRecursiveAssociatedUserIDs(userID)
+	if err != nil || len(associatedIDs) == 0 {
+		associatedIDs = []int64{userID}
+	}
 
 	chatIDs := make(map[int64]bool)
 	for _, cid := range currentChatID {
@@ -313,21 +343,41 @@ func (b *Bot) BanUserAcrossAllGroups(userID int64, currentChatID ...int64) error
 		}
 	}
 
-	for cid := range chatIDs {
-		b.DeleteShieldyMessagesForUser(cid, userID, "")
-		if err := b.BanUserInGroup(cid, userID); err != nil {
-			log.Printf("[Bot] Failed to ban user %d in chat %d: %v", userID, cid, err)
-			errs = append(errs, fmt.Sprintf("chat %d (%v)", cid, err))
-		} else {
-			delay := time.Duration(b.cfg.Shieldy.RecheckDelayMinutes) * time.Minute
-			if delay <= 0 {
-				delay = 6 * time.Minute
-			}
-			b.ScheduleBanRecheck(cid, userID, delay)
+	for _, targetID := range associatedIDs {
+		// Never ban SuperAdmin
+		if b.cfg.SuperAdminID != 0 && targetID == b.cfg.SuperAdminID {
+			log.Printf("[Bot] Skipping ban for SuperAdmin %d", targetID)
+			continue
 		}
-	}
+		// For recursively associated accounts (other than the root target being explicitly banned),
+		// do not ban protected/admin/whitelisted users
+		if targetID != userID && b.isProtectedUser(targetID) {
+			log.Printf("[Bot] Skipping recursive ban for protected user %d", targetID)
+			continue
+		}
 
-	_ = b.db.SetUserBanned(userID, true)
+		log.Printf("[Bot] Recursively banning user/bot %d across all groups (triggered by user %d)", targetID, userID)
+
+		// Explicitly delete all recent messages from this user/bot in DB across groups
+		// This also purges forwarded messages and the original messages they forwarded
+		b.DeleteRecentMessagesForUser(targetID, currentChatID...)
+
+		for cid := range chatIDs {
+			b.DeleteShieldyMessagesForUser(cid, targetID, "")
+			if err := b.BanUserInGroup(cid, targetID); err != nil {
+				log.Printf("[Bot] Failed to ban user/bot %d in chat %d: %v", targetID, cid, err)
+				errs = append(errs, fmt.Sprintf("chat %d (%v)", cid, err))
+			} else {
+				delay := time.Duration(b.cfg.Shieldy.RecheckDelayMinutes) * time.Minute
+				if delay <= 0 {
+					delay = 6 * time.Minute
+				}
+				b.ScheduleBanRecheck(cid, targetID, delay)
+			}
+		}
+
+		_ = b.db.SetUserBanned(targetID, true)
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("failed to kick in some chats: %s", strings.Join(errs, "; "))
@@ -645,6 +695,16 @@ func (b *Bot) ExecuteActions(chatID int64, user *db.User, msg *db.Message, actio
 				log.Printf("[Bot Action] Deleting message %d in chat %d (reason: %s)", messageID, chatID, act.Reason)
 				if err := b.DeleteGroupMessage(chatID, messageID); err != nil {
 					log.Printf("[Bot Action Error] Failed to delete message %d in chat %d: %v", messageID, chatID, err)
+				}
+			}
+			if msg != nil && msg.ForwardFromMsgID > 0 {
+				origChat := msg.ForwardFromChatID
+				if origChat == 0 {
+					origChat = chatID
+				}
+				if origChat < 0 {
+					log.Printf("[Bot Action] Deleting original message %d in chat %d that was forwarded", msg.ForwardFromMsgID, origChat)
+					_ = b.DeleteGroupMessage(origChat, msg.ForwardFromMsgID)
 				}
 			}
 
