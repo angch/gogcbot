@@ -1158,6 +1158,65 @@ func (d *DB) IsUsernameBanned(username string) (bool, *BannedUsernameRecord, err
 	return false, nil, nil
 }
 
+// IsUserIDBannedInBanList checks whether a user ID is listed in banned_usernames.
+func (d *DB) IsUserIDBannedInBanList(userID int64) (bool, *BannedUsernameRecord, error) {
+	if userID == 0 {
+		return false, nil, nil
+	}
+	var rec BannedUsernameRecord
+	err := d.QueryRow(`
+		SELECT id, username, user_id, banned_by_user_id, chat_id, reason, is_bot, created_at, updated_at
+		FROM banned_usernames
+		WHERE user_id = ?
+		LIMIT 1
+	`, userID).Scan(&rec.ID, &rec.Username, &rec.UserID, &rec.BannedByUserID, &rec.ChatID, &rec.Reason, &rec.IsBot, &rec.CreatedAt, &rec.UpdatedAt)
+	if err == nil {
+		return true, &rec, nil
+	}
+	if err != sql.ErrNoRows {
+		return false, nil, err
+	}
+	return false, nil, nil
+}
+
+// IsInvitedByBannedUser checks if this user was invited by a user who is currently banned in DB.
+func (d *DB) IsInvitedByBannedUser(userID int64) (bool, int64, error) {
+	if userID == 0 {
+		return false, 0, nil
+	}
+	var inviterID int64
+	err := d.QueryRow(`
+		SELECT ui.inviter_user_id
+		FROM user_invites ui
+		JOIN users u ON ui.inviter_user_id = u.user_id
+		WHERE ui.invited_user_id = ? AND u.is_banned = 1
+		LIMIT 1
+	`, userID).Scan(&inviterID)
+	if err == nil {
+		return true, inviterID, nil
+	}
+	if err != sql.ErrNoRows {
+		return false, 0, err
+	}
+
+	// Also check banned_usernames table
+	err = d.QueryRow(`
+		SELECT bu.banned_by_user_id
+		FROM banned_usernames bu
+		JOIN users u ON bu.banned_by_user_id = u.user_id
+		WHERE bu.user_id = ? AND u.is_banned = 1
+		LIMIT 1
+	`, userID).Scan(&inviterID)
+	if err == nil {
+		return true, inviterID, nil
+	}
+	if err != sql.ErrNoRows {
+		return false, 0, err
+	}
+
+	return false, 0, nil
+}
+
 // GetBannedUsernames returns all records in banned_usernames ordered by created_at DESC.
 func (d *DB) GetBannedUsernames() ([]*BannedUsernameRecord, error) {
 	rows, err := d.Query(`
@@ -1461,10 +1520,12 @@ func (d *DB) GetRecentUserMessages(userID int64, limit int) ([]Message, error) {
 	for rows.Next() {
 		var m Message
 		var stickerJSON string
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON,
+		var rawCreatedAt any
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &rawCreatedAt, &stickerJSON,
 			&m.IsForward, &m.ForwardFromChatID, &m.ForwardFromMsgID, &m.ForwardFromUserID, &m.ForwardSenderName); err != nil {
 			return nil, err
 		}
+		m.CreatedAt = parseTime(rawCreatedAt)
 		if stickerJSON != "" {
 			var st StickerInfo
 			if err := json.Unmarshal([]byte(stickerJSON), &st); err == nil {
@@ -1493,10 +1554,12 @@ func (d *DB) GetAllUserMessages(userID int64) ([]Message, error) {
 	for rows.Next() {
 		var m Message
 		var stickerJSON string
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON,
+		var rawCreatedAt any
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &rawCreatedAt, &stickerJSON,
 			&m.IsForward, &m.ForwardFromChatID, &m.ForwardFromMsgID, &m.ForwardFromUserID, &m.ForwardSenderName); err != nil {
 			return nil, err
 		}
+		m.CreatedAt = parseTime(rawCreatedAt)
 		if stickerJSON != "" {
 			var st StickerInfo
 			if err := json.Unmarshal([]byte(stickerJSON), &st); err == nil {
@@ -1512,15 +1575,17 @@ func (d *DB) GetAllUserMessages(userID int64) ([]Message, error) {
 func (d *DB) GetMessage(chatID int64, messageID int) (*Message, error) {
 	var m Message
 	var stickerJSON string
+	var rawCreatedAt any
 	err := d.QueryRow(`
 		SELECT id, chat_id, message_id, user_id, text, has_media, has_links, created_at, sticker_json,
 		       is_forward, forward_from_chat_id, forward_from_msg_id, forward_from_user_id, forward_sender_name
 		FROM messages WHERE chat_id = ? AND message_id = ?
-	`, chatID, messageID).Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &m.CreatedAt, &stickerJSON,
+	`, chatID, messageID).Scan(&m.ID, &m.ChatID, &m.MessageID, &m.UserID, &m.Text, &m.HasMedia, &m.HasLinks, &rawCreatedAt, &stickerJSON,
 		&m.IsForward, &m.ForwardFromChatID, &m.ForwardFromMsgID, &m.ForwardFromUserID, &m.ForwardSenderName)
 	if err != nil {
 		return nil, err
 	}
+	m.CreatedAt = parseTime(rawCreatedAt)
 	if stickerJSON != "" {
 		var st StickerInfo
 		if err := json.Unmarshal([]byte(stickerJSON), &st); err == nil {
@@ -1817,6 +1882,30 @@ func (d *DB) GetRecursiveAssociatedUserIDs(rootUserID int64) ([]int64, error) {
 					queue = append(queue, id)
 				}
 			}
+		}
+
+		// Also check banned_usernames for users invited by curr
+		if bRows, err := d.Query(`SELECT user_id FROM banned_usernames WHERE banned_by_user_id = ? AND user_id != 0`, curr); err == nil {
+			for bRows.Next() {
+				var id int64
+				if err := bRows.Scan(&id); err == nil && id != 0 && !visited[id] {
+					visited[id] = true
+					queue = append(queue, id)
+				}
+			}
+			bRows.Close()
+		}
+
+		// And check if curr was invited in banned_usernames
+		if bRows2, err := d.Query(`SELECT banned_by_user_id FROM banned_usernames WHERE user_id = ? AND banned_by_user_id != 0`, curr); err == nil {
+			for bRows2.Next() {
+				var id int64
+				if err := bRows2.Scan(&id); err == nil && id != 0 && !visited[id] {
+					visited[id] = true
+					queue = append(queue, id)
+				}
+			}
+			bRows2.Close()
 		}
 	}
 

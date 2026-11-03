@@ -107,20 +107,41 @@ func (b *Bot) handleChatMemberUpdate(cmu *tgbotapi.ChatMemberUpdated) {
 		return
 	}
 
-	// Check if username is in ban list
+	// Check if username or user ID is in ban list, or invited by a banned user
+	bannedUsername := false
+	var banRec *db.BannedUsernameRecord
 	if cmu.NewChatMember.User.UserName != "" {
-		if banned, rec, _ := b.db.IsUsernameBanned(cmu.NewChatMember.User.UserName); banned {
-			log.Printf("[ChatMemberUpdate Alert] User/Bot %d (@%s) matches ban list (%s). Enforcing autoban...",
-				userID, cmu.NewChatMember.User.UserName, rec.Reason)
-			_ = b.db.SetUserBanned(userID, true)
-			_ = b.db.UpdateBannedUsernameUserID(cmu.NewChatMember.User.UserName, userID)
-			if rec != nil && rec.BannedByUserID != 0 {
-				_ = b.db.RecordUserInvite(rec.BannedByUserID, userID, chatID)
-			}
-			b.DeleteShieldyMessagesForUser(chatID, userID, cmu.NewChatMember.User.UserName)
-			_ = b.BanUserAcrossAllGroups(userID, chatID)
-			return
+		bannedUsername, banRec, _ = b.db.IsUsernameBanned(cmu.NewChatMember.User.UserName)
+	}
+	bannedUserID, banRecID, _ := b.db.IsUserIDBannedInBanList(userID)
+	invitedByBanned, inviterID, _ := b.db.IsInvitedByBannedUser(userID)
+
+	if bannedUsername || bannedUserID || invitedByBanned {
+		reason := "matches ban list"
+		inviterRef := int64(0)
+		if banRec != nil && banRec.Reason != "" {
+			reason = banRec.Reason
+			inviterRef = banRec.BannedByUserID
+		} else if banRecID != nil && banRecID.Reason != "" {
+			reason = banRecID.Reason
+			inviterRef = banRecID.BannedByUserID
+		} else if invitedByBanned {
+			reason = fmt.Sprintf("Invited by banned user %d", inviterID)
+			inviterRef = inviterID
 		}
+		log.Printf("[ChatMemberUpdate Alert] User/Bot %d (@%s) matches ban list (%s). Enforcing autoban...",
+			userID, cmu.NewChatMember.User.UserName, reason)
+		_ = b.db.SetUserBanned(userID, true)
+		if cmu.NewChatMember.User.UserName != "" {
+			_ = b.db.UpdateBannedUsernameUserID(cmu.NewChatMember.User.UserName, userID)
+		}
+		if inviterRef != 0 {
+			_ = b.db.RecordUserInvite(inviterRef, userID, chatID)
+		}
+		b.DeleteShieldyMessagesForUser(chatID, userID, cmu.NewChatMember.User.UserName)
+		_ = b.BanUserAcrossAllGroups(userID, chatID)
+		_ = b.db.SetReputation(userID, -50, fmt.Sprintf("Autoban: in ban list (%s)", reason), 0)
+		return
 	}
 
 	// Detect if user joined the group / channel
@@ -232,28 +253,38 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			_ = b.db.SetUserBanned(user.UserID, false)
 			user.IsBanned = false
 		}
-	} else if user.IsBanned && (chat.IsGroup() || chat.IsSuperGroup()) {
-		// Self-healing check: verify if Telegram user status is active (unbanned by an admin in Telegram UI)
-		cm, err := b.GetChatMember(tgbotapi.GetChatMemberConfig{
-			ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
-				ChatID: chat.ID,
-				UserID: user.UserID,
-			},
-		})
-		if err == nil && (cm.Status == "member" || cm.Status == "administrator" || cm.Status == "creator" || cm.Status == "left") {
-			log.Printf("[Bot] User %d (@%s) was unbanned in Telegram UI (status: %s). Self-healing: clearing DB ban flag.", user.UserID, user.Username, cm.Status)
-			_ = b.db.SetUserBanned(user.UserID, false)
-			user.IsBanned = false
-			if user.Reputation <= b.cfg.Reputation.FlagThreshold {
-				targetRep := b.cfg.Reputation.FlagThreshold + 10
-				if targetRep < 50 {
-					targetRep = 50
-				}
-				_ = b.db.SetReputation(user.UserID, targetRep, "Unbanned in Telegram UI & reputation restored", user.UserID)
-				user.Reputation = targetRep
+	} else if chat.IsGroup() || chat.IsSuperGroup() {
+		// Check if this user/bot is in ban list (pre-banned bot, spammer invitee, or banned username)
+		bannedUsername, bRec, _ := b.db.IsUsernameBanned(msg.From.UserName)
+		bannedUserID, bRecID, _ := b.db.IsUserIDBannedInBanList(user.UserID)
+		invitedByBanned, inviterID, _ := b.db.IsInvitedByBannedUser(user.UserID)
+
+		if bannedUsername || bannedUserID || invitedByBanned {
+			reasonStr := "pre-banned bot/username in ban list"
+			inviterRefID := int64(0)
+			if bRec != nil && bRec.Reason != "" {
+				reasonStr = bRec.Reason
+				inviterRefID = bRec.BannedByUserID
+			} else if bRecID != nil && bRecID.Reason != "" {
+				reasonStr = bRecID.Reason
+				inviterRefID = bRecID.BannedByUserID
+			} else if invitedByBanned {
+				reasonStr = fmt.Sprintf("Invited by banned user %d", inviterID)
+				inviterRefID = inviterID
 			}
-		} else {
-			log.Printf("[Banned User Message] User %d is marked banned. Deleting message %d and purging recent posts in chat %d", user.UserID, msg.MessageID, chat.ID)
+
+			log.Printf("[Banned User/Bot Message] User/Bot %d (@%s) matches ban list (%s). Deleting message %d and autobanning across groups...",
+				user.UserID, user.Username, reasonStr, msg.MessageID)
+
+			_ = b.db.SetUserBanned(user.UserID, true)
+			if user.Username != "" {
+				_ = b.db.UpdateBannedUsernameUserID(user.Username, user.UserID)
+			}
+			if inviterRefID != 0 {
+				_ = b.db.RecordUserInvite(inviterRefID, user.UserID, chat.ID)
+			}
+			user.IsBanned = true
+
 			_ = b.DeleteGroupMessage(chat.ID, msg.MessageID)
 			if msg.ForwardFromMessageID > 0 {
 				targetChat := chat.ID
@@ -262,9 +293,59 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 				}
 				_ = b.DeleteGroupMessage(targetChat, msg.ForwardFromMessageID)
 			}
+			b.DeleteShieldyMessagesForUser(chat.ID, user.UserID, user.Username)
 			b.DeleteRecentMessagesForUser(user.UserID, chat.ID)
 			_ = b.BanUserAcrossAllGroups(user.UserID, chat.ID)
+			_ = b.db.SetReputation(user.UserID, -50, fmt.Sprintf("Autoban: in ban list (%s)", reasonStr), 0)
+			user.Reputation = -50
+
+			alertMsg := &db.Message{
+				ChatID:    chat.ID,
+				MessageID: msg.MessageID,
+				UserID:    user.UserID,
+				Text:      fmt.Sprintf("[Autoban]: Banned user/bot @%s sent message %d: %q (%s)", user.Username, msg.MessageID, text, reasonStr),
+				CreatedAt: time.Now(),
+			}
+			_ = b.SendTriggerBanAlert(chat.ID, user, alertMsg, fmt.Sprintf("Autoban: in ban list (%s)", reasonStr))
 			return
+		}
+
+		if user.IsBanned {
+			// Self-healing check: verify if Telegram user status is active (unbanned by an admin in Telegram UI)
+			// ONLY valid if status is active member/admin/creator in Telegram. NEVER unban on "left" or error!
+			cm, err := b.GetChatMember(tgbotapi.GetChatMemberConfig{
+				ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+					ChatID: chat.ID,
+					UserID: user.UserID,
+				},
+			})
+			if err == nil && (cm.Status == "member" || cm.Status == "administrator" || cm.Status == "creator") {
+				log.Printf("[Bot] User %d (@%s) was unbanned in Telegram UI (status: %s). Self-healing: clearing DB ban flag.", user.UserID, user.Username, cm.Status)
+				_ = b.db.SetUserBanned(user.UserID, false)
+				user.IsBanned = false
+				if user.Reputation <= b.cfg.Reputation.FlagThreshold {
+					targetRep := b.cfg.Reputation.FlagThreshold + 10
+					if targetRep < 50 {
+						targetRep = 50
+					}
+					_ = b.db.SetReputation(user.UserID, targetRep, "Unbanned in Telegram UI & reputation restored", user.UserID)
+					user.Reputation = targetRep
+				}
+			} else {
+				log.Printf("[Banned User Message] User %d is marked banned. Deleting message %d and purging recent posts in chat %d", user.UserID, msg.MessageID, chat.ID)
+				_ = b.DeleteGroupMessage(chat.ID, msg.MessageID)
+				if msg.ForwardFromMessageID > 0 {
+					targetChat := chat.ID
+					if msg.ForwardFromChat != nil && msg.ForwardFromChat.ID != 0 {
+						targetChat = msg.ForwardFromChat.ID
+					}
+					_ = b.DeleteGroupMessage(targetChat, msg.ForwardFromMessageID)
+				}
+				b.DeleteShieldyMessagesForUser(chat.ID, user.UserID, user.Username)
+				b.DeleteRecentMessagesForUser(user.UserID, chat.ID)
+				_ = b.BanUserAcrossAllGroups(user.UserID, chat.ID)
+				return
+			}
 		}
 	}
 
@@ -485,9 +566,38 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 					b.ExecuteActions(chat.ID, user, dbMsg, res.Actions)
 					for _, act := range res.Actions {
 						if act.Type == detector.ActionBanUser {
+							for _, m := range botMentions {
+								if len(m) > 1 {
+									botName := m[1]
+									botUID := int64(0)
+									if u, err := b.db.GetUserByUsername(botName); err == nil && u != nil && u.UserID != user.UserID {
+										botUID = u.UserID
+									}
+									_ = b.db.AddBannedUsername(botName, botUID, user.UserID, chat.ID, fmt.Sprintf("Mentioned by banned user %d (@%s)", user.UserID, user.Username), true)
+									_ = b.db.AddKnownBadUser(&db.KnownBadUser{
+										Username:  botName,
+										Pattern:   "@" + botName,
+										BanReason: fmt.Sprintf("Mentioned by banned user %d (@%s)", user.UserID, user.Username),
+										Source:    "mentioned_bot",
+									})
+									if botUID != 0 {
+										_ = b.db.RecordUserInvite(user.UserID, botUID, chat.ID)
+										_ = b.db.SetUserBanned(botUID, true)
+										_ = b.BanUserAcrossAllGroups(botUID, chat.ID)
+										b.DeleteRecentMessagesForUser(botUID, chat.ID)
+										b.DeleteShieldyMessagesForUser(chat.ID, botUID, botName)
+									}
+								}
+							}
 							for _, m := range tCtx.MentionedEntities {
-								if !m.IsInGroup && m.IsBot && m.Username != "" {
-									_ = b.db.AddBannedUsername(m.Username, m.UserID, user.UserID, chat.ID, fmt.Sprintf("Mentioned by banned user %d (@%s)", user.UserID, user.Username), true)
+								if m.IsBot && m.Username != "" {
+									botUID := m.UserID
+									if botUID == 0 {
+										if u, err := b.db.GetUserByUsername(m.Username); err == nil && u != nil && u.UserID != 0 {
+											botUID = u.UserID
+										}
+									}
+									_ = b.db.AddBannedUsername(m.Username, botUID, user.UserID, chat.ID, fmt.Sprintf("Mentioned by banned user %d (@%s)", user.UserID, user.Username), true)
 									log.Printf("[Bot BanList] Listed mentioned bot @%s in ban list (invited by user %d in chat %d)", m.Username, user.UserID, chat.ID)
 									_ = b.db.AddKnownBadUser(&db.KnownBadUser{
 										Username:  m.Username,
@@ -495,10 +605,12 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 										BanReason: fmt.Sprintf("Mentioned by banned user %d (@%s)", user.UserID, user.Username),
 										Source:    "mentioned_bot",
 									})
-									if m.UserID != 0 {
-										_ = b.db.RecordUserInvite(user.UserID, m.UserID, chat.ID)
-										_ = b.db.SetUserBanned(m.UserID, true)
-										_ = b.BanUserAcrossAllGroups(m.UserID, chat.ID)
+									if botUID != 0 {
+										_ = b.db.RecordUserInvite(user.UserID, botUID, chat.ID)
+										_ = b.db.SetUserBanned(botUID, true)
+										_ = b.BanUserAcrossAllGroups(botUID, chat.ID)
+										b.DeleteRecentMessagesForUser(botUID, chat.ID)
+										b.DeleteShieldyMessagesForUser(chat.ID, botUID, m.Username)
 									}
 								} else if m.UserID != 0 {
 									_ = b.db.RecordUserInvite(user.UserID, m.UserID, chat.ID)
@@ -850,37 +962,56 @@ func (b *Bot) handleUserJoined(chatID int64, groupTitle, chatType string, tgUser
 		}
 	}
 
-	// Check if this username is in the ban list
+	// Check if this username or user ID is in the ban list, or invited by a banned user
+	bannedUsername := false
+	var banRec *db.BannedUsernameRecord
 	if tgUser.UserName != "" {
-		if banned, rec, _ := b.db.IsUsernameBanned(tgUser.UserName); banned {
-			reasonStr := "pre-banned in ban list"
-			if rec != nil && rec.Reason != "" {
-				reasonStr = rec.Reason
-			}
-			log.Printf("[Bot Autoban] Joining user/bot %d (@%s) matches ban list (%s). Autobanning...",
-				tgUser.ID, tgUser.UserName, reasonStr)
-			_ = b.db.SetUserBanned(tgUser.ID, true)
-			_ = b.db.UpdateBannedUsernameUserID(tgUser.UserName, tgUser.ID)
-			if rec != nil && rec.BannedByUserID != 0 {
-				_ = b.db.RecordUserInvite(rec.BannedByUserID, tgUser.ID, chatID)
-			}
-			user.IsBanned = true
-			if joinMsg != nil {
-				_ = b.DeleteGroupMessage(chatID, joinMsg.MessageID)
-			}
-			b.DeleteShieldyMessagesForUser(chatID, user.UserID, user.Username)
-			_ = b.BanUserAcrossAllGroups(user.UserID, chatID)
-			_, _ = b.db.AdjustReputation(user.UserID, -50, fmt.Sprintf("Autoban: in ban list (%s)", reasonStr), 0)
-			alertMsg := &db.Message{
-				ChatID:    chatID,
-				MessageID: 0,
-				UserID:    user.UserID,
-				Text:      fmt.Sprintf("[Autoban]: Joining user/bot @%s matched ban list (%s)", tgUser.UserName, reasonStr),
-				CreatedAt: time.Now(),
-			}
-			_ = b.SendTriggerBanAlert(chatID, user, alertMsg, fmt.Sprintf("Autoban: in ban list (%s)", reasonStr))
-			return
+		bannedUsername, banRec, _ = b.db.IsUsernameBanned(tgUser.UserName)
+	}
+	bannedUserID, banRecID, _ := b.db.IsUserIDBannedInBanList(user.UserID)
+	invitedByBanned, bannedInviterID, _ := b.db.IsInvitedByBannedUser(user.UserID)
+
+	if bannedUsername || bannedUserID || invitedByBanned {
+		reasonStr := "pre-banned in ban list"
+		inviterRef := int64(0)
+		if banRec != nil && banRec.Reason != "" {
+			reasonStr = banRec.Reason
+			inviterRef = banRec.BannedByUserID
+		} else if banRecID != nil && banRecID.Reason != "" {
+			reasonStr = banRecID.Reason
+			inviterRef = banRecID.BannedByUserID
+		} else if invitedByBanned {
+			reasonStr = fmt.Sprintf("Invited by banned user %d", bannedInviterID)
+			inviterRef = bannedInviterID
 		}
+
+		log.Printf("[Bot Autoban] Joining user/bot %d (@%s) matches ban list (%s). Autobanning...",
+			tgUser.ID, tgUser.UserName, reasonStr)
+		_ = b.db.SetUserBanned(tgUser.ID, true)
+		if tgUser.UserName != "" {
+			_ = b.db.UpdateBannedUsernameUserID(tgUser.UserName, tgUser.ID)
+		}
+		if inviterRef != 0 {
+			_ = b.db.RecordUserInvite(inviterRef, tgUser.ID, chatID)
+		}
+		user.IsBanned = true
+		if joinMsg != nil {
+			_ = b.DeleteGroupMessage(chatID, joinMsg.MessageID)
+		}
+		b.DeleteShieldyMessagesForUser(chatID, user.UserID, user.Username)
+		b.DeleteRecentMessagesForUser(user.UserID, chatID)
+		_ = b.BanUserAcrossAllGroups(user.UserID, chatID)
+		_ = b.db.SetReputation(user.UserID, -50, fmt.Sprintf("Autoban: in ban list (%s)", reasonStr), 0)
+		user.Reputation = -50
+		alertMsg := &db.Message{
+			ChatID:    chatID,
+			MessageID: 0,
+			UserID:    user.UserID,
+			Text:      fmt.Sprintf("[Autoban]: Joining user/bot @%s matched ban list (%s)", tgUser.UserName, reasonStr),
+			CreatedAt: time.Now(),
+		}
+		_ = b.SendTriggerBanAlert(chatID, user, alertMsg, fmt.Sprintf("Autoban: in ban list (%s)", reasonStr))
+		return
 	}
 
 	// Log the join event to SQLite

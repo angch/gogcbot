@@ -4390,3 +4390,127 @@ func TestEstablishedUser_MentionsNonMemberBot_NotBanned(t *testing.T) {
 		t.Errorf("expected established user with rep 50 to NOT be banned")
 	}
 }
+
+func TestPreBannedBot_SendsMessage_DeletedAndBannedImmediately_NotUnbannedBySelfHealing(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	groupChatID := int64(-1001072966891)
+	_ = b.db.SaveGroup(groupChatID, "Golang Malaysia", "supergroup")
+
+	var deletedMsgIDs []int
+	var bannedUserIDs []int64
+	b.SetMockRequestFunc(func(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+		if del, ok := c.(tgbotapi.DeleteMessageConfig); ok {
+			deletedMsgIDs = append(deletedMsgIDs, del.MessageID)
+		}
+		if ban, ok := c.(tgbotapi.BanChatMemberConfig); ok {
+			bannedUserIDs = append(bannedUserIDs, ban.UserID)
+		}
+		return &tgbotapi.APIResponse{Ok: true}, nil
+	})
+
+	// Telegram returns status: "left" for non-members without error
+	b.SetMockChatMemberFunc(func(config tgbotapi.GetChatMemberConfig) (tgbotapi.ChatMember, error) {
+		return tgbotapi.ChatMember{Status: "left"}, nil
+	})
+
+	// 1. Spammer 1385216194 posts bot mentions
+	spammerID := int64(1385216194)
+	spammerMsg := &tgbotapi.Message{
+		MessageID: 67219,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: spammerID, UserName: "agg18ca3", FirstName: "Catherine"},
+		Text:      "@atu9x_53bot  @w4nqwqw_bot  @u_dvsyo3bot",
+		Entities: []tgbotapi.MessageEntity{
+			{Type: "mention", Offset: 0, Length: 12},
+			{Type: "mention", Offset: 14, Length: 12},
+			{Type: "mention", Offset: 28, Length: 12},
+		},
+	}
+	b.handleMessage(spammerMsg)
+
+	// Verify spammer is banned
+	spammer, err := b.db.GetUserByID(spammerID)
+	if err != nil || spammer == nil || !spammer.IsBanned {
+		t.Fatalf("expected spammer %d to be banned", spammerID)
+	}
+
+	// Verify bots are in ban list
+	for _, botName := range []string{"atu9x_53bot", "w4nqwqw_bot", "u_dvsyo3bot"} {
+		isBanned, rec, err := b.db.IsUsernameBanned(botName)
+		if err != nil || !isBanned || rec == nil {
+			t.Fatalf("expected bot %s to be in ban list", botName)
+		}
+	}
+
+	// 2. Bot 8984501989 sends message (even empty string as in actual incident)
+	bot1ID := int64(8984501989)
+	bot1Msg := &tgbotapi.Message{
+		MessageID: 67220,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: bot1ID, UserName: "atu9x_53bot", FirstName: "ZOU76", IsBot: true},
+		Text:      "",
+	}
+	b.handleMessage(bot1Msg)
+
+	// Verify bot 8984501989 is banned and NOT self-healed
+	bot1, err := b.db.GetUserByID(bot1ID)
+	if err != nil || bot1 == nil {
+		t.Fatalf("failed to query bot1: %v", err)
+	}
+	if !bot1.IsBanned {
+		t.Errorf("expected bot 8984501989 to be banned, got is_banned=false")
+	}
+	if bot1.Reputation > -50 {
+		t.Errorf("expected bot 8984501989 reputation to be <= -50, got %d", bot1.Reputation)
+	}
+
+	// Verify message 67220 was deleted
+	foundDel := false
+	for _, mid := range deletedMsgIDs {
+		if mid == 67220 {
+			foundDel = true
+			break
+		}
+	}
+	if !foundDel {
+		t.Errorf("expected message 67220 to be deleted, got deletes: %v", deletedMsgIDs)
+	}
+
+	// 3. Bot 8709029843 sends message
+	bot2ID := int64(8709029843)
+	bot2Msg := &tgbotapi.Message{
+		MessageID: 67221,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: bot2ID, UserName: "w4nqwqw_bot", FirstName: "TRM02", IsBot: true},
+		Text:      "",
+	}
+	b.handleMessage(bot2Msg)
+
+	bot2, err := b.db.GetUserByID(bot2ID)
+	if err != nil || bot2 == nil || !bot2.IsBanned {
+		t.Errorf("expected bot 8709029843 to be banned, got %+v", bot2)
+	}
+	if bot2.Reputation > -50 {
+		t.Errorf("expected bot 8709029843 reputation to be <= -50, got %d", bot2.Reputation)
+	}
+
+	// 4. Bot 8672347542 sends message
+	bot3ID := int64(8672347542)
+	bot3Msg := &tgbotapi.Message{
+		MessageID: 67222,
+		Chat:      &tgbotapi.Chat{ID: groupChatID, Title: "Golang Malaysia", Type: "supergroup"},
+		From:      &tgbotapi.User{ID: bot3ID, UserName: "u_dvsyo3bot", FirstName: "VEL73", IsBot: true},
+		Text:      "",
+	}
+	b.handleMessage(bot3Msg)
+
+	bot3, err := b.db.GetUserByID(bot3ID)
+	if err != nil || bot3 == nil || !bot3.IsBanned {
+		t.Errorf("expected bot 8672347542 to be banned, got %+v", bot3)
+	}
+	if bot3.Reputation > -50 {
+		t.Errorf("expected bot 8672347542 reputation to be <= -50, got %d", bot3.Reputation)
+	}
+}

@@ -160,10 +160,11 @@ It manages Telegram groups by tracking user reputation scores, keeping a 7-day c
       - Issues a permanent ban across all monitored channels and supergroups (`ActionBanUser`).
       - Deducts reputation points (`-50`).
       - Dispatches a trigger ban alert to the Private Moderation Group.
-    - **Pre-Ban List Registration & Autoban on Join**: Any bots mentioned by the new unknown user that are not currently in the group are immediately recorded into the persistent `banned_usernames` ban list and associated in `user_invites` as invited by the banned sender. When any of the pre-banned bots later join any monitored group:
-      - The join service message and Shieldy challenges are purged immediately.
-      - The bot executes an immediate autoban across all monitored groups.
-      - The bot applies a -50 reputation penalty and alerts the moderation channel.
+    - **Pre-Ban List Registration & Autoban on Join & Message**: Any bots mentioned by the new unknown user are immediately recorded into the persistent `banned_usernames` ban list and associated in `user_invites` as invited by the banned sender. When any of the pre-banned bots or banned user invitees interact with any monitored group:
+      - **Join & Chat Member Interception**: Join messages and Shieldy challenges are purged immediately, and an immediate cross-group ban and -50 reputation penalty are applied.
+      - **Message Ingestion Defense**: Any messages posted by pre-banned bots or invitees of banned users (including empty service-like messages or initial posts) are immediately intercepted, deleted, purged across groups, and permanently autobanned without bypassing moderation.
+      - **Robust Self-Healing Verification**: Hardens Telegram UI unban self-healing to strictly require active Telegram membership (`member`, `administrator`, `creator`). Status `left` or non-participating accounts are never treated as unbanned, and accounts matching the ban list or invited by banned users are disqualified from self-healing.
+      - **Immediate Ban on Known IDs**: If a mentioned bot's user ID is already known (or resolved from database records), it is banned across all groups and purged immediately at the moment the spammer is banned.
     - **Historical Backfill**: Automatically scans historical messages from banned accounts to backfill previously mentioned bots into `banned_usernames`.
     - **Exemptions**: Bot administrators, whitelisted users (`reputation >= 100`), and established group members with reputation exceeding the threshold are strictly exempt. Mentions of the moderation bot itself or existing group members/admins do not trigger the rule.
 

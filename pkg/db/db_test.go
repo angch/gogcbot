@@ -2194,3 +2194,73 @@ func TestBannedUsernamesAndAutoban(t *testing.T) {
 		t.Errorf("expected kc15_cghbot to no longer be banned after removal")
 	}
 }
+
+func TestIsUserIDBannedInBanList_And_IsInvitedByBannedUser(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	spammerID := int64(1385216194)
+	botID := int64(8984501989)
+	chatID := int64(-1001072966891)
+
+	// Mark spammer as banned
+	_, _, _ = database.GetOrCreateUser(spammerID, "spammer", "Spam", "User", 0)
+	_ = database.SetUserBanned(spammerID, true)
+
+	// Add pre-banned bot to banned_usernames
+	err := database.AddBannedUsername("atu9x_53bot", botID, spammerID, chatID, "Invited by banned user 1385216194", true)
+	if err != nil {
+		t.Fatalf("failed to add banned username: %v", err)
+	}
+
+	// 1. Test IsUserIDBannedInBanList
+	isBanned, rec, err := database.IsUserIDBannedInBanList(botID)
+	if err != nil || !isBanned || rec == nil {
+		t.Fatalf("expected botID %d to match banned_usernames, got banned=%v, err=%v", botID, isBanned, err)
+	}
+	if rec.BannedByUserID != spammerID {
+		t.Errorf("expected BannedByUserID %d, got %d", spammerID, rec.BannedByUserID)
+	}
+
+	// Unknown user ID should not match
+	isBannedUnk, _, _ := database.IsUserIDBannedInBanList(111222333)
+	if isBannedUnk {
+		t.Errorf("expected unknown user ID to not match banned_usernames")
+	}
+
+	// 2. Test IsInvitedByBannedUser via user_invites
+	invitedUser2 := int64(777888999)
+	_ = database.RecordUserInvite(spammerID, invitedUser2, chatID)
+
+	isInvited, inviterID, err := database.IsInvitedByBannedUser(invitedUser2)
+	if err != nil || !isInvited || inviterID != spammerID {
+		t.Errorf("expected invitedUser2 to be detected as invited by banned user %d, got isInvited=%v, inviterID=%d, err=%v", spammerID, isInvited, inviterID, err)
+	}
+
+	// User invited by non-banned user
+	goodUserID := int64(555444333)
+	invitedUser3 := int64(222111000)
+	_, _, _ = database.GetOrCreateUser(goodUserID, "goodguy", "Good", "Guy", 50)
+	_ = database.RecordUserInvite(goodUserID, invitedUser3, chatID)
+
+	isInvitedGood, _, _ := database.IsInvitedByBannedUser(invitedUser3)
+	if isInvitedGood {
+		t.Errorf("expected user invited by non-banned user to return false")
+	}
+
+	// 3. Test GetRecursiveAssociatedUserIDs includes banned_usernames associations
+	assoc, err := database.GetRecursiveAssociatedUserIDs(spammerID)
+	if err != nil {
+		t.Fatalf("failed GetRecursiveAssociatedUserIDs: %v", err)
+	}
+	hasBot := false
+	for _, id := range assoc {
+		if id == botID {
+			hasBot = true
+			break
+		}
+	}
+	if !hasBot {
+		t.Errorf("expected recursive association for spammer %d to include bot %d, got %v", spammerID, botID, assoc)
+	}
+}
