@@ -3515,6 +3515,12 @@ func extractTriggerName(reason string) string {
 	if strings.Contains(reason, "chinese") {
 		return "new_user_chinese"
 	}
+	if strings.Contains(reason, "russian") {
+		return "new_user_russian"
+	}
+	if strings.Contains(reason, "cyrillic") {
+		return "new_user_cyrillic"
+	}
 	return "detection_trigger"
 }
 

@@ -24,10 +24,10 @@ type TriggerContext struct {
 	UserMessageCount       int    // Total posts by user in DB
 	ChatID                 int64
 	GroupTitle             string
-	HasVerifiedNotBot      bool   // True if user verified with "I am not a bot"
-	IsSecondaryGroup       bool   // True if the current chat is a secondary group
-	IsMemberOfPrimaryGroup bool   // True if user is verified to be a member of the primary group(s)
-	PrimaryGroupNames      string // Descriptive titles/IDs of primary group(s) checked
+	HasVerifiedNotBot      bool              // True if user verified with "I am not a bot"
+	IsSecondaryGroup       bool              // True if the current chat is a secondary group
+	IsMemberOfPrimaryGroup bool              // True if user is verified to be a member of the primary group(s)
+	PrimaryGroupNames      string            // Descriptive titles/IDs of primary group(s) checked
 	MentionedEntities      []MentionedEntity // Users and bots mentioned in the message
 }
 

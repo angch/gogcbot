@@ -799,6 +799,14 @@ func BuildDetector(cfg *config.Config, database *db.DB) *detector.Detector {
 		det.RegisterTrigger(detector.NewNewUserCJKTrigger(cjkCfg))
 	}
 
+	if cfg.Detector.NewUserRussian.Enabled || cfg.Detector.NewUserCyrillic.Enabled {
+		rusCfg := cfg.Detector.NewUserRussian
+		if !rusCfg.Enabled && cfg.Detector.NewUserCyrillic.Enabled {
+			rusCfg = cfg.Detector.NewUserCyrillic
+		}
+		det.RegisterTrigger(detector.NewNewUserRussianTrigger(rusCfg))
+	}
+
 	if cfg.Detector.NewUserSpamBio.Enabled {
 		spamBioCfg := cfg.Detector.NewUserSpamBio
 		var kws []string

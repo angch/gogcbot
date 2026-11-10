@@ -424,6 +424,79 @@ func TestHandleMessage_CJKSpamAfterFirstEmptyMessage_TriggersBan(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_RussianSpam_TriggersBan(t *testing.T) {
+	b, cleanup := setupTestBot(t)
+	defer cleanup()
+
+	b.cfg.ModerationGroupID = -100998877
+	b.cfg.Reputation.DefaultInitial = 0
+	b.cfg.Reputation.FlagThreshold = 40
+	b.cfg.Detector.Enabled = true
+	b.cfg.Detector.NewUserRussian.Enabled = true
+	b.cfg.Detector.NewUserRussian.MinHighUserID = 1000000000
+	b.cfg.Detector.NewUserRussian.MaxReputation = 5
+	b.cfg.Detector.NewUserRussian.MaxUserPosts = 5
+	b.cfg.Detector.NewUserRussian.RepPenalty = 20
+
+	det := detector.NewDetector(detector.NewNewUserRussianTrigger(b.cfg.Detector.NewUserRussian))
+	b.detector = det
+
+	chatID := int64(-1001072966891)
+	userID := int64(8760593389)
+
+	// Save group so it's monitored
+	_ = b.db.SaveGroup(chatID, "Test Monitored Group", "supergroup")
+
+	// Message: Russian crypto spam (matching message id 67376)
+	spamMsg := &tgbotapi.Message{
+		MessageID: 67376,
+		From: &tgbotapi.User{
+			ID:        userID,
+			UserName:  "kristina_aveeel",
+			FirstName: "Evelina",
+		},
+		Chat: &tgbotapi.Chat{
+			ID:    chatID,
+			Title: "Test Monitored Group",
+			Type:  "supergroup",
+		},
+		Text: "Буду покупать юсдт, пишите",
+		Date: int(time.Now().Unix()),
+	}
+	b.handleMessage(spamMsg)
+
+	userAfterSpam, err := b.db.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to get user after spam: %v", err)
+	}
+	if !userAfterSpam.IsBanned {
+		t.Errorf("expected user to be automatically banned after sending Russian spam message, but was not banned")
+	}
+	if userAfterSpam.Reputation != -20 {
+		t.Errorf("expected user reputation to be -20, got %d", userAfterSpam.Reputation)
+	}
+
+	// Verify trigger ban audit entry in flagged_posts
+	goodUsers, badUsers, err := b.db.GetUserDirectoryReport(b.cfg.SuperAdminID)
+	if err != nil {
+		t.Fatalf("failed to get user directory report: %v", err)
+	}
+	_ = goodUsers
+	var foundBad *db.UserReportItem
+	for i := range badUsers {
+		if badUsers[i].UserID == userID {
+			foundBad = &badUsers[i]
+			break
+		}
+	}
+	if foundBad == nil {
+		t.Fatalf("expected user %d in bad users report", userID)
+	}
+	if !foundBad.IsTriggerBan {
+		t.Errorf("expected IsTriggerBan to be true, got %+v", foundBad)
+	}
+}
+
 func TestExtractMessageText_MediaTypes(t *testing.T) {
 	// Plain text
 	m1 := &tgbotapi.Message{Text: "hello"}

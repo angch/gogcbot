@@ -38,6 +38,15 @@ func buildStandardTestDetector() *Detector {
 			MaxUserPosts:  5,
 			RepPenalty:    20,
 		}),
+		NewNewUserRussianTrigger(NewUserRussianTriggerConfig{
+			Enabled:          true,
+			MinHighUserID:    1000000000,
+			MaxReputation:    5,
+			MaxUserPosts:     5,
+			MinCyrillicChars: 2,
+			MinCyrillicRatio: 0.15,
+			RepPenalty:       20,
+		}),
 		NewNewUserSpamBioTrigger(NewUserSpamBioTriggerConfig{
 			Enabled:       true,
 			MaxReputation: 5,

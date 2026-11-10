@@ -39,6 +39,8 @@ type DetectorConfig struct {
 	Enabled               bool                                  `mapstructure:"enabled" yaml:"enabled"`
 	NewUserCJK            detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_cjk" yaml:"new_user_cjk"`
 	NewUserChinese        detector.NewUserCJKTriggerConfig      `mapstructure:"new_user_chinese" yaml:"new_user_chinese,omitempty"`
+	NewUserRussian        detector.NewUserRussianTriggerConfig  `mapstructure:"new_user_russian" yaml:"new_user_russian"`
+	NewUserCyrillic       detector.NewUserRussianTriggerConfig  `mapstructure:"new_user_cyrillic" yaml:"new_user_cyrillic,omitempty"`
 	NewUserSpamBio        detector.NewUserSpamBioTriggerConfig  `mapstructure:"new_user_spam_bio" yaml:"new_user_spam_bio"`
 	RedPacketName         detector.RedPacketNameTriggerConfig   `mapstructure:"red_packet_name" yaml:"red_packet_name"`
 	NewUserRedPacket      detector.RedPacketNameTriggerConfig   `mapstructure:"new_user_red_packet" yaml:"new_user_red_packet,omitempty"`
@@ -113,6 +115,15 @@ func DefaultConfig() Config {
 				MinCJKChars:   2,
 				MinCJKRatio:   0.15,
 				RepPenalty:    20,
+			},
+			NewUserRussian: detector.NewUserRussianTriggerConfig{
+				Enabled:          true,
+				MinHighUserID:    1000000000,
+				MaxReputation:    5,
+				MaxUserPosts:     5,
+				MinCyrillicChars: 2,
+				MinCyrillicRatio: 0.15,
+				RepPenalty:       20,
 			},
 			NewUserSpamBio: detector.NewUserSpamBioTriggerConfig{
 				Enabled:       true,
@@ -233,6 +244,22 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("detector.new_user_chinese.min_cjk_ratio", 0.15)
 	v.SetDefault("detector.new_user_chinese.rep_penalty", 20)
 
+	v.SetDefault("detector.new_user_russian.enabled", true)
+	v.SetDefault("detector.new_user_russian.min_high_user_id", int64(1000000000))
+	v.SetDefault("detector.new_user_russian.max_reputation", 5)
+	v.SetDefault("detector.new_user_russian.max_user_posts", 5)
+	v.SetDefault("detector.new_user_russian.min_cyrillic_chars", 2)
+	v.SetDefault("detector.new_user_russian.min_cyrillic_ratio", 0.15)
+	v.SetDefault("detector.new_user_russian.rep_penalty", 20)
+
+	v.SetDefault("detector.new_user_cyrillic.enabled", true)
+	v.SetDefault("detector.new_user_cyrillic.min_high_user_id", int64(1000000000))
+	v.SetDefault("detector.new_user_cyrillic.max_reputation", 5)
+	v.SetDefault("detector.new_user_cyrillic.max_user_posts", 5)
+	v.SetDefault("detector.new_user_cyrillic.min_cyrillic_chars", 2)
+	v.SetDefault("detector.new_user_cyrillic.min_cyrillic_ratio", 0.15)
+	v.SetDefault("detector.new_user_cyrillic.rep_penalty", 20)
+
 	v.SetDefault("detector.new_user_spam_bio.enabled", true)
 	v.SetDefault("detector.new_user_spam_bio.max_reputation", 5)
 	v.SetDefault("detector.new_user_spam_bio.max_user_posts", 5)
@@ -321,6 +348,10 @@ func LoadConfig(cfgFile string) (*Config, error) {
 
 	if (v.InConfig("detector.new_user_chinese") || cfg.Detector.NewUserChinese.MinHighUserID != 0 || cfg.Detector.NewUserChinese.RepPenalty != 0) && !v.InConfig("detector.new_user_cjk") {
 		cfg.Detector.NewUserCJK = cfg.Detector.NewUserChinese
+	}
+
+	if (v.InConfig("detector.new_user_cyrillic") || cfg.Detector.NewUserCyrillic.MinHighUserID != 0 || cfg.Detector.NewUserCyrillic.RepPenalty != 0) && !v.InConfig("detector.new_user_russian") {
+		cfg.Detector.NewUserRussian = cfg.Detector.NewUserCyrillic
 	}
 
 	if (v.InConfig("detector.new_user_red_packet") || cfg.Detector.NewUserRedPacket.MinHighUserID != 0 || cfg.Detector.NewUserRedPacket.RepPenalty != 0) && !v.InConfig("detector.red_packet_name") {

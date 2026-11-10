@@ -10,9 +10,9 @@ import (
 type NewUserMentionTriggerConfig struct {
 	Enabled       bool  `mapstructure:"enabled" yaml:"enabled"`
 	MinHighUserID int64 `mapstructure:"min_high_user_id" yaml:"min_high_user_id"` // Optional min user ID (0 to apply to any new user)
-	MaxReputation int   `mapstructure:"max_reputation" yaml:"max_reputation"`       // Default 5
-	MaxUserPosts  int   `mapstructure:"max_user_posts" yaml:"max_user_posts"`       // Default 5
-	RepPenalty    int   `mapstructure:"rep_penalty" yaml:"rep_penalty"`             // Default 50
+	MaxReputation int   `mapstructure:"max_reputation" yaml:"max_reputation"`     // Default 5
+	MaxUserPosts  int   `mapstructure:"max_user_posts" yaml:"max_user_posts"`     // Default 5
+	RepPenalty    int   `mapstructure:"rep_penalty" yaml:"rep_penalty"`           // Default 50
 }
 
 // NewUserMentionTrigger detects messages from brand-new, low-reputation users

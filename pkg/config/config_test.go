@@ -155,6 +155,15 @@ func TestDefaultConfig_DefaultInitialZero(t *testing.T) {
 	if cfg.Detector.NewUserCJK.MinHighUserID != 1000000000 {
 		t.Errorf("Expected MinHighUserID 1000000000, got %d", cfg.Detector.NewUserCJK.MinHighUserID)
 	}
+	if !cfg.Detector.NewUserRussian.Enabled {
+		t.Errorf("Expected Detector.NewUserRussian.Enabled to be true by default")
+	}
+	if cfg.Detector.NewUserRussian.MinHighUserID != 1000000000 {
+		t.Errorf("Expected MinHighUserID 1000000000, got %d", cfg.Detector.NewUserRussian.MinHighUserID)
+	}
+	if cfg.Detector.NewUserRussian.MinCyrillicChars != 2 {
+		t.Errorf("Expected MinCyrillicChars 2, got %d", cfg.Detector.NewUserRussian.MinCyrillicChars)
+	}
 	if !cfg.Detector.RedPacketName.Enabled {
 		t.Errorf("Expected Detector.RedPacketName.Enabled to be true by default")
 	}
@@ -287,5 +296,41 @@ detector:
 	}
 	if cfg.Detector.RedPacketName.RepPenalty != 40 {
 		t.Errorf("Expected RepPenalty 40, got %d", cfg.Detector.RedPacketName.RepPenalty)
+	}
+}
+
+func TestLoadConfig_NewUserCyrillicCompatibility(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "cyrillic_config.yaml")
+
+	content := `
+detector:
+  enabled: true
+  new_user_cyrillic:
+    enabled: true
+    min_high_user_id: 3000000000
+    max_reputation: 4
+    rep_penalty: 30
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if !cfg.Detector.NewUserRussian.Enabled {
+		t.Errorf("Expected NewUserRussian to be enabled from new_user_cyrillic config")
+	}
+	if cfg.Detector.NewUserRussian.MinHighUserID != 3000000000 {
+		t.Errorf("Expected MinHighUserID 3000000000, got %d", cfg.Detector.NewUserRussian.MinHighUserID)
+	}
+	if cfg.Detector.NewUserRussian.MaxReputation != 4 {
+		t.Errorf("Expected MaxReputation 4, got %d", cfg.Detector.NewUserRussian.MaxReputation)
+	}
+	if cfg.Detector.NewUserRussian.RepPenalty != 30 {
+		t.Errorf("Expected RepPenalty 30, got %d", cfg.Detector.NewUserRussian.RepPenalty)
 	}
 }
